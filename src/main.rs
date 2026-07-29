@@ -27,6 +27,10 @@ struct Cli {
     /// Place the command after `--`, for example: `b3 -- Rscript benchmark.R`.
     #[arg(long, required = true)]
     command: Vec<OsString>,
+
+    /// Control shrinkage of mean log ratios towards 0 by specifying a (prior) number of no-change pseudo-observations.
+    #[arg(long, default_value_t = 0)]
+    shrinkage: usize,
 }
 
 fn main() -> Result<()> {

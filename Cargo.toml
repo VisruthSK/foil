@@ -6,4 +6,6 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.4", features = ["derive"] }
+rand = "0.10.2"
+rand_distr = "0.6.0"
 tempfile = "3.27.0"
