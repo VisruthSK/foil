@@ -43,11 +43,17 @@ fn main() -> Result<()> {
     let baseline = Worktree::create(worktree_dir.path().join("baseline"), &cli.baseline)?;
     let candidate = Worktree::create(worktree_dir.path().join("candidate"), &cli.candidate)?;
 
-    let baseline_status = benchmark.run_in(baseline.path())?;
-    let candidate_status = benchmark.run_in(candidate.path())?;
+    let (baseline_status, baseline_duration) = benchmark.run_in(baseline.path())?;
+    let (candidate_status, candidate_duration) = benchmark.run_in(candidate.path())?;
 
-    println!("Baseline status: {baseline_status}");
-    println!("Candidate status: {candidate_status}");
+    println!(
+        "Baseline: {baseline_status}, {:.3} s",
+        baseline_duration.as_secs_f64()
+    );
+    println!(
+        "Candidate: {candidate_status}, {:.3} s",
+        candidate_duration.as_secs_f64()
+    );
 
     Ok(())
 }
