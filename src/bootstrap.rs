@@ -26,7 +26,7 @@ pub fn bootstrap_mean_log_ratios(
     let posterior = (0..draws)
         .map(|_| {
             let (sum, weight_sum) = ratios.iter().fold((0.0, 0.0), |(sum, weight_sum), &ratio| {
-                let weight = Exp1.sample(rng);
+                let weight: f64 = Exp1.sample(rng);
                 (sum + weight * ratio, weight_sum + weight)
             });
             let shrinkage_weight = shrinkage_weight

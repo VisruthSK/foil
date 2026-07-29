@@ -11,7 +11,7 @@ pub struct Worktree {
 impl Worktree {
     pub fn create(path: PathBuf, revision: &str) -> Result<Self> {
         let status = Command::new("git")
-            .args(["worktree", "add", "--detach"])
+            .args(["worktree", "add", "--quiet", "--detach"])
             .arg(&path)
             .arg(revision)
             .status()

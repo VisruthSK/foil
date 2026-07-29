@@ -1,3 +1,4 @@
+mod bootstrap;
 mod run;
 mod worktree;
 
@@ -7,6 +8,7 @@ use std::ffi::OsString;
 use std::num::NonZeroUsize;
 use tempfile::tempdir;
 
+use bootstrap::bootstrap_mean_log_ratios;
 use run::RunCommand;
 use worktree::Worktree;
 
@@ -81,16 +83,23 @@ fn main() -> Result<()> {
 
     ensure!(!baseline_times.is_empty(), "No successful benchmark pairs.");
 
-    let (baseline_status, baseline_duration) = benchmark.run_in(baseline.path())?;
-    let (candidate_status, candidate_duration) = benchmark.run_in(candidate.path())?;
+    let mut posterior = bootstrap_mean_log_ratios(
+        &baseline_times,
+        &candidate_times,
+        10_000,
+        cli.shrinkage,
+        &mut rand::rng(),
+    )?;
+
+    posterior.sort_by(f64::total_cmp);
+
+    let quantile = |p: f64| posterior[((posterior.len() - 1) as f64 * p).round() as usize];
 
     println!(
-        "Baseline: {baseline_status}, {:.3} s",
-        baseline_duration.as_secs_f64()
-    );
-    println!(
-        "Candidate: {candidate_status}, {:.3} s",
-        candidate_duration.as_secs_f64()
+        "Mean log ratio: {:.4} [{:.4}, {:.4}]",
+        quantile(0.5),
+        quantile(0.05),
+        quantile(0.95),
     );
 
     Ok(())
