@@ -1,9 +1,12 @@
+mod run;
 mod worktree;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::ffi::OsString;
 use tempfile::tempdir;
 
+use run::RunCommand;
 use worktree::Worktree;
 
 #[derive(Parser)]
@@ -11,23 +14,36 @@ use worktree::Worktree;
 #[command(version = "0.1.0")]
 #[command(about = "Bayesian Branch Benchmarking", long_about = None)]
 struct Cli {
+    /// Git revision used as the baseline.
     #[arg(short, long, default_value = "main")]
     baseline: String,
+
+    /// Git revision containing the candidate changes.
     #[arg(short, long, default_value = "HEAD")]
     candidate: String,
+
+    /// Benchmark program and arguments.
+    ///
+    /// Place the command after `--`, for example: `b3 -- Rscript benchmark.R`.
+    #[arg(long, required = true)]
+    command: Vec<OsString>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    println!("Base git ref: {:?}", cli.baseline);
-    println!("Candidate git ref: {:?}", cli.candidate);
+
+    let (program, args) = cli.command.split_first().context("No program provided.")?;
+    let benchmark = RunCommand::new(program.clone(), args.to_vec());
 
     let worktree_dir = tempdir().context("Failed to create temporary directory.")?;
     let baseline = Worktree::create(worktree_dir.path().join("baseline"), &cli.baseline)?;
     let candidate = Worktree::create(worktree_dir.path().join("candidate"), &cli.candidate)?;
 
-    println!("Baseline:  {}", baseline.path().display());
-    println!("Candidate: {}", candidate.path().display());
+    let baseline_status = benchmark.run_in(baseline.path())?;
+    let candidate_status = benchmark.run_in(candidate.path())?;
+
+    println!("Baseline status: {baseline_status}");
+    println!("Candidate status: {candidate_status}");
 
     Ok(())
 }
