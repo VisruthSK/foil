@@ -1,16 +1,19 @@
-use anyhow::{Context, Result, ensure};
+mod worktree;
+
+use anyhow::{Context, Result};
 use clap::Parser;
-use std::{path::Path, process::Command};
 use tempfile::tempdir;
+
+use worktree::Worktree;
 
 #[derive(Parser)]
 #[command(name = "b3")]
 #[command(version = "0.1.0")]
 #[command(about = "Bayesian Branch Benchmarking", long_about = None)]
 struct Cli {
-    #[arg(long)]
+    #[arg(short, long, default_value = "main")]
     baseline: String,
-    #[arg(long)]
+    #[arg(short, long, default_value = "HEAD")]
     candidate: String,
 }
 
@@ -20,49 +23,11 @@ fn main() -> Result<()> {
     println!("Candidate git ref: {:?}", cli.candidate);
 
     let worktree_dir = tempdir().context("Failed to create temporary directory.")?;
-    let baseline_path = worktree_dir.path().join("baseline");
-    let candidate_path = worktree_dir.path().join("candidate");
+    let baseline = Worktree::create(worktree_dir.path().join("baseline"), &cli.baseline)?;
+    let candidate = Worktree::create(worktree_dir.path().join("candidate"), &cli.candidate)?;
 
-    create_worktree(&baseline_path, &cli.baseline)?;
-    create_worktree(&candidate_path, &cli.candidate)?;
-
-    println!("Baseline:  {}", baseline_path.display());
-    println!("Candidate: {}", candidate_path.display());
-
-    remove_worktree(&baseline_path)?;
-    remove_worktree(&candidate_path)?;
-
-    Ok(())
-}
-
-fn create_worktree(path: &Path, revision: &str) -> Result<()> {
-    let status = Command::new("git")
-        .args(["worktree", "add", "--detach"])
-        .arg(path)
-        .arg(revision)
-        .status()
-        .context("Failed to run git.")?;
-
-    anyhow::ensure!(
-        status.success(),
-        "git worktree add failed for {revision} with {status}."
-    );
-
-    Ok(())
-}
-
-fn remove_worktree(path: &Path) -> Result<()> {
-    let status = Command::new("git")
-        .args(["worktree", "remove", "--force"])
-        .arg(path)
-        .status()
-        .context("failed to run git")?;
-
-    anyhow::ensure!(
-        status.success(),
-        "git worktree remove failed for {} with {status}.",
-        path.display()
-    );
+    println!("Baseline:  {}", baseline.path().display());
+    println!("Candidate: {}", candidate.path().display());
 
     Ok(())
 }
