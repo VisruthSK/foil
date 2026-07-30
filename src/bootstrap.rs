@@ -39,3 +39,19 @@ pub fn bootstrap_mean_log_ratios(
 
     Ok(posterior)
 }
+
+pub fn report_posterior(label: &str, unit: &str, posterior: &[f64], intervals: &[f64]) {
+    let quantile = |p: f64| posterior[((posterior.len() - 1) as f64 * p).round() as usize];
+
+    println!("{label}: {:+.4}{unit}", quantile(0.5));
+
+    for &width in intervals {
+        let tail = (1.0 - width) / 2.0;
+        println!(
+            "  {:.0}% CrI: [{:+.4}{unit}, {:+.4}{unit}]",
+            100.0 * width,
+            quantile(tail),
+            quantile(1.0 - tail),
+        );
+    }
+}

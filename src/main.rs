@@ -3,6 +3,7 @@ mod run;
 mod worktree;
 
 use bootstrap::bootstrap_mean_log_ratios;
+use bootstrap::report_posterior;
 use run::RunCommand;
 use worktree::Worktree;
 
@@ -40,6 +41,14 @@ struct Cli {
     #[arg(short, long, required = true)]
     repetitions: NonZeroUsize,
 
+    /// Number of Bayesian bootstrap draws.
+    #[arg(long, default_value = "10000")]
+    draws: NonZeroUsize,
+
+    /// Central credible interval widths.
+    #[arg(long = "interval", default_values = ["0.5", "0.8", "0.98"])]
+    intervals: Vec<f64>,
+
     /// Set a seed for reproducible benchmarking.
     #[arg(long)]
     seed: Option<u64>,
@@ -53,6 +62,13 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // TODO: move this to type somehow?
+    ensure!(
+        cli.intervals
+            .iter()
+            .all(|&width| 0.0 < width && width < 1.0),
+        "Intervals must be between 0 and 1."
+    );
 
     let (program, args) = cli.command.split_first().context("No program provided.")?;
     let benchmark = RunCommand::new(program.clone(), args.to_vec());
@@ -114,23 +130,16 @@ fn main() -> Result<()> {
     let mut posterior = bootstrap_mean_log_ratios(
         &baseline_times,
         &candidate_times,
-        // TODO: surface this as optional argument, defaults to 10k? 20k?
-        10_000,
+        cli.draws.get(),
         cli.shrinkage,
         &mut rng,
     )?;
-
     posterior.sort_by(f64::total_cmp);
 
-    let quantile = |p: f64| posterior[((posterior.len() - 1) as f64 * p).round() as usize];
-
-    println!(
-        "Mean log ratio: {:.4} [{:.4}, {:.4}]",
-        quantile(0.5),
-        // TODO: surface as optional argument (vector of interval widths: 0-1)
-        quantile(0.05),
-        quantile(0.95),
-    );
+    for value in &mut posterior {
+        *value = 100.0 * value.exp_m1();
+    }
+    report_posterior("Runtime change", "%", &posterior, &cli.intervals);
 
     Ok(())
 }
