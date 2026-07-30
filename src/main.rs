@@ -1,11 +1,7 @@
-mod posterior;
-mod run;
-mod worktree;
-
-use posterior::bootstrap_paired_means;
-use posterior::report_posterior;
-use run::RunCommand;
-use worktree::Worktree;
+use b3::{
+    posterior::bootstrap_paired_means, posterior::report_posterior, run::RunCommand,
+    worktree::Worktree,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;

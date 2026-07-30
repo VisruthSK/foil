@@ -44,6 +44,7 @@ pub fn bootstrap_paired_means(
     Ok(posterior)
 }
 
+// TODO: make internal somehow?
 pub fn report_posterior(posterior: &[(f64, f64)], intervals: &[f64]) {
     let (mut baseline, mut candidate): (Vec<f64>, Vec<f64>) = posterior.iter().copied().unzip();
     let mut absolute = Vec::with_capacity(posterior.len());
