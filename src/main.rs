@@ -2,15 +2,16 @@ mod bootstrap;
 mod run;
 mod worktree;
 
-use anyhow::{Context, Result, bail, ensure};
-use clap::Parser;
-use std::ffi::OsString;
-use std::num::NonZeroUsize;
-use tempfile::tempdir;
-
 use bootstrap::bootstrap_mean_log_ratios;
 use run::RunCommand;
 use worktree::Worktree;
+
+use anyhow::{Context, Result, bail, ensure};
+use clap::Parser;
+use rand::seq::SliceRandom;
+use std::ffi::OsString;
+use std::num::NonZeroUsize;
+use tempfile::tempdir;
 
 #[derive(Parser)]
 #[command(name = "b3")]
@@ -60,25 +61,42 @@ fn main() -> Result<()> {
     let mut baseline_times = Vec::with_capacity(repetitions);
     let mut candidate_times = Vec::with_capacity(repetitions);
 
-    for _ in 0..repetitions {
-        let (status, baseline_duration) = benchmark.run_in(baseline.path())?;
-        if !status.success() {
+    let mut rng = rand::rng();
+    let mut orders: Vec<bool> = (0..repetitions).map(|i| i % 2 == 0).collect();
+    orders.shuffle(&mut rng);
+
+    for baseline_first in orders {
+        let (first, second) = if baseline_first {
+            (&baseline, &candidate)
+        } else {
+            (&candidate, &baseline)
+        };
+
+        let first = benchmark.run_in(first.path())?;
+        let second = benchmark.run_in(second.path())?;
+
+        let (baseline_run, candidate_run) = if baseline_first {
+            (first, second)
+        } else {
+            (second, first)
+        };
+
+        if let Some((name, status)) = [
+            ("Baseline", &baseline_run.0),
+            ("Candidate", &candidate_run.0),
+        ]
+        .into_iter()
+        .find(|(_, status)| !status.success())
+        {
             if cli.skip_failing {
                 continue;
             }
-            bail!("Baseline benchmark failed with {status}.");
+
+            bail!("{name} benchmark failed with {status}.");
         }
 
-        let (status, candidate_duration) = benchmark.run_in(candidate.path())?;
-        if !status.success() {
-            if cli.skip_failing {
-                continue;
-            }
-            bail!("Candidate benchmark failed with {status}.");
-        }
-
-        baseline_times.push(baseline_duration.as_secs_f64());
-        candidate_times.push(candidate_duration.as_secs_f64());
+        baseline_times.push(baseline_run.1.as_secs_f64());
+        candidate_times.push(candidate_run.1.as_secs_f64());
     }
 
     ensure!(!baseline_times.is_empty(), "No successful benchmark pairs.");
@@ -86,9 +104,10 @@ fn main() -> Result<()> {
     let mut posterior = bootstrap_mean_log_ratios(
         &baseline_times,
         &candidate_times,
+        // TODO: surface this as optional argument, defaults to 10k? 20k?
         10_000,
         cli.shrinkage,
-        &mut rand::rng(),
+        &mut rng,
     )?;
 
     posterior.sort_by(f64::total_cmp);
@@ -98,6 +117,7 @@ fn main() -> Result<()> {
     println!(
         "Mean log ratio: {:.4} [{:.4}, {:.4}]",
         quantile(0.5),
+        // TODO: surface as optional argument (vector of interval widths: 0-1)
         quantile(0.05),
         quantile(0.95),
     );
