@@ -2,7 +2,7 @@ mod bootstrap;
 mod run;
 mod worktree;
 
-use bootstrap::bootstrap_mean_log_ratios;
+use bootstrap::bootstrap_paired_means;
 use bootstrap::report_posterior;
 use run::RunCommand;
 use worktree::Worktree;
@@ -127,19 +127,15 @@ fn main() -> Result<()> {
 
     ensure!(!baseline_times.is_empty(), "No successful benchmark pairs.");
 
-    let mut posterior = bootstrap_mean_log_ratios(
+    let posterior = bootstrap_paired_means(
         &baseline_times,
         &candidate_times,
         cli.draws.get(),
         cli.shrinkage,
         &mut rng,
     )?;
-    posterior.sort_by(f64::total_cmp);
 
-    for value in &mut posterior {
-        *value = 100.0 * value.exp_m1();
-    }
-    report_posterior("Runtime change", "%", &posterior, &cli.intervals);
+    report_posterior(&posterior, &cli.intervals);
 
     Ok(())
 }
