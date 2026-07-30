@@ -8,7 +8,7 @@ use worktree::Worktree;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
-use rand::seq::SliceRandom;
+use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::ffi::OsString;
 use std::num::NonZeroUsize;
 use tempfile::tempdir;
@@ -40,6 +40,10 @@ struct Cli {
     #[arg(short, long, required = true)]
     repetitions: NonZeroUsize,
 
+    /// Set a seed for reproducible benchmarking.
+    #[arg(long)]
+    seed: Option<u64>,
+
     /// Benchmark program and arguments.
     ///
     /// Place the command after `--`, for example: `b3 -- Rscript benchmark.R`.
@@ -61,8 +65,14 @@ fn main() -> Result<()> {
     let mut baseline_times = Vec::with_capacity(repetitions);
     let mut candidate_times = Vec::with_capacity(repetitions);
 
-    let mut rng = rand::rng();
-    let mut orders: Vec<bool> = (0..repetitions).map(|i| i % 2 == 0).collect();
+    let seed = cli.seed.unwrap_or_else(rand::random);
+    let mut rng = StdRng::seed_from_u64(seed);
+    eprintln!("Seed: {seed}");
+
+    let mut orders = [true, false].repeat(repetitions / 2);
+    if repetitions % 2 == 1 {
+        orders.push(rng.random());
+    }
     orders.shuffle(&mut rng);
 
     for baseline_first in orders {
