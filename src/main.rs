@@ -1,9 +1,9 @@
-mod bootstrap;
+mod posterior;
 mod run;
 mod worktree;
 
-use bootstrap::bootstrap_paired_means;
-use bootstrap::report_posterior;
+use posterior::bootstrap_paired_means;
+use posterior::report_posterior;
 use run::RunCommand;
 use worktree::Worktree;
 

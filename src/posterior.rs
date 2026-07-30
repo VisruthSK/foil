@@ -97,3 +97,26 @@ pub fn report_posterior(posterior: &[(f64, f64)], intervals: &[f64]) {
     println!();
     println!("P(candidate faster): {:.1}%", 100.0 * probability_faster);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    #[test]
+    fn bootstrap_paired_means_is_deterministic() -> Result<()> {
+        let baseline = [1.0, 2.0, 3.0, 4.0];
+        let candidate = [2.0, 3.0, 4.0, 5.0];
+
+        let mut rng_a = StdRng::seed_from_u64(0);
+        let mut rng_b = StdRng::seed_from_u64(0);
+
+        let posterior_a = bootstrap_paired_means(&baseline, &candidate, 1_000, 0, &mut rng_a)?;
+        let posterior_b = bootstrap_paired_means(&baseline, &candidate, 1_000, 0, &mut rng_b)?;
+
+        assert_eq!(posterior_a, posterior_b);
+
+        Ok(())
+    }
+}
