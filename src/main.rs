@@ -1,21 +1,16 @@
 use b3::{
-    posterior::RunOrder, posterior::bootstrap_paired_means, posterior::report_posterior,
-    run::RunCommand, worktree::Worktree,
+    RunCommand, RunOrder, Worktree, bootstrap_paired_means, report_posterior, write_posterior_csv,
 };
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
-use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
-use std::ffi::OsString;
-use std::fs::{File, create_dir};
-use std::io::{BufWriter, Write};
-use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus, seq::SliceRandom};
+use std::{ffi::OsString, fs::create_dir_all, num::NonZeroUsize, path::PathBuf};
 use tempfile::tempdir;
 
 #[derive(Parser)]
 #[command(name = "b3")]
-#[command(version = "0.1.0")]
+#[command(version)]
 #[command(about = "Bayesian Branch Benchmarking", long_about = None)]
 struct Cli {
     // TODO: reorder args into cogent order.
@@ -75,10 +70,10 @@ fn main() -> Result<()> {
     );
 
     let worktree_dir = tempdir().context("Failed to create temporary directory.")?;
-    create_dir(&cli.output_dir)
+    create_dir_all(&cli.output_dir)
         .with_context(|| format!("Failed to create output directory {:?}", cli.output_dir))?;
     let seed = cli.seed.unwrap_or_else(rand::random);
-    let mut rng = StdRng::seed_from_u64(seed);
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
     eprintln!("Seed: {seed}");
 
     // Setting up the benchmark call
@@ -166,21 +161,5 @@ fn main() -> Result<()> {
     std::fs::write(&report_path, report)
         .with_context(|| format!("Failed to write {}", report_path.display()))?;
 
-    Ok(())
-}
-
-// NOTE: could swap to CSV crate if this gets annoying
-fn write_posterior_csv(path: &Path, posterior: &[(f64, f64)]) -> Result<()> {
-    let file =
-        File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
-    let mut writer = BufWriter::new(file);
-
-    writeln!(writer, "baseline,candidate")?;
-
-    for &(baseline, candidate) in posterior {
-        writeln!(writer, "{baseline},{candidate}")?;
-    }
-
-    writer.flush()?;
     Ok(())
 }
