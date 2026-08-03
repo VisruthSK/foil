@@ -118,7 +118,7 @@ pub fn bootstrap_paired_means(
     baseline: &[f64],
     candidate: &[f64],
     orders: &[RunOrder],
-    run_positions: &[f64],
+    run_index: &[f64],
     draws: usize,
     shrinkage: f64,
     rng: &mut impl Rng,
@@ -135,7 +135,7 @@ pub fn bootstrap_paired_means(
         "Order count differs from sample count."
     );
     ensure!(
-        baseline.len() == run_positions.len(),
+        baseline.len() == run_index.len(),
         "Run-position count differs from sample count."
     );
     ensure!(
@@ -143,7 +143,7 @@ pub fn bootstrap_paired_means(
         "Both run orders are required."
     );
     ensure!(
-        run_positions.iter().all(|position| position.is_finite()),
+        run_index.iter().all(|position| position.is_finite()),
         "Run positions must be finite."
     );
     ensure!(draws > 0, "No posterior draws requested.");
@@ -155,17 +155,14 @@ pub fn bootstrap_paired_means(
     let shrinkage_weight = (shrinkage > 0.0)
         .then(|| Gamma::new(shrinkage, 1.0))
         .transpose()?;
-    let run_center = run_positions.iter().sum::<f64>() / run_positions.len() as f64;
+    let run_center = run_index.iter().sum::<f64>() / run_index.len() as f64;
 
     (0..draws)
         .map(|_| {
             let mut moments = WeightedRegressionMoments::default();
 
-            for (((&baseline, &candidate), &order), &run_position) in baseline
-                .iter()
-                .zip(candidate)
-                .zip(orders)
-                .zip(run_positions)
+            for (((&baseline, &candidate), &order), &run_position) in
+                baseline.iter().zip(candidate).zip(orders).zip(run_index)
             {
                 let weight: f64 = Exp1.sample(rng);
                 let run = run_position - run_center;
@@ -193,10 +190,13 @@ pub fn bootstrap_paired_means(
 }
 
 // TODO: make internal somehow?
-pub fn report_posterior(posterior: &[(f64, f64)], intervals: &[f64]) {
+use std::fmt::Write as _;
+
+pub fn report_posterior(posterior: &[(f64, f64)], intervals: &[f64]) -> String {
     let (mut baseline, mut candidate): (Vec<f64>, Vec<f64>) = posterior.iter().copied().unzip();
     let mut absolute = Vec::with_capacity(posterior.len());
     let mut relative = Vec::with_capacity(posterior.len());
+
     for &(baseline, candidate) in posterior {
         absolute.push(candidate - baseline);
         relative.push(100.0 * (candidate / baseline - 1.0));
@@ -209,7 +209,6 @@ pub fn report_posterior(posterior: &[(f64, f64)], intervals: &[f64]) {
 
     let quantile =
         |posterior: &[f64], p: f64| posterior[((posterior.len() - 1) as f64 * p).round() as usize];
-
     // TODO: move to custom duration derived type?
     let (scale, unit) = match quantile(&baseline, 0.5).max(quantile(&candidate, 0.5)) {
         x if x >= 1.0 => (1.0, "s"),
@@ -217,34 +216,60 @@ pub fn report_posterior(posterior: &[(f64, f64)], intervals: &[f64]) {
         x if x >= 1e-6 => (1e6, "µs"),
         _ => (1e9, "ns"),
     };
+    let mut report = String::new();
 
-    println!("Baseline:  {:.1}{unit}", scale * quantile(&baseline, 0.5));
-    println!("Candidate: {:.1}{unit}", scale * quantile(&candidate, 0.5));
-    println!();
+    writeln!(
+        report,
+        "Baseline:  {:.1}{unit}",
+        scale * quantile(&baseline, 0.5)
+    )
+    .unwrap();
 
-    println!(
+    writeln!(
+        report,
+        "Candidate: {:.1}{unit}",
+        scale * quantile(&candidate, 0.5)
+    )
+    .unwrap();
+
+    writeln!(report).unwrap();
+
+    writeln!(
+        report,
         "Change: {:+.1}{unit} ({:+.2}%)",
         scale * quantile(&absolute, 0.5),
         quantile(&relative, 0.5),
-    );
+    )
+    .unwrap();
 
     for &width in intervals {
         let tail = (1.0 - width) / 2.0;
-        println!(
+
+        writeln!(
+            report,
             "  {:.0}% CrI: [{:+.1}, {:+.1}]{unit} ({:+.2}%, {:+.2}%)",
             100.0 * width,
             scale * quantile(&absolute, tail),
             scale * quantile(&absolute, 1.0 - tail),
             quantile(&relative, tail),
             quantile(&relative, 1.0 - tail),
-        );
+        )
+        .unwrap();
     }
 
     let probability_faster =
         absolute.partition_point(|&change| change < 0.0) as f64 / absolute.len() as f64;
 
-    println!();
-    println!("P(candidate faster): {:.1}%", 100.0 * probability_faster);
+    writeln!(report).unwrap();
+
+    writeln!(
+        report,
+        "P(candidate faster): {:.1}%",
+        100.0 * probability_faster
+    )
+    .unwrap();
+
+    report
 }
 
 #[cfg(test)]
