@@ -1,6 +1,6 @@
 use b3::{
-    posterior::bootstrap_paired_means, posterior::report_posterior, run::RunCommand,
-    worktree::Worktree,
+    posterior::RunOrder, posterior::bootstrap_paired_means, posterior::report_posterior,
+    run::RunCommand, worktree::Worktree,
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -23,7 +23,7 @@ struct Cli {
     #[arg(short, long, default_value = "HEAD")]
     candidate: String,
 
-    /// Control shrinkage of mean log ratios towards 0 by specifying a (prior) number of no-change pseudo-observations.
+    /// Control shrinkage of the adjusted mean runtime difference toward 0 by specifying a prior number of no-change pseudo-observations.
     #[arg(long, default_value_t = 0.0)]
     shrinkage: f64,
 
@@ -65,6 +65,9 @@ fn main() -> Result<()> {
             .all(|&width| 0.0 < width && width < 1.0),
         "Intervals must be between 0 and 1."
     );
+    let seed = cli.seed.unwrap_or_else(rand::random);
+    let mut rng = StdRng::seed_from_u64(seed);
+    eprintln!("Seed: {seed}");
 
     let (program, args) = cli.command.split_first().context("No program provided.")?;
     let benchmark = RunCommand::new(program.clone(), args.to_vec());
@@ -76,19 +79,16 @@ fn main() -> Result<()> {
     let repetitions = cli.repetitions.get();
     let mut baseline_times = Vec::with_capacity(repetitions);
     let mut candidate_times = Vec::with_capacity(repetitions);
-    let mut baseline_firsts = Vec::with_capacity(repetitions);
+    let mut orders = Vec::with_capacity(repetitions);
+    let mut run_positions = Vec::with_capacity(repetitions);
 
-    let seed = cli.seed.unwrap_or_else(rand::random);
-    let mut rng = StdRng::seed_from_u64(seed);
-    eprintln!("Seed: {seed}");
-
-    let mut orders = [true, false].repeat(repetitions / 2);
+    let mut baseline_firsts = [true, false].repeat(repetitions / 2);
     if repetitions % 2 == 1 {
-        orders.push(rng.random());
+        baseline_firsts.push(rng.random());
     }
-    orders.shuffle(&mut rng);
+    baseline_firsts.shuffle(&mut rng);
 
-    for baseline_first in orders {
+    for (pair_index, baseline_first) in baseline_firsts.into_iter().enumerate() {
         let (first, second) = if baseline_first {
             (&baseline, &candidate)
         } else {
@@ -120,7 +120,12 @@ fn main() -> Result<()> {
 
         baseline_times.push(baseline_run.1.as_secs_f64());
         candidate_times.push(candidate_run.1.as_secs_f64());
-        baseline_firsts.push(f64::from(baseline_first));
+        orders.push(if baseline_first {
+            RunOrder::BaselineFirst
+        } else {
+            RunOrder::CandidateFirst
+        });
+        run_positions.push(pair_index as f64);
     }
 
     ensure!(!baseline_times.is_empty(), "No successful benchmark pairs.");
@@ -128,7 +133,8 @@ fn main() -> Result<()> {
     let posterior = bootstrap_paired_means(
         &baseline_times,
         &candidate_times,
-        &baseline_firsts,
+        &orders,
+        &run_positions,
         cli.draws.get(),
         cli.shrinkage,
         &mut rng,
