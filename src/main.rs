@@ -24,8 +24,8 @@ struct Cli {
     candidate: String,
 
     /// Control shrinkage of mean log ratios towards 0 by specifying a (prior) number of no-change pseudo-observations.
-    #[arg(long, default_value_t = 0)]
-    shrinkage: usize,
+    #[arg(long, default_value_t = 0.0)]
+    shrinkage: f64,
 
     /// Skip repetition pairs where either benchmark exits unsuccessfully.
     #[arg(long)]
@@ -76,6 +76,7 @@ fn main() -> Result<()> {
     let repetitions = cli.repetitions.get();
     let mut baseline_times = Vec::with_capacity(repetitions);
     let mut candidate_times = Vec::with_capacity(repetitions);
+    let mut baseline_firsts = Vec::with_capacity(repetitions);
 
     let seed = cli.seed.unwrap_or_else(rand::random);
     let mut rng = StdRng::seed_from_u64(seed);
@@ -119,6 +120,7 @@ fn main() -> Result<()> {
 
         baseline_times.push(baseline_run.1.as_secs_f64());
         candidate_times.push(candidate_run.1.as_secs_f64());
+        baseline_firsts.push(f64::from(baseline_first));
     }
 
     ensure!(!baseline_times.is_empty(), "No successful benchmark pairs.");
@@ -126,6 +128,7 @@ fn main() -> Result<()> {
     let posterior = bootstrap_paired_means(
         &baseline_times,
         &candidate_times,
+        &baseline_firsts,
         cli.draws.get(),
         cli.shrinkage,
         &mut rng,

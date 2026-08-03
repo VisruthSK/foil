@@ -6,15 +6,16 @@ use rand_distr::{Distribution, Exp1, Gamma};
 pub fn bootstrap_paired_means(
     baseline: &[f64],
     candidate: &[f64],
+    baseline_firsts: &[f64],
     draws: usize,
-    shrinkage: usize,
+    shrinkage: f64,
     rng: &mut impl Rng,
 ) -> Result<Vec<(f64, f64)>> {
     ensure!(!baseline.is_empty(), "No samples provided.");
     ensure!(baseline.len() == candidate.len(), "Sample counts differ.");
 
-    let shrinkage_weight = (shrinkage > 0)
-        .then(|| Gamma::new(shrinkage as f64, 1.0))
+    let shrinkage_weight = (shrinkage > 0.0)
+        .then(|| Gamma::new(shrinkage, 1.0))
         .transpose()?;
 
     let posterior = (0..draws)
@@ -109,12 +110,27 @@ mod tests {
     fn bootstrap_paired_means_is_deterministic() -> Result<()> {
         let baseline = [1.0, 2.0, 3.0, 4.0];
         let candidate = [2.0, 3.0, 4.0, 5.0];
+        let baseline_firsts = [0.0, 0.0, 1.0, 1.0];
 
         let mut rng_a = StdRng::seed_from_u64(0);
         let mut rng_b = StdRng::seed_from_u64(0);
 
-        let posterior_a = bootstrap_paired_means(&baseline, &candidate, 1_000, 0, &mut rng_a)?;
-        let posterior_b = bootstrap_paired_means(&baseline, &candidate, 1_000, 0, &mut rng_b)?;
+        let posterior_a = bootstrap_paired_means(
+            &baseline,
+            &candidate,
+            &baseline_firsts,
+            1_000,
+            0.0,
+            &mut rng_a,
+        )?;
+        let posterior_b = bootstrap_paired_means(
+            &baseline,
+            &candidate,
+            &baseline_firsts,
+            1_000,
+            0.0,
+            &mut rng_b,
+        )?;
 
         assert_eq!(posterior_a, posterior_b);
 
