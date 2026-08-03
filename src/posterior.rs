@@ -20,20 +20,23 @@ impl RunOrder {
 
 /// Weight-summed products of the predictors: centered run position and order
 /// contrast. Together with the intercept column these form the Gram matrix
-/// `Xᵀ W X` shared by both regressions.
+/// $X^\top W X$ shared by both regressions.
+///
+/// Throughout, $w_i$ is the bootstrap weight of pair $i$, $r_i$ its centered run
+/// position, $o_i$ its order contrast, and $y_i$ its response.
 #[derive(Default)]
 struct WeightedDesign {
-    /// `Σ wᵢ`
+    /// $\sum_i w_i$
     sum_weight: f64,
-    /// `Σ wᵢ runᵢ`
+    /// $\sum_i w_i r_i$
     sum_run: f64,
-    /// `Σ wᵢ orderᵢ`
+    /// $\sum_i w_i o_i$
     sum_order: f64,
-    /// `Σ wᵢ runᵢ²`
+    /// $\sum_i w_i r_i^2$
     sum_run_run: f64,
-    /// `Σ wᵢ runᵢ orderᵢ`
+    /// $\sum_i w_i r_i o_i$
     sum_run_order: f64,
-    /// `Σ wᵢ orderᵢ²`
+    /// $\sum_i w_i o_i^2$
     sum_order_order: f64,
 }
 
@@ -77,14 +80,14 @@ impl WeightedDesign {
 }
 
 /// Weight-summed products of one response with the shared design, forming that
-/// regression's right-hand side `Xᵀ W y`.
+/// regression's right-hand side $X^\top W y$.
 #[derive(Default)]
 struct WeightedResponse {
-    /// `Σ wᵢ yᵢ`
+    /// $\sum_i w_i y_i$
     sum_response: f64,
-    /// `Σ wᵢ runᵢ yᵢ`
+    /// $\sum_i w_i r_i y_i$
     sum_run_response: f64,
-    /// `Σ wᵢ orderᵢ yᵢ`
+    /// $\sum_i w_i o_i y_i$
     sum_order_response: f64,
 }
 
