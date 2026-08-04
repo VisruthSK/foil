@@ -1,20 +1,38 @@
-use anyhow::{Result, ensure};
+use crate::metric::Metric;
+use crate::repetition::Repetitions;
+use crate::summary::{Interval, Summary};
+
+use anyhow::{Context, Result, ensure};
 use rand::Rng;
 use rand_distr::{Distribution, Exp1, Gamma};
+use std::{num::NonZeroUsize, str::FromStr};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RunOrder {
-    CandidateFirst,
-    BaselineFirst,
+struct RegressionRow {
+    midpoint: f64,
+    difference: f64,
+    run: f64,
+    order: f64,
 }
 
-impl RunOrder {
-    /// Effect coding of the order contrast used by the regressions.
-    pub const fn effect_code(self) -> f64 {
-        match self {
-            Self::CandidateFirst => -1.0,
-            Self::BaselineFirst => 1.0,
-        }
+impl RegressionRow {
+    fn all<M: Metric>(repetitions: &Repetitions) -> Result<Vec<Self>> {
+        let center = repetitions.center();
+
+        repetitions
+            .iter()
+            .enumerate()
+            .map(|(position, repetition)| {
+                let baseline = M::read(&repetition.outputs.baseline)?.base();
+                let candidate = M::read(&repetition.outputs.candidate)?.base();
+
+                Ok(Self {
+                    midpoint: 0.5 * (baseline + candidate),
+                    difference: candidate - baseline,
+                    run: position as f64 - center,
+                    order: repetition.order.effect_code(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -22,45 +40,38 @@ impl RunOrder {
 /// contrast. Together with the intercept column these form the Gram matrix
 /// $X^\top W X$ shared by both regressions.
 ///
-/// Throughout, $w_i$ is the bootstrap weight of pair $i$, $r_i$ its centered run
+/// Throughout, $w_i$ is the bootstrap weight of repetition $i$, $r_i$ its centered run
 /// position, $o_i$ its order contrast, and $y_i$ its response.
 #[derive(Default)]
 struct WeightedDesign {
-    /// $\sum_i w_i$
+    /// $\sum_i w_i$.
     sum_weight: f64,
-    /// $\sum_i w_i r_i$
+    /// $\sum_i w_i r_i$.
     sum_run: f64,
-    /// $\sum_i w_i o_i$
+    /// $\sum_i w_i o_i$.
     sum_order: f64,
-    /// $\sum_i w_i r_i^2$
+    /// $\sum_i w_i r_i^2$.
     sum_run_run: f64,
-    /// $\sum_i w_i r_i o_i$
+    /// $\sum_i w_i r_i o_i$.
     sum_run_order: f64,
-    /// $\sum_i w_i o_i^2$
-    sum_order_order: f64,
 }
 
 impl WeightedDesign {
-    fn add_observation(&mut self, weight: f64, run: f64, order: f64) {
+    fn add_observation(&mut self, weight: f64, row: &RegressionRow) {
         self.sum_weight += weight;
-        self.sum_run += weight * run;
-        self.sum_order += weight * order;
-        self.sum_run_run += weight * run * run;
-        self.sum_run_order += weight * run * order;
-        self.sum_order_order += weight * order * order;
+        self.sum_run += weight * row.run;
+        self.sum_order += weight * row.order;
+        self.sum_run_run += weight * row.run * row.run;
+        self.sum_run_order += weight * row.run * row.order;
     }
 
-    /// Fitted value of `response` at run = order = 0, optionally adding a
-    /// (0, 0, 0) pseudo-observation.
+    /// Fitted value of `response` at run = order = 0, optionally adding a (0, 0, 0) pseudo-observation.
     fn intercept(&self, response: &WeightedResponse, prior_weight: f64) -> Result<f64> {
-        // The pseudo-observation contributes weight alone. Sweeping out the
-        // intercept leaves the moments below centered on their weighted means;
-        // `sum_`-prefixed values are the raw accumulations.
         let sum_weight = self.sum_weight + prior_weight;
 
         let run_run = self.sum_run_run - self.sum_run * self.sum_run / sum_weight;
         let run_order = self.sum_run_order - self.sum_run * self.sum_order / sum_weight;
-        let order_order = self.sum_order_order - self.sum_order * self.sum_order / sum_weight;
+        let order_order = self.sum_weight - self.sum_order * self.sum_order / sum_weight;
         let run_response =
             response.sum_run_response - self.sum_run * response.sum_response / sum_weight;
         let order_response =
@@ -79,23 +90,22 @@ impl WeightedDesign {
     }
 }
 
-/// Weight-summed products of one response with the shared design, forming that
-/// regression's right-hand side $X^\top W y$.
+/// Weight-summed products of one response with the shared design, forming that regression's right-hand side $X^\top W y$.
 #[derive(Default)]
 struct WeightedResponse {
-    /// $\sum_i w_i y_i$
+    /// $\sum_i w_i y_i$.
     sum_response: f64,
-    /// $\sum_i w_i r_i y_i$
+    /// $\sum_i w_i r_i y_i$.
     sum_run_response: f64,
-    /// $\sum_i w_i o_i y_i$
+    /// $\sum_i w_i o_i y_i$.
     sum_order_response: f64,
 }
 
 impl WeightedResponse {
-    fn add_observation(&mut self, weight: f64, run: f64, order: f64, response: f64) {
+    fn add_observation(&mut self, weight: f64, row: &RegressionRow, response: f64) {
         self.sum_response += weight * response;
-        self.sum_run_response += weight * run * response;
-        self.sum_order_response += weight * order * response;
+        self.sum_run_response += weight * row.run * response;
+        self.sum_order_response += weight * row.order * response;
     }
 }
 
@@ -108,98 +118,142 @@ struct WeightedRegressionMoments {
 }
 
 impl WeightedRegressionMoments {
-    fn add_pair(&mut self, weight: f64, run: f64, order: f64, midpoint: f64, difference: f64) {
-        self.design.add_observation(weight, run, order);
-        self.midpoint.add_observation(weight, run, order, midpoint);
-        self.difference
-            .add_observation(weight, run, order, difference);
+    /// Folds one weighted row into the sums.
+    fn add(&mut self, weight: f64, row: &RegressionRow) {
+        self.design.add_observation(weight, row);
+        self.midpoint.add_observation(weight, row, row.midpoint);
+        self.difference.add_observation(weight, row, row.difference);
     }
 }
 
-/// Draws Bayesian-bootstrap samples of drift- and order-adjusted mean baseline and candidate runtimes.
-pub fn bootstrap_paired_means(
-    baseline: &[f64],
-    candidate: &[f64],
-    orders: &[RunOrder],
-    run_index: &[f64],
-    draws: usize,
-    shrinkage: f64,
-    rng: &mut impl Rng,
-) -> Result<Vec<(f64, f64)>> {
-    // TODO: move some checks to types
-    // TODO: move some checks to CLI
-    ensure!(
-        baseline.len() >= 10,
-        "At least ten paired samples are required."
-    );
-    ensure!(baseline.len() == candidate.len(), "Sample counts differ.");
-    ensure!(
-        baseline.len() == orders.len(),
-        "Order count differs from sample count."
-    );
-    ensure!(
-        baseline.len() == run_index.len(),
-        "Run-position count differs from sample count."
-    );
-    ensure!(
-        orders.contains(&RunOrder::CandidateFirst) && orders.contains(&RunOrder::BaselineFirst),
-        "Both run orders are required."
-    );
-    ensure!(
-        run_index.iter().all(|position| position.is_finite()),
-        "Run positions must be finite."
-    );
-    ensure!(draws > 0, "No posterior draws requested.");
-    ensure!(
-        shrinkage.is_finite() && shrinkage >= 0.0,
-        "Shrinkage must be finite and nonnegative."
-    );
+/// A prior count of no-change pseudo-observations, finite and nonnegative.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shrinkage(f64);
 
-    let shrinkage_weight = (shrinkage > 0.0)
-        .then(|| Gamma::new(shrinkage, 1.0))
-        .transpose()?;
-    let run_center = run_index.iter().sum::<f64>() / run_index.len() as f64;
+impl Shrinkage {
+    pub const NONE: Self = Self(0.0);
 
-    (0..draws)
-        .map(|_| {
-            let mut moments = WeightedRegressionMoments::default();
+    pub fn new(value: f64) -> Result<Self> {
+        ensure!(
+            value.is_finite() && value >= 0.0,
+            "Shrinkage must be finite and nonnegative, got {value}."
+        );
 
-            for (((&baseline, &candidate), &order), &run_position) in
-                baseline.iter().zip(candidate).zip(orders).zip(run_index)
-            {
-                let weight: f64 = Exp1.sample(rng);
-                let run = run_position - run_center;
+        Ok(Self(value))
+    }
 
-                moments.add_pair(
-                    weight,
-                    run,
-                    order.effect_code(),
-                    0.5 * (baseline + candidate),
-                    candidate - baseline,
-                );
-            }
+    pub const fn get(self) -> f64 {
+        self.0
+    }
+}
 
-            let midpoint = moments.design.intercept(&moments.midpoint, 0.0)?;
-            let difference = moments.design.intercept(
-                &moments.difference,
-                shrinkage_weight
-                    .as_ref()
-                    .map_or(0.0, |distribution| distribution.sample(rng)),
-            )?;
+impl FromStr for Shrinkage {
+    type Err = anyhow::Error;
 
-            Ok((midpoint - 0.5 * difference, midpoint + 0.5 * difference))
-        })
-        .collect()
+    fn from_str(text: &str) -> Result<Self> {
+        Self::new(
+            text.parse()
+                .with_context(|| format!("`{text}` is not a number."))?,
+        )
+    }
+}
+
+/// One Bayesian-bootstrap draw of the drift and order adjusted mean baseline and candidate value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Draw<M> {
+    pub baseline: M,
+    pub candidate: M,
+}
+
+impl<M: Metric> Draw<M> {
+    pub fn absolute(self) -> M {
+        M::from_base(self.candidate.base() - self.baseline.base())
+    }
+
+    pub fn relative(self) -> Option<f64> {
+        let baseline = self.baseline.base();
+
+        (baseline != 0.0).then(|| 100.0 * (self.candidate.base() / baseline - 1.0))
+    }
+}
+
+/// Posterior draws of one metric's adjusted means.
+pub struct Posterior<M> {
+    draws: Vec<Draw<M>>,
+}
+
+impl<M: Metric> Posterior<M> {
+    /// Draws Bayesian-bootstrap samples of the adjusted mean baseline and candidate value.
+    pub fn bootstrap(
+        repetitions: &Repetitions,
+        draws: NonZeroUsize,
+        shrinkage: Shrinkage,
+        rng: &mut impl Rng,
+    ) -> Result<Self> {
+        let shrinkage_distribution = if shrinkage.0 == 0.0 {
+            None
+        } else {
+            Some(Gamma::new(shrinkage.0, 1.0)?)
+        };
+        let rows = RegressionRow::all::<M>(repetitions)?;
+
+        (0..draws.get())
+            .map(|_| {
+                let mut moments = WeightedRegressionMoments::default();
+
+                for row in &rows {
+                    moments.add(Exp1.sample(rng), row);
+                }
+
+                let midpoint = moments.design.intercept(&moments.midpoint, 0.0)?;
+
+                let prior_weight = match &shrinkage_distribution {
+                    Some(distribution) => distribution.sample(rng),
+                    None => 0.0,
+                };
+
+                let difference = moments
+                    .design
+                    .intercept(&moments.difference, prior_weight)?;
+
+                Ok(Draw {
+                    baseline: M::from_base(midpoint - 0.5 * difference),
+                    candidate: M::from_base(midpoint + 0.5 * difference),
+                })
+            })
+            .collect::<Result<_>>()
+            .map(|draws| Self { draws })
+    }
+
+    /// Never empty.
+    pub fn draws(&self) -> &[Draw<M>] {
+        &self.draws
+    }
+
+    pub fn summarize(&self, intervals: &[Interval]) -> Result<Summary<M>> {
+        Summary::from_draws(&self.draws, intervals)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
+    use crate::artifact::write_posterior_csv;
+    use crate::metric::{PeakMemory, Time};
+    use crate::repetition::{Pair, Repetition, RunOrder};
+    use crate::run::{Bytes, RunOutput};
+    use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
+    use std::fs::read_to_string;
+    use std::process::ExitStatus;
+    use std::time::Duration;
+    use tempfile::tempdir;
 
-    #[test]
-    fn bootstrap_paired_means_is_deterministic() -> Result<()> {
+    /// Ten paired repetitions carrying a mild upward drift, with both run orders
+    /// represented so `Repetitions` accepts them.
+    ///
+    /// Memory is left at zero throughout, which is what lets a test detect a metric
+    /// that reads the wrong field.
+    fn fixture() -> Result<Repetitions> {
         let baseline = [1.00, 1.08, 1.13, 1.18, 1.27, 1.31, 1.39, 1.44, 1.53, 1.59];
         let candidate = [1.04, 1.06, 1.19, 1.17, 1.31, 1.30, 1.46, 1.41, 1.58, 1.61];
         let orders = [
@@ -214,31 +268,173 @@ mod tests {
             RunOrder::BaselineFirst,
             RunOrder::CandidateFirst,
         ];
-        let run_positions = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
 
-        let mut rng_a = StdRng::seed_from_u64(0);
-        let mut rng_b = StdRng::seed_from_u64(0);
+        // `ExitStatus::default()` is exit 0, so these read as successful runs.
+        let measure = |seconds: f64| {
+            RunOutput::new(
+                ExitStatus::default(),
+                Duration::from_secs_f64(seconds),
+                Some(Bytes::ZERO),
+            )
+        };
 
-        let posterior_a = bootstrap_paired_means(
-            &baseline,
-            &candidate,
-            &orders,
-            &run_positions,
-            1_000,
-            0.0,
-            &mut rng_a,
-        )?;
-        let posterior_b = bootstrap_paired_means(
-            &baseline,
-            &candidate,
-            &orders,
-            &run_positions,
-            1_000,
-            0.0,
-            &mut rng_b,
-        )?;
+        (0..baseline.len())
+            .map(|position| Repetition {
+                outputs: Pair {
+                    baseline: measure(baseline[position]),
+                    candidate: measure(candidate[position]),
+                },
+                order: orders[position],
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+    }
 
-        assert_eq!(posterior_a, posterior_b);
+    /// The generator every golden is pinned to.
+    ///
+    /// `Xoshiro256PlusPlus` rather than `StdRng`, whose stream `rand` is free to
+    /// change between releases. That would invalidate the goldens without any change
+    /// to this crate, and it is also the generator `main` uses.
+    fn rng() -> Xoshiro256PlusPlus {
+        Xoshiro256PlusPlus::seed_from_u64(0)
+    }
+
+    /// The fixture's posterior for `M` at seed 0.
+    fn posterior<M: Metric>(draws: usize, shrinkage: f64) -> Result<Posterior<M>> {
+        let draws = NonZeroUsize::new(draws).expect("Test draw counts are positive.");
+
+        Posterior::bootstrap(&fixture()?, draws, Shrinkage::new(shrinkage)?, &mut rng())
+    }
+
+    /// Eight time draws, for golden comparison.
+    fn golden(shrinkage: f64) -> Result<Vec<(f64, f64)>> {
+        Ok(posterior::<Time>(8, shrinkage)?
+            .draws()
+            .iter()
+            .map(|draw| (draw.baseline.base(), draw.candidate.base()))
+            .collect())
+    }
+
+    /// Pins the adjusted means bit for bit. Any change to the arithmetic, the order of
+    /// RNG consumption, or the fixture moves these numbers, so a refactor meant to be
+    /// inert fails here.
+    ///
+    /// These say nothing about whether the model is correct. They were generated from
+    /// the code they check, so they catch drift, not error.
+    #[test]
+    fn unshrunk_posterior_matches_golden() -> Result<()> {
+        #[rustfmt::skip]
+        const EXPECTED: [(f64, f64); 8] = [
+            (1.2947094189758073, 1.3181596849182757),
+            (1.295794106123628,  1.3142782690813486),
+            (1.2901681962200746, 1.3153286953279186),
+            (1.2948331312861074, 1.3383861101432366),
+            (1.2943604503099142, 1.3140897265174492),
+            (1.287205483379233,  1.295401275903725),
+            (1.2873420629313597, 1.2950401423013826),
+            (1.2917392395536966, 1.3134285293933505),
+        ];
+
+        assert_eq!(golden(0.0)?, EXPECTED);
+
+        Ok(())
+    }
+
+    /// Same, through the `Gamma` path, which a shrinkage of zero skips entirely.
+    #[test]
+    fn shrunk_posterior_matches_golden() -> Result<()> {
+        #[rustfmt::skip]
+        const EXPECTED: [(f64, f64); 8] = [
+            (1.2987470681009876, 1.3141220357930954),
+            (1.3034419507117767, 1.3148530015498219),
+            (1.3034869031980645, 1.3229031219464489),
+            (1.2963181289876267, 1.3077913512511117),
+            (1.2963354841261892, 1.3072501069680238),
+            (1.2888327854737045, 1.2935494197590378),
+            (1.2974459759699728, 1.311355238500543),
+            (1.2885189566400441, 1.2988151609969736),
+        ];
+
+        assert_eq!(golden(5.0)?, EXPECTED);
+
+        Ok(())
+    }
+
+    /// Typical magnitude of the adjusted difference across a posterior.
+    ///
+    /// Compared distributionally rather than draw by draw: a shrunk run pulls one extra
+    /// `Gamma` sample per draw, so its weight stream diverges from an unshrunk run's and
+    /// the two are not paired.
+    fn median_absolute_difference(shrinkage: f64) -> Result<f64> {
+        let mut differences: Vec<f64> = posterior::<Time>(4_000, shrinkage)?
+            .draws()
+            .iter()
+            .map(|draw| draw.absolute().base().abs())
+            .collect();
+
+        differences.sort_by(f64::total_cmp);
+
+        Ok(differences[differences.len() / 2])
+    }
+
+    /// More shrinkage has to pull the adjusted difference further toward zero.
+    #[test]
+    fn shrinkage_narrows_the_difference() -> Result<()> {
+        let none = median_absolute_difference(0.0)?;
+        let some = median_absolute_difference(5.0)?;
+        let lots = median_absolute_difference(50.0)?;
+
+        assert!(
+            lots < some && some < none,
+            "Expected monotone narrowing, got none={none}, five={some}, fifty={lots}."
+        );
+
+        Ok(())
+    }
+
+    /// Pins the machine-readable side: header, column order, and the full precision a
+    /// reader needs to reproduce the summary.
+    #[test]
+    fn posterior_csv_matches_golden() -> Result<()> {
+        const EXPECTED: &str = concat!(
+            "baseline_seconds,candidate_seconds\n",
+            "1.2947094189758073,1.3181596849182757\n",
+            "1.295794106123628,1.3142782690813486\n",
+            "1.2901681962200746,1.3153286953279186\n",
+        );
+
+        let directory = tempdir()?;
+        let path = directory.path().join("posterior.csv");
+
+        write_posterior_csv(&path, &posterior::<Time>(3, 0.0)?)?;
+
+        assert_eq!(read_to_string(&path)?, EXPECTED);
+
+        Ok(())
+    }
+
+    /// `Metric` has to select the response, not just ride along. The fixture records
+    /// no memory, so reading the wrong field yields runtimes near 1.3 instead of zeros.
+    #[test]
+    fn memory_metric_reads_the_memory_field() -> Result<()> {
+        let zero = PeakMemory::from_base(0.0);
+
+        assert_eq!(
+            posterior::<PeakMemory>(8, 0.0)?.draws(),
+            [Draw {
+                baseline: zero,
+                candidate: zero
+            }; 8]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrapping_is_deterministic() -> Result<()> {
+        let draws = || posterior::<Time>(1_000, 0.0).map(|it| it.draws().to_vec());
+
+        assert_eq!(draws()?, draws()?);
 
         Ok(())
     }

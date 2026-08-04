@@ -1,19 +1,23 @@
 use b3::{
-    RunCommand, RunOrder, Worktree, bootstrap_paired_means, report_posterior, write_posterior_csv,
+    BenchmarkLog, Config, Interval, Pair, Posterior, Repetition, Repetitions, Revision, RunCommand,
+    RunOrder, Shrinkage, Time, Worktree, write_config_json, write_measurements_csv,
+    write_posterior_csv,
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::Parser;
-use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus, seq::SliceRandom};
-use std::{ffi::OsString, fs::create_dir_all, num::NonZeroUsize, path::PathBuf};
+use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
+use std::{ffi::OsString, fs, num::NonZeroUsize, path::PathBuf};
 use tempfile::tempdir;
+
+const MIN_DRAWS: usize = 1_000;
 
 #[derive(Parser)]
 #[command(name = "b3")]
 #[command(version)]
 #[command(about = "Bayesian Branch Benchmarking", long_about = None)]
 struct Cli {
-    // TODO: reorder args into cogent order.
+    // TODO: Reorder args into cogent order.
     /// Git revision used as the baseline.
     #[arg(short, long, default_value = "main")]
     baseline: String,
@@ -23,12 +27,8 @@ struct Cli {
     candidate: String,
 
     /// Control shrinkage of the adjusted mean runtime difference toward 0 by specifying a prior number of no-change pseudo-observations.
-    #[arg(long, default_value_t = 0.0)]
-    shrinkage: f64,
-
-    /// Skip repetition pairs where either benchmark exits unsuccessfully.
-    #[arg(long)]
-    skip_failing: bool,
+    #[arg(long, default_value = "0")]
+    shrinkage: Shrinkage,
 
     /// Directory where generated output files are written.
     #[arg(long, value_name = "DIR", required = true)]
@@ -37,16 +37,16 @@ struct Cli {
     /// Number of benchmark runs per branch.
     ///
     /// Each repetition runs both branches, for `repetitions * 2` total runs.
-    #[arg(short, long, required = true)]
+    #[arg(short, long, required = true, value_parser = parse_repetitions)]
     repetitions: NonZeroUsize,
 
     /// Number of Bayesian bootstrap draws.
-    #[arg(long, default_value = "10000")]
+    #[arg(long, value_parser = parse_draws, default_value = "10000")]
     draws: NonZeroUsize,
 
     /// Central credible interval widths.
     #[arg(long = "interval", default_values = ["0.5", "0.8", "0.98"])]
-    intervals: Vec<f64>,
+    intervals: Vec<Interval>,
 
     /// Set a seed for reproducible benchmarking.
     #[arg(long)]
@@ -54,112 +54,154 @@ struct Cli {
 
     /// Benchmark program and arguments.
     ///
-    /// Place the command after `--`, for example: `b3 -- Rscript benchmark.R`.
+    /// Place the command after `--`, for example: `b3 --output-dir benchmark/ --repetitions 10 -- Rscript benchmark.R`.
     #[arg(last = true, required = true, num_args = 1..)]
     command: Vec<OsString>,
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-    // TODO: move this to type somehow?
+fn parse_repetitions(text: &str) -> Result<NonZeroUsize> {
+    let repetitions: NonZeroUsize = text
+        .parse()
+        .with_context(|| format!("`{text}` is not a positive integer."))?;
+
     ensure!(
-        cli.intervals
-            .iter()
-            .all(|&width| 0.0 < width && width < 1.0),
-        "Intervals must be between 0 and 1."
+        repetitions.get() >= Repetitions::MINIMUM,
+        "At least {} repetitions are required.",
+        Repetitions::MINIMUM
     );
 
+    Ok(repetitions)
+}
+
+fn parse_draws(text: &str) -> Result<NonZeroUsize> {
+    let draws: NonZeroUsize = text
+        .parse()
+        .with_context(|| format!("`{text}` is not a positive integer."))?;
+
+    ensure!(
+        draws.get() >= MIN_DRAWS,
+        "At least {MIN_DRAWS} draws are required."
+    );
+
+    Ok(draws)
+}
+
+fn main() -> Result<()> {
+    let Cli {
+        baseline,
+        candidate,
+        shrinkage,
+        output_dir,
+        repetitions: repetition_count,
+        draws,
+        intervals,
+        seed,
+        command,
+    } = Cli::parse();
+
     let worktree_dir = tempdir().context("Failed to create temporary directory.")?;
-    create_dir_all(&cli.output_dir)
-        .with_context(|| format!("Failed to create output directory {:?}", cli.output_dir))?;
-    let seed = cli.seed.unwrap_or_else(rand::random);
+    fs::create_dir_all(&output_dir).with_context(|| {
+        format!(
+            "Failed to create output directory {}.",
+            output_dir.display()
+        )
+    })?;
+    let seed = seed.unwrap_or_else(rand::random);
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-    eprintln!("Seed: {seed}");
 
-    // Setting up the benchmark call
-    let (program, args) = cli.command.split_first().context("No program provided.")?;
-    let benchmark = RunCommand::new(program.clone(), args.to_vec());
+    let config_command = command.clone();
+    let mut command = command.into_iter();
+    let program = command
+        .next()
+        .expect("Clap requires at least one command argument.");
+    let benchmark = RunCommand::new(program, command.collect());
 
-    // Worktree setup
-    let baseline = Worktree::create(worktree_dir.path().join("baseline"), &cli.baseline)?;
-    let candidate = Worktree::create(worktree_dir.path().join("candidate"), &cli.candidate)?;
+    let worktrees = Pair {
+        baseline: Worktree::create(
+            worktree_dir.path().join("baseline"),
+            Revision::resolve(baseline)?,
+        )?,
+        candidate: Worktree::create(
+            worktree_dir.path().join("candidate"),
+            Revision::resolve(candidate)?,
+        )?,
+    };
+    let repetition_count = repetition_count.get();
 
-    // Allocating vectors for the runs
-    let repetitions = cli.repetitions.get();
-    let mut baseline_times = Vec::with_capacity(repetitions);
-    let mut candidate_times = Vec::with_capacity(repetitions);
-    let mut orders = Vec::with_capacity(repetitions);
-    let mut run_index = Vec::with_capacity(repetitions);
+    let config_path = output_dir.join("config.json");
+    write_config_json(
+        &config_path,
+        &Config {
+            seed,
+            repetitions: repetition_count,
+            draws: draws.get(),
+            shrinkage,
+            baseline: worktrees.baseline.revision(),
+            candidate: worktrees.candidate.revision(),
+            command: &config_command,
+        },
+    )
+    .with_context(|| format!("Failed to write {}.", config_path.display()))?;
 
-    // Random order for baseline/candidate
-    let mut baseline_firsts = [true, false].repeat(repetitions / 2);
-    if repetitions % 2 == 1 {
-        baseline_firsts.push(rng.random());
+    let mut measured_repetitions = Vec::with_capacity(repetition_count);
+
+    let log_path = output_dir.join("benchmark.log");
+    let mut log = BenchmarkLog::new(
+        fs::File::create(&log_path)
+            .with_context(|| format!("Failed to create {}.", log_path.display()))?,
+        repetition_count * 2,
+    );
+
+    for order in RunOrder::schedule(repetition_count, &mut rng) {
+        let [first, second] = order.sides();
+
+        // TODO: Better handling of failing runs to find systematic errors. Should record and write out?
+        let first_output = log.measure(&benchmark, first, worktrees.get(first))?;
+        ensure!(
+            first_output.exit_status().success(),
+            "The {first} benchmark failed with {}.",
+            first_output.exit_status()
+        );
+
+        let second_output = log.measure(&benchmark, second, worktrees.get(second))?;
+        ensure!(
+            second_output.exit_status().success(),
+            "The {second} benchmark failed with {}.",
+            second_output.exit_status()
+        );
+
+        let outputs = Pair::from_execution_order([first_output, second_output], order);
+        measured_repetitions.push(Repetition { outputs, order });
     }
-    baseline_firsts.shuffle(&mut rng);
 
-    for (pair_index, baseline_first) in baseline_firsts.into_iter().enumerate() {
-        let (first, second) = if baseline_first {
-            (&baseline, &candidate)
-        } else {
-            (&candidate, &baseline)
-        };
+    // Clears the progress line before the report starts printing.
+    drop(log);
 
-        let first = benchmark.run_in(first.path())?;
-        let second = benchmark.run_in(second.path())?;
+    let repetitions = Repetitions::try_from(measured_repetitions)?;
 
-        let (baseline_run, candidate_run) = if baseline_first {
-            (first, second)
-        } else {
-            (second, first)
-        };
+    let measurements_path = output_dir.join("measurements.csv");
+    write_measurements_csv(&measurements_path, &repetitions)
+        .with_context(|| format!("Failed to write {}.", measurements_path.display()))?;
 
-        // TODO: better handling of failing runs to find systematic errors. Should record and write out?
-        if let Some((name, status)) = [
-            ("Baseline", &baseline_run.0),
-            ("Candidate", &candidate_run.0),
-        ]
-        .into_iter()
-        .find(|(_, status)| !status.success())
-        {
-            if cli.skip_failing {
-                continue;
-            }
+    // TODO: Add memory report. Needs one output path per metric.
+    let posterior = Posterior::<Time>::bootstrap(&repetitions, draws, shrinkage, &mut rng)?;
 
-            bail!("{name} benchmark failed with {status}.");
-        }
-
-        baseline_times.push(baseline_run.1.as_secs_f64());
-        candidate_times.push(candidate_run.1.as_secs_f64());
-        orders.push(if baseline_first {
-            RunOrder::BaselineFirst
-        } else {
-            RunOrder::CandidateFirst
-        });
-        run_index.push(pair_index as f64);
-    }
-
-    ensure!(!baseline_times.is_empty(), "No successful benchmark pairs.");
-
-    let posterior = bootstrap_paired_means(
-        &baseline_times,
-        &candidate_times,
-        &orders,
-        &run_index,
-        cli.draws.get(),
-        cli.shrinkage,
-        &mut rng,
-    )?;
-
-    let posterior_path = cli.output_dir.join("posterior.csv");
+    let posterior_path = output_dir.join("posterior.csv");
     write_posterior_csv(&posterior_path, &posterior)
-        .with_context(|| format!("Failed to write {}", posterior_path.display()))?;
+        .with_context(|| format!("Failed to write {}.", posterior_path.display()))?;
 
-    let report = report_posterior(&posterior, &cli.intervals);
+    let report = format!(
+        "Comparing candidate ({}) to baseline ({}) with {repetition_count} paired repetitions and {} Bayesian bootstrap draws.\n\n{}",
+        worktrees.candidate.revision().name(),
+        worktrees.baseline.revision().name(),
+        draws.get(),
+        posterior.summarize(&intervals)?,
+    );
     print!("{report}");
-    let report_path = cli.output_dir.join("report.txt");
-    std::fs::write(&report_path, report)
-        .with_context(|| format!("Failed to write {}", report_path.display()))?;
+
+    let report_path = output_dir.join("report.txt");
+    fs::write(&report_path, &report)
+        .with_context(|| format!("Failed to write {}.", report_path.display()))?;
 
     Ok(())
 }
