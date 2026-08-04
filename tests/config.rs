@@ -675,3 +675,20 @@ fn report_short_uses_the_top_level_output_directory() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn an_output_dir_argument_relocates_the_short_report_too() -> Result<()> {
+    let project = repository(SUITE)?;
+    let (succeeded, _, stderr) = run(&project, &["--output-dir", "elsewhere"])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    assert!(!project.path().join("bench").exists());
+
+    let elsewhere = project.path().join("elsewhere");
+    assert!(elsewhere.join("report_short.txt").is_file());
+    for name in ["first", "second", "third"] {
+        assert!(elsewhere.join(name).join("report.txt").is_file());
+    }
+
+    Ok(())
+}

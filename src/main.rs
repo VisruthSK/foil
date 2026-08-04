@@ -24,6 +24,7 @@ const DEFAULT_CONFIG: &str = "b3.toml";
 const BENCHMARK: &str = "benchmark";
 const BENCHMARKS: &str = "benchmarks";
 const OUTPUT_DIR: &str = "output-dir";
+const OUTPUT_DIR_ID: &str = "output_dir";
 const ENV: &str = "env";
 
 #[derive(Parser)]
@@ -97,16 +98,20 @@ struct Cli {
     command: Vec<OsString>,
 }
 
+type Layered = (Option<PathBuf>, Vec<(Option<String>, Cli)>);
+
 impl Cli {
-    /// One resolved `Cli` per selected benchmark, paired with its name. Unnamed when
-    /// neither `--benchmark` nor an auto-selected `[benchmarks]` table applies.
-    fn layered() -> Result<Vec<(Option<String>, Self)>> {
+    /// One resolved `Cli` per selected benchmark, paired with its name, alongside any
+    /// `--output-dir` given on the command line. Unnamed when neither `--benchmark` nor
+    /// an auto-selected `[benchmarks]` table applies.
+    fn layered() -> Result<Layered> {
         let mut first_pass = Self::command()
             .ignore_errors(true)
             .disable_help_flag(true)
             .disable_version_flag(true)
             .get_matches();
         let path = first_pass.remove_one::<PathBuf>(CONFIG);
+        let output_dir = first_pass.remove_one::<PathBuf>(OUTPUT_DIR_ID);
         let explicit: Vec<String> = first_pass
             .remove_many::<String>(BENCHMARKS)
             .map(Iterator::collect)
@@ -119,16 +124,18 @@ impl Cli {
         };
 
         if names.is_empty() {
-            return Ok(vec![(None, Self::resolve(path, None)?)]);
+            return Ok((output_dir, vec![(None, Self::resolve(path, None)?)]));
         }
 
-        names
+        let runs = names
             .into_iter()
             .map(|name| {
                 let cli = Self::resolve(path.clone(), Some(&name))?;
                 Ok((Some(name), cli))
             })
-            .collect()
+            .collect::<Result<_>>()?;
+
+        Ok((output_dir, runs))
     }
 
     fn resolve(path: Option<PathBuf>, benchmark: Option<&str>) -> Result<Self> {
@@ -299,11 +306,12 @@ fn parse_draws(text: &str) -> Result<NonZeroUsize> {
 }
 
 fn main() -> Result<()> {
-    let runs = Cli::layered()?;
+    let (explicit_output_dir, runs) = Cli::layered()?;
     let multiple = runs.len() > 1;
     let (_, first) = runs.first().expect("At least one run is always produced.");
-    let suite_output_dir =
-        configured_output_dir(first.config.clone())?.unwrap_or_else(|| first.output_dir.clone());
+    let suite_output_dir = explicit_output_dir
+        .or(configured_output_dir(first.config.clone())?)
+        .unwrap_or_else(|| first.output_dir.clone());
 
     let mut compact = Vec::with_capacity(runs.len());
 
