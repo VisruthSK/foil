@@ -7,7 +7,14 @@ use b3::{
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Arg, ArgAction, Command, CommandFactory, FromArgMatches, Parser, builder::Str};
 use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
-use std::{env, ffi::OsString, fs, io::ErrorKind, num::NonZeroUsize, path::PathBuf};
+use std::{
+    env,
+    ffi::OsString,
+    fs,
+    io::ErrorKind,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+};
 use tempfile::tempdir;
 use toml::{Table, Value};
 
@@ -132,7 +139,7 @@ impl Cli {
 }
 
 fn read_config(path: Option<PathBuf>) -> Result<(PathBuf, Table)> {
-    let (path, optional) = path.map_or((DEFAULT_CONFIG.into(), true), |path| (path, false));
+    let (path, optional) = path.map_or_else(|| (DEFAULT_CONFIG.into(), true), |path| (path, false));
     let config = match fs::read_to_string(&path) {
         Err(error) if optional && error.kind() == ErrorKind::NotFound => Table::new(),
         result => result
@@ -296,7 +303,7 @@ fn main() -> Result<()> {
         };
         let heading = if multiple { name.as_deref() } else { None };
 
-        let summary = compare(cli, output_dir, heading)?;
+        let summary = compare(cli, &output_dir, heading)?;
 
         if multiple {
             let name = name.expect("Multi-benchmark runs are always named.");
@@ -316,7 +323,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn compare(cli: Cli, output_dir: PathBuf, heading: Option<&str>) -> Result<Summary<Time>> {
+fn compare(cli: Cli, output_dir: &Path, heading: Option<&str>) -> Result<Summary<Time>> {
     let Cli {
         baseline,
         candidate,
@@ -334,7 +341,7 @@ fn compare(cli: Cli, output_dir: PathBuf, heading: Option<&str>) -> Result<Summa
     } = cli;
 
     let worktree_dir = tempdir().context("Failed to create temporary directory.")?;
-    fs::create_dir_all(&output_dir).with_context(|| {
+    fs::create_dir_all(output_dir).with_context(|| {
         format!(
             "Failed to create output directory {}.",
             output_dir.display()
