@@ -1,13 +1,13 @@
 use b3::{
     BenchmarkLog, Config, Interval, Pair, Posterior, Repetition, Repetitions, Revision, RunCommand,
-    RunOrder, Shrinkage, Time, Worktree, write_config_json, write_measurements_csv,
+    RunOrder, Shrinkage, Summary, Time, Worktree, write_config_json, write_measurements_csv,
     write_posterior_csv,
 };
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Arg, Command, CommandFactory, FromArgMatches, Parser, builder::Str};
 use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
-use std::{ffi::OsString, fs, io::ErrorKind, num::NonZeroUsize, path::PathBuf};
+use std::{env, ffi::OsString, fs, io::ErrorKind, num::NonZeroUsize, path::PathBuf};
 use tempfile::tempdir;
 use toml::{Table, Value};
 
@@ -15,6 +15,7 @@ const MIN_DRAWS: usize = 1_000;
 const CONFIG: &str = "config";
 const DEFAULT_CONFIG: &str = "b3.toml";
 const BENCHMARK: &str = "benchmark";
+const BENCHMARKS: &str = "benchmarks";
 
 #[derive(Parser)]
 #[command(name = "b3")]
@@ -72,11 +73,13 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
 
-    /// Name of a benchmark from the configuration file's `[benchmarks]` table.
+    /// Name of a benchmark from the configuration file's `[benchmarks]` table. May be repeated.
     ///
-    /// A benchmark's table may override any option above and must set `command`.
-    #[arg(long, value_name = "NAME")]
-    benchmark: Option<String>,
+    /// A benchmark's table may override any option above and must set `command`. With
+    /// none named, every benchmark in the table runs; with no `[benchmarks]` table,
+    /// `command` and the options above are used as given.
+    #[arg(long = "benchmark", value_name = "NAME")]
+    benchmarks: Vec<String>,
 
     /// Benchmark program and arguments.
     ///
@@ -86,25 +89,50 @@ struct Cli {
 }
 
 impl Cli {
-    fn layered() -> Result<Self> {
+    /// One resolved `Cli` per selected benchmark, paired with its name. Unnamed when
+    /// neither `--benchmark` nor an auto-selected `[benchmarks]` table applies.
+    fn layered() -> Result<Vec<(Option<String>, Self)>> {
         let mut first_pass = Self::command()
             .ignore_errors(true)
             .disable_help_flag(true)
             .disable_version_flag(true)
             .get_matches();
         let path = first_pass.remove_one::<PathBuf>(CONFIG);
-        let benchmark = first_pass.remove_one::<String>(BENCHMARK);
+        let explicit: Vec<String> = first_pass
+            .remove_many::<String>(BENCHMARKS)
+            .map(Iterator::collect)
+            .unwrap_or_default();
 
-        let command = configure(Self::command(), path, benchmark.as_deref())?;
-        let mut matches = command.get_matches();
+        let names = if explicit.is_empty() {
+            benchmark_names(path.clone())?
+        } else {
+            explicit
+        };
+
+        if names.is_empty() {
+            return Ok(vec![(None, Self::resolve(path, None)?)]);
+        }
+
+        names
+            .into_iter()
+            .map(|name| {
+                let cli = Self::resolve(path.clone(), Some(&name))?;
+                Ok((Some(name), cli))
+            })
+            .collect()
+    }
+
+    fn resolve(path: Option<PathBuf>, benchmark: Option<&str>) -> Result<Self> {
+        let command = configure(Self::command(), path, benchmark)?;
+        let mut matches = command.get_matches_from(env::args_os());
 
         Self::from_arg_matches_mut(&mut matches).map_err(|error| error.exit())
     }
 }
 
-fn configure(command: Command, path: Option<PathBuf>, benchmark: Option<&str>) -> Result<Command> {
+fn read_config(path: Option<PathBuf>) -> Result<(PathBuf, Table)> {
     let (path, optional) = path.map_or((DEFAULT_CONFIG.into(), true), |path| (path, false));
-    let mut config: Table = match fs::read_to_string(&path) {
+    let config = match fs::read_to_string(&path) {
         Err(error) if optional && error.kind() == ErrorKind::NotFound => Table::new(),
         result => result
             .with_context(|| format!("Failed to read {}.", path.display()))?
@@ -112,7 +140,22 @@ fn configure(command: Command, path: Option<PathBuf>, benchmark: Option<&str>) -
             .with_context(|| format!("Failed to parse {}.", path.display()))?,
     };
 
-    let benchmarks = config.remove("benchmarks");
+    Ok((path, config))
+}
+
+fn benchmark_names(path: Option<PathBuf>) -> Result<Vec<String>> {
+    let (_, config) = read_config(path)?;
+
+    Ok(match config.get(BENCHMARKS) {
+        Some(Value::Table(benchmarks)) => benchmarks.keys().cloned().collect(),
+        _ => Vec::new(),
+    })
+}
+
+fn configure(command: Command, path: Option<PathBuf>, benchmark: Option<&str>) -> Result<Command> {
+    let (path, mut config) = read_config(path)?;
+
+    let benchmarks = config.remove(BENCHMARKS);
     if let Some(name) = benchmark {
         let entry = benchmarks.and_then(|value| match value {
             Value::Table(mut table) => table.remove(name),
@@ -221,11 +264,45 @@ fn parse_draws(text: &str) -> Result<NonZeroUsize> {
 }
 
 fn main() -> Result<()> {
+    let runs = Cli::layered()?;
+    let multiple = runs.len() > 1;
+    let suite_output_dir = runs[0].1.output_dir.clone();
+
+    let mut compact = Vec::with_capacity(runs.len());
+
+    for (name, cli) in runs {
+        let output_dir = match &name {
+            Some(name) if multiple => cli.output_dir.join(name),
+            _ => cli.output_dir.clone(),
+        };
+        let heading = if multiple { name.as_deref() } else { None };
+
+        let summary = compare(cli, output_dir, heading)?;
+
+        if multiple {
+            let name = name.expect("Multi-benchmark runs are always named.");
+            compact.push(format!("{name}: {}", summary.compact()));
+        }
+    }
+
+    if multiple {
+        let report = format!("{}\n", compact.join("\n"));
+        print!("{report}");
+
+        let report_path = suite_output_dir.join("report_short.txt");
+        fs::write(&report_path, &report)
+            .with_context(|| format!("Failed to write {}.", report_path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn compare(cli: Cli, output_dir: PathBuf, heading: Option<&str>) -> Result<Summary<Time>> {
     let Cli {
         baseline,
         candidate,
         shrinkage,
-        output_dir,
+        output_dir: _,
         repetitions: repetition_count,
         draws,
         intervals,
@@ -233,9 +310,9 @@ fn main() -> Result<()> {
         working_directory,
         envs,
         config: _,
-        benchmark: _,
+        benchmarks: _,
         command,
-    } = Cli::layered()?;
+    } = cli;
 
     let worktree_dir = tempdir().context("Failed to create temporary directory.")?;
     fs::create_dir_all(&output_dir).with_context(|| {
@@ -328,12 +405,14 @@ fn main() -> Result<()> {
     write_posterior_csv(&posterior_path, &posterior)
         .with_context(|| format!("Failed to write {}.", posterior_path.display()))?;
 
+    let summary = posterior.summarize(&intervals)?;
+
+    let prefix = heading.map_or_else(String::new, |name| format!("{name}: "));
     let report = format!(
-        "Comparing candidate ({}) to baseline ({}) with {repetition_count} paired repetitions and {} Bayesian bootstrap draws.\n\n{}",
+        "{prefix}Comparing candidate ({}) to baseline ({}) with {repetition_count} paired repetitions and {} Bayesian bootstrap draws.\n\n{summary}",
         worktrees.candidate.revision().name(),
         worktrees.baseline.revision().name(),
         draws.get(),
-        posterior.summarize(&intervals)?,
     );
     print!("{report}");
 
@@ -341,5 +420,5 @@ fn main() -> Result<()> {
     fs::write(&report_path, &report)
         .with_context(|| format!("Failed to write {}.", report_path.display()))?;
 
-    Ok(())
+    Ok(summary)
 }

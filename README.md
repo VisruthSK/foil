@@ -49,15 +49,24 @@ RAYON_NUM_THREADS = "1"
 
 `b3 --benchmark render` runs with 50 repetitions in `benchmarks/render`; `b3 --benchmark parse` runs with the top-level 10. An explicit argument still overrides a benchmark's setting.
 
+With no `--benchmark`, every benchmark in the table runs, each in its own `--output-dir` subdirectory named after it. Pass `--benchmark` (repeatable) to run only some of them. A configuration with no `[benchmarks]` table always runs the single command above, unnamed, exactly as without one.
+
 ## Output
 
-Each run writes to `--output-dir`:
+Each run writes to its output directory:
 
 - `config.json`: run's parameters and resolved revisions.
 - `benchmark.log`: one JSON line per individual run.
 - `measurements.csv`: paired baseline/candidate timings.
 - `posterior.csv`: Bayesian bootstrap draws.
 - `report.txt`: human-readable summary.
+
+Running more than one benchmark also prints a one-line-per-benchmark summary and writes it to `report_short.txt` in `--output-dir`:
+
+```
+ggplot2: 1.2s -> 554.0ms [-52.41%, -51.31%]
+dplyr: 3.1s -> 3.0s [-4.02%, +1.15%]
+```
 
 ## License
 

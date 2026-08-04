@@ -27,6 +27,35 @@ fn bracket<M: Metric>(range: Range<M>) -> String {
     )
 }
 
+fn magnitude<M: Metric>(value: M) -> String {
+    let Unit { scale, symbol } = M::display_unit(value);
+
+    format!("{:.1}{symbol}", value.base() * scale)
+}
+
+impl<M: Metric> Summary<M> {
+    /// A one-line summary for a report spanning several benchmarks, e.g. `1.2s -> 554.0ms [-52.41%, -51.31%]`.
+    pub fn compact(&self) -> String {
+        let bounds = self
+            .change
+            .intervals
+            .iter()
+            .max_by(|a, b| a.interval.percent().total_cmp(&b.interval.percent()))
+            .expect("At least one interval is always requested.");
+
+        let change = match bounds.relative {
+            Some(relative) => format!("[{:+.2}%, {:+.2}%]", relative.lower, relative.upper),
+            None => bracket(bounds.absolute),
+        };
+
+        format!(
+            "{} -> {} {change}",
+            magnitude(self.baseline),
+            magnitude(self.candidate)
+        )
+    }
+}
+
 impl<M: Metric> fmt::Display for Summary<M> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Unit { scale, symbol } = shared(self.baseline, self.candidate);
@@ -171,6 +200,18 @@ mod tests {
         Ok(())
     }
 
+    /// The compact line picks the widest requested interval, here 98%, regardless of
+    /// the order `--interval` was given in.
+    #[test]
+    fn compact_matches_golden() -> Result<()> {
+        let intervals = [0.98, 0.5, 0.8].map(|width| Interval::new(width).expect("Valid."));
+        let summary = tiny_change_on_large_totals::<Time>(500).summarize(&intervals)?;
+
+        assert_eq!(summary.compact(), "10.0s -> 10.1s [+0.18%, +0.21%]");
+
+        Ok(())
+    }
+
     #[test]
     fn a_zero_baseline_reports_without_percentages() -> Result<()> {
         const EXPECTED: &str = concat!(
@@ -188,6 +229,16 @@ mod tests {
 
         assert!(summary.change.relative_median.is_none());
         assert_eq!(summary.to_string(), EXPECTED);
+
+        Ok(())
+    }
+
+    #[test]
+    fn compact_falls_back_to_absolute_bounds_with_a_zero_baseline() -> Result<()> {
+        let half = [Interval::new(0.5)?];
+        let summary = tiny_change_on_large_totals::<PeakMemory>(500).summarize(&half)?;
+
+        assert_eq!(summary.compact(), "0.0B -> 0.0B [+0.0, +0.0]B");
 
         Ok(())
     }

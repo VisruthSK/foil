@@ -511,3 +511,93 @@ fn an_explicit_env_argument_overrides_the_configuration() -> Result<()> {
 
     Ok(())
 }
+
+const SUITE: &str = "baseline = 'HEAD'\n\
+    candidate = 'HEAD'\n\
+    output-dir = 'bench'\n\
+    repetitions = 10\n\
+    draws = 1000\n\
+    \n\
+    [benchmarks.first]\n\
+    command = ['git', '--version']\n\
+    \n\
+    [benchmarks.second]\n\
+    command = ['git', '--version']\n\
+    \n\
+    [benchmarks.third]\n\
+    command = ['git', '--version']\n";
+
+#[test]
+fn every_named_benchmark_runs_by_default() -> Result<()> {
+    let project = repository(SUITE)?;
+    let (succeeded, stdout, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    for name in ["first", "second", "third"] {
+        assert!(
+            stdout.contains(&format!("{name}: Comparing candidate")),
+            "{stdout}"
+        );
+        assert!(
+            project
+                .path()
+                .join("bench")
+                .join(name)
+                .join("report.txt")
+                .is_file(),
+            "{name}/report.txt is missing"
+        );
+    }
+
+    let short = fs::read_to_string(project.path().join("bench").join("report_short.txt"))?;
+    for name in ["first", "second", "third"] {
+        assert!(short.contains(&format!("{name}: ")), "{short}");
+    }
+    assert!(short.contains("->"), "{short}");
+
+    Ok(())
+}
+
+#[test]
+fn repeated_benchmark_arguments_select_a_subset() -> Result<()> {
+    let project = repository(SUITE)?;
+    let (succeeded, _, stderr) = run(&project, &["--benchmark", "first", "--benchmark", "third"])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    let bench = project.path().join("bench");
+    assert!(bench.join("first").join("report.txt").is_file());
+    assert!(bench.join("third").join("report.txt").is_file());
+    assert!(!bench.join("second").exists());
+
+    let short = fs::read_to_string(bench.join("report_short.txt"))?;
+    assert!(short.contains("first:"), "{short}");
+    assert!(short.contains("third:"), "{short}");
+    assert!(!short.contains("second:"), "{short}");
+
+    Ok(())
+}
+
+#[test]
+fn a_lone_benchmark_skips_the_short_report() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        \n\
+        [benchmarks.parse]\n\
+        command = ['git', '--version']\n",
+    )?;
+    let (succeeded, stdout, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    assert!(!stdout.contains("parse: Comparing candidate"), "{stdout}");
+
+    let bench = project.path().join("bench");
+    assert!(bench.join("report.txt").is_file());
+    assert!(!bench.join("parse").exists());
+    assert!(!bench.join("report_short.txt").exists());
+
+    Ok(())
+}
