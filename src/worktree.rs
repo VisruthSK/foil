@@ -6,27 +6,32 @@ use std::{
 
 pub struct Worktree {
     path: PathBuf,
+    revision: String,
 }
 
 impl Worktree {
-    pub fn create(path: PathBuf, revision: &str) -> Result<Self> {
+    pub fn create(path: PathBuf, revision: String) -> Result<Self> {
         let status = Command::new("git")
             .args(["worktree", "add", "--quiet", "--detach"])
             .arg(&path)
-            .arg(revision)
+            .arg(&revision)
             .status()
             .context("Failed to run git.")?;
 
         anyhow::ensure!(
             status.success(),
-            "git worktree add failed for {revision} with {status}."
+            "Git worktree add failed for {revision} with {status}."
         );
 
-        Ok(Self { path })
+        Ok(Self { path, revision })
     }
 
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn revision(&self) -> &str {
+        &self.revision
     }
 }
 
