@@ -108,7 +108,7 @@ mod tests {
             RunOutput::new(
                 ExitStatus::default(),
                 Duration::from_secs_f64(seconds),
-                Bytes::ZERO,
+                Some(Bytes::ZERO),
             )
         };
 

@@ -1,5 +1,7 @@
 use crate::run::RunOutput;
 
+use anyhow::{Context, Result};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Unit {
     pub scale: f64,
@@ -10,7 +12,7 @@ pub trait Metric: Copy {
     const LOWER: &'static str;
     const BASE_UNIT: &'static str;
 
-    fn read(output: &RunOutput) -> Self;
+    fn read(output: &RunOutput) -> Result<Self>;
     fn from_base(value: f64) -> Self;
     fn base(self) -> f64;
     fn display_unit(magnitude: Self) -> Unit;
@@ -23,8 +25,8 @@ impl Metric for Time {
     const LOWER: &'static str = "faster";
     const BASE_UNIT: &'static str = "seconds";
 
-    fn read(output: &RunOutput) -> Self {
-        Self(output.elapsed().as_secs_f64())
+    fn read(output: &RunOutput) -> Result<Self> {
+        Ok(Self(output.elapsed().as_secs_f64()))
     }
 
     fn from_base(value: f64) -> Self {
@@ -64,8 +66,13 @@ impl Metric for PeakMemory {
     const LOWER: &'static str = "smaller";
     const BASE_UNIT: &'static str = "bytes";
 
-    fn read(output: &RunOutput) -> Self {
-        Self(output.peak_memory().get() as f64)
+    fn read(output: &RunOutput) -> Result<Self> {
+        Ok(Self(
+            output
+                .peak_memory()
+                .context("Peak memory was not measured.")?
+                .get() as f64,
+        ))
     }
 
     fn from_base(value: f64) -> Self {

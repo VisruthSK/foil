@@ -54,7 +54,7 @@ struct Cli {
 
     /// Benchmark program and arguments.
     ///
-    /// Place the command after `--`, for example: `b3 -- Rscript benchmark.R`.
+    /// Place the command after `--`, for example: `b3 --output-dir benchmark/ --repetitions 10 -- Rscript benchmark.R`.
     #[arg(last = true, required = true, num_args = 1..)]
     command: Vec<OsString>,
 }

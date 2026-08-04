@@ -35,7 +35,7 @@ impl Bytes {
 pub struct RunOutput {
     exit_status: ExitStatus,
     elapsed_time: Duration,
-    peak_sampled_memory: Bytes,
+    peak_sampled_memory: Option<Bytes>,
 }
 
 impl RunCommand {
@@ -56,7 +56,7 @@ impl RunCommand {
             output: RunOutput {
                 exit_status: captured.status,
                 elapsed_time,
-                peak_sampled_memory: Bytes::ZERO,
+                peak_sampled_memory: None,
             },
             stdout: captured.stdout,
             stderr: captured.stderr,
@@ -70,7 +70,7 @@ impl RunOutput {
     pub(crate) fn new(
         exit_status: ExitStatus,
         elapsed_time: Duration,
-        peak_sampled_memory: Bytes,
+        peak_sampled_memory: Option<Bytes>,
     ) -> Self {
         Self {
             exit_status,
@@ -87,7 +87,7 @@ impl RunOutput {
         self.elapsed_time
     }
 
-    pub fn peak_memory(&self) -> Bytes {
+    pub fn peak_memory(&self) -> Option<Bytes> {
         self.peak_sampled_memory
     }
 }
@@ -141,6 +141,7 @@ impl<W: Write> BenchmarkLog<W> {
             "side": side.to_string(),
             "elapsed_seconds": run.output.elapsed_time.as_secs_f64(),
             "exit_code": run.output.exit_status.code(),
+            "peak_memory_bytes": run.output.peak_sampled_memory.map(Bytes::get),
             "stdout": String::from_utf8_lossy(&run.stdout),
             "stderr": String::from_utf8_lossy(&run.stderr),
         });
@@ -165,13 +166,9 @@ impl<W> Drop for BenchmarkLog<W> {
 mod tests {
     use super::*;
 
-    /// 1.5 and 4096 are both exactly representable, so these round-trip cleanly.
+    /// 1.5 is exactly representable, so it round-trips cleanly.
     fn output() -> RunOutput {
-        RunOutput::new(
-            ExitStatus::default(),
-            Duration::from_secs_f64(1.5),
-            Bytes::new(4096),
-        )
+        RunOutput::new(ExitStatus::default(), Duration::from_secs_f64(1.5), None)
     }
 
     #[test]
@@ -180,7 +177,7 @@ mod tests {
 
         assert!(output.exit_status().success());
         assert_eq!(output.elapsed(), Duration::from_secs_f64(1.5));
-        assert_eq!(output.peak_memory(), Bytes::new(4096));
+        assert_eq!(output.peak_memory(), None);
     }
 
     fn run(stdout: &str, stderr: &str) -> Run {
@@ -216,6 +213,7 @@ mod tests {
                     "side": "baseline",
                     "elapsed_seconds": 1.5,
                     "exit_code": 0,
+                    "peak_memory_bytes": null,
                     "stdout": "first\n",
                     "stderr": "",
                 }),
@@ -224,6 +222,7 @@ mod tests {
                     "side": "candidate",
                     "elapsed_seconds": 1.5,
                     "exit_code": 0,
+                    "peak_memory_bytes": null,
                     "stdout": "second",
                     "stderr": "warning",
                 }),

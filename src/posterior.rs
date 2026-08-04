@@ -15,22 +15,22 @@ struct RegressionRow {
 }
 
 impl RegressionRow {
-    fn all<M: Metric>(repetitions: &Repetitions) -> Vec<Self> {
+    fn all<M: Metric>(repetitions: &Repetitions) -> Result<Vec<Self>> {
         let center = repetitions.center();
 
         repetitions
             .iter()
             .enumerate()
             .map(|(position, repetition)| {
-                let baseline = M::read(&repetition.outputs.baseline).base();
-                let candidate = M::read(&repetition.outputs.candidate).base();
+                let baseline = M::read(&repetition.outputs.baseline)?.base();
+                let candidate = M::read(&repetition.outputs.candidate)?.base();
 
-                Self {
+                Ok(Self {
                     midpoint: 0.5 * (baseline + candidate),
                     difference: candidate - baseline,
                     run: position as f64 - center,
                     order: repetition.order.effect_code(),
-                }
+                })
             })
             .collect()
     }
@@ -191,7 +191,7 @@ impl<M: Metric> Posterior<M> {
         } else {
             Some(Gamma::new(shrinkage.0, 1.0)?)
         };
-        let rows = RegressionRow::all::<M>(repetitions);
+        let rows = RegressionRow::all::<M>(repetitions)?;
 
         (0..draws.get())
             .map(|_| {
@@ -270,7 +270,7 @@ mod tests {
             RunOutput::new(
                 ExitStatus::default(),
                 Duration::from_secs_f64(seconds),
-                Bytes::ZERO,
+                Some(Bytes::ZERO),
             )
         };
 
