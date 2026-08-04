@@ -237,6 +237,10 @@ fn unusable_configurations_are_reported() -> Result<()> {
         ("seed = 1979-05-27", "must set `seed` to a string"),
         ("interval = []", "sets `interval` to an empty list"),
         ("command = []", "sets `command` to an empty list"),
+        (
+            "baseline = ['a', 'b']",
+            "sets `baseline` to 2 values, but it takes only one",
+        ),
         ("draws =", "Failed to parse"),
     ] {
         let project = project(&[("b3.toml", contents)])?;
