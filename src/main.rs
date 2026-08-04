@@ -5,7 +5,7 @@ use b3::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use clap::{Arg, Command, CommandFactory, FromArgMatches, Parser, builder::Str};
+use clap::{Arg, ArgAction, Command, CommandFactory, FromArgMatches, Parser, builder::Str};
 use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
 use std::{env, ffi::OsString, fs, io::ErrorKind, num::NonZeroUsize, path::PathBuf};
 use tempfile::tempdir;
@@ -189,12 +189,13 @@ fn configure(command: Command, path: Option<PathBuf>, benchmark: Option<&str>) -
             path.display()
         );
 
-        let id = command
+        let argument = command
             .get_arguments()
             .find(|argument| configuration_key(argument) == Some(key.as_str()))
-            .with_context(|| format!("{} sets `{key}`, which is not an option.", path.display()))?
-            .get_id()
-            .to_string();
+            .with_context(|| format!("{} sets `{key}`, which is not an option.", path.display()))?;
+        let id = argument.get_id().to_string();
+        let repeatable = matches!(argument.get_action(), ArgAction::Append);
+
         let defaults = defaults(&value).with_context(|| {
             format!(
                 "{} must set `{key}` to a string, number, boolean, list of those, or table of strings.",
@@ -205,6 +206,12 @@ fn configure(command: Command, path: Option<PathBuf>, benchmark: Option<&str>) -
             !defaults.is_empty(),
             "{} sets `{key}` to an empty list.",
             path.display()
+        );
+        ensure!(
+            repeatable || defaults.len() == 1,
+            "{} sets `{key}` to {} values, but it takes only one.",
+            path.display(),
+            defaults.len()
         );
 
         Ok(command.mut_arg(id, |argument| {
