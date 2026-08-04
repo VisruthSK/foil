@@ -114,6 +114,17 @@ pub(crate) struct RunConfig {
     #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env)]
     pub(crate) envs: Vec<(String, String)>,
 
+    /// Command run once in each worktree before the first measured run, e.g. `--setup make`.
+    ///
+    /// Never measured. A command containing flags belongs in a configuration file, as a list.
+    #[arg(long, value_name = "COMMAND", num_args = 1..)]
+    pub(crate) setup: Vec<OsString>,
+
+    /// Command run once in each worktree after the last measured run.
+    ///
+    /// Never measured, and skipped entirely when a run fails.
+    #[arg(long, value_name = "COMMAND", num_args = 1..)]
+    pub(crate) teardown: Vec<OsString>,
     /// Benchmark program and arguments.
     ///
     /// Place the command after `--`, for example: `b3 --output-dir benchmark/ --repetitions 10 -- Rscript benchmark.R`.

@@ -16,18 +16,19 @@ pub struct Config<'a> {
     pub shrinkage: Shrinkage,
     pub baseline: &'a Revision,
     pub candidate: &'a Revision,
+    pub setup: &'a [OsString],
     pub command: &'a [OsString],
+    pub teardown: &'a [OsString],
+}
+
+fn utf8(command: &[OsString]) -> Result<Vec<&str>> {
+    command
+        .iter()
+        .map(|part| part.to_str().context("A command contains non-UTF-8 text."))
+        .collect()
 }
 
 pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
-    let command: Vec<_> = config
-        .command
-        .iter()
-        .map(|part| {
-            part.to_str()
-                .context("Benchmark command contains non-UTF-8 text.")
-        })
-        .collect::<Result<_>>()?;
     let value = json!({
         "seed": config.seed,
         "repetitions": config.repetitions,
@@ -42,7 +43,9 @@ pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
             "revision": config.candidate.name(),
             "hash": config.candidate.hash(),
         },
-        "command": command,
+        "setup": utf8(config.setup)?,
+        "command": utf8(config.command)?,
+        "teardown": utf8(config.teardown)?,
     });
 
     let mut writer = BufWriter::new(File::create(path)?);

@@ -28,7 +28,16 @@ output-dir = "benchmark/"
 
 With that file, the run above is `b3 -- cargo bench`. Arguments override the file, which overrides the built-in defaults. `b3 --help` always shows only the built-in CLI defaults. The command may also live in the file as a `command` list; one passed after `--` overrides it.
 
-A `[benchmarks]` table is where commands belong in TOML. Each entry names a benchmark for `--benchmark` to select and must set its own `command`; it may override run options such as `repetitions`, `working-directory`, and `isolate`. `baseline`, `candidate`, and `seed` apply to the whole suite. A benchmark's `env` table is merged with the top-level one variable by variable, with the benchmark's values winning on conflicts:
+`setup` and `teardown` are commands `b3` runs once in each worktree, before the first and after the last measured run, and never times. A `setup` is where a build belongs, so that compilation stays out of the measurements. Both share the benchmark's `working-directory` and `env`.
+
+```toml
+setup = ["cargo", "build", "--release"]
+command = ["./target/release/parse", "corpus/"]
+```
+
+Each runs once per revision, so a side effect reaching outside the worktree happens twice, once for the baseline and once for the candidate. A failing `setup` or `teardown` stops the run and reports what the command printed, and a failing benchmark skips `teardown`. On the command line these take a bare command, as in `--setup make`; one carrying flags of its own, like `cargo build --release`, belongs in the configuration file as a list.
+
+A `[benchmarks]` table is where commands belong in TOML. Each entry names a benchmark for `--benchmark` to select and must set its own `command`; it may override run options such as `repetitions`, `working-directory`, `isolate`, `setup`, and `teardown`. `baseline`, `candidate`, and `seed` apply to the whole suite. A benchmark's `env` table is merged with the top-level one variable by variable, with the benchmark's values winning on conflicts:
 
 ```toml
 repetitions = 10

@@ -3,12 +3,12 @@ mod config;
 use crate::config::{Cli, ResolvedSuiteConfig, RunConfig, Suite};
 use b3::{
     BenchmarkLog, Config, Pair, Posterior, Repetition, Repetitions, Revision, RunCommand, RunOrder,
-    Summary, Time, Worktree, write_config_json, write_measurements_csv, write_posterior_csv,
+    Side, Summary, Time, Worktree, write_config_json, write_measurements_csv, write_posterior_csv,
 };
 
 use anyhow::{Context, Result, ensure};
 use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
-use std::{fs, path::Path};
+use std::{ffi::OsString, fs, path::Path};
 use tempfile::{TempDir, tempdir};
 
 struct Worktrees {
@@ -98,6 +98,8 @@ fn compare(
         intervals,
         working_directory,
         envs,
+        setup,
+        teardown,
         command,
     } = config;
 
@@ -109,12 +111,17 @@ fn compare(
     })?;
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(suite.seed);
 
-    let config_command = command.clone();
-    let mut command = command.into_iter();
-    let program = command
-        .next()
-        .expect("Clap requires at least one command argument.");
-    let benchmark = RunCommand::new(program, command.collect(), working_directory, envs);
+    let run_command = |command: &[OsString]| -> Option<RunCommand> {
+        let (program, arguments) = command.split_first()?;
+
+        Some(RunCommand::new(
+            program.clone(),
+            arguments.to_vec(),
+            working_directory.clone(),
+            envs.clone(),
+        ))
+    };
+    let benchmark = run_command(&command).expect("Clap requires at least one command argument.");
 
     let repetition_count = repetition_count.get();
 
@@ -128,10 +135,14 @@ fn compare(
             shrinkage,
             baseline: worktrees.baseline.revision(),
             candidate: worktrees.candidate.revision(),
-            command: &config_command,
+            setup: &setup,
+            command: &command,
+            teardown: &teardown,
         },
     )
     .with_context(|| format!("Failed to write {}.", config_path.display()))?;
+
+    run_in_both(run_command(&setup), worktrees, "setup")?;
 
     let mut measured_repetitions = Vec::with_capacity(repetition_count);
 
@@ -165,6 +176,8 @@ fn compare(
 
     drop(log);
 
+    run_in_both(run_command(&teardown), worktrees, "teardown")?;
+
     let repetitions = Repetitions::try_from(measured_repetitions)?;
 
     let measurements_path = output_dir.join("measurements.csv");
@@ -193,4 +206,18 @@ fn compare(
         .with_context(|| format!("Failed to write {}.", report_path.display()))?;
 
     Ok(summary)
+}
+
+fn run_in_both(command: Option<RunCommand>, worktrees: &Pair<Worktree>, phase: &str) -> Result<()> {
+    let Some(command) = command else {
+        return Ok(());
+    };
+
+    for side in [Side::Baseline, Side::Candidate] {
+        command
+            .run_once_in(worktrees.get(side))
+            .with_context(|| format!("The {side} {phase} failed."))?;
+    }
+
+    Ok(())
 }
