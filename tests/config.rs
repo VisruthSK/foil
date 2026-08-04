@@ -667,7 +667,31 @@ fn teardown_runs_after_the_measured_runs() -> Result<()> {
     let bench = project.path().join("bench");
     let log = fs::read_to_string(bench.join("benchmark.log"))?;
     assert_eq!(log.lines().count(), 20, "{log}");
-    assert!(!bench.join("measurements.csv").exists());
+
+    let csv = fs::read_to_string(bench.join("measurements.csv"))?;
+    assert_eq!(csv.lines().count(), 11, "{csv}");
+
+    Ok(())
+}
+
+#[test]
+fn a_failing_benchmark_leaves_the_measurements_recorded_so_far() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        command = ['git', 'cat-file', '-p', 'absent-object']\n",
+    )?;
+
+    let error = failure(&project, &[])?;
+
+    assert!(error.contains("benchmark failed"), "{error}");
+    assert_eq!(
+        fs::read_to_string(project.path().join("bench").join("measurements.csv"))?,
+        "repetition,order,baseline_seconds,candidate_seconds\n"
+    );
 
     Ok(())
 }

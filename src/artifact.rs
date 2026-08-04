@@ -1,4 +1,4 @@
-use crate::{Metric, Pair, Posterior, Repetitions, Revision, RunOrder, Shrinkage};
+use crate::{Metric, Pair, Posterior, Repetition, Revision, RunOrder, Shrinkage};
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -59,15 +59,25 @@ pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
     Ok(())
 }
 
-pub fn write_measurements_csv(path: &Path, repetitions: &Repetitions) -> Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
+pub struct MeasurementsCsv {
+    writer: BufWriter<File>,
+    rows: usize,
+}
 
-    writeln!(
-        writer,
-        "repetition,order,baseline_seconds,candidate_seconds"
-    )?;
+impl MeasurementsCsv {
+    pub fn create(path: &Path) -> Result<Self> {
+        let mut writer = BufWriter::new(File::create(path)?);
 
-    for (index, repetition) in repetitions.iter().enumerate() {
+        writeln!(
+            writer,
+            "repetition,order,baseline_seconds,candidate_seconds"
+        )?;
+        writer.flush()?;
+
+        Ok(Self { writer, rows: 0 })
+    }
+
+    pub fn append(&mut self, repetition: &Repetition) -> Result<()> {
         let Pair {
             baseline,
             candidate,
@@ -77,19 +87,19 @@ pub fn write_measurements_csv(path: &Path, repetitions: &Repetitions) -> Result<
             RunOrder::CandidateFirst => "candidate_first",
         };
 
+        self.rows += 1;
         writeln!(
-            writer,
+            self.writer,
             "{},{},{},{}",
-            index + 1,
+            self.rows,
             order,
             baseline.elapsed().as_secs_f64(),
             candidate.elapsed().as_secs_f64(),
         )?;
+        self.writer.flush()?;
+
+        Ok(())
     }
-
-    writer.flush()?;
-
-    Ok(())
 }
 
 pub fn write_posterior_csv<M: Metric>(path: &Path, posterior: &Posterior<M>) -> Result<()> {
@@ -122,26 +132,30 @@ mod tests {
         )
     }
 
+    fn repetition(index: usize) -> Repetition {
+        Repetition {
+            outputs: Pair {
+                baseline: output(1.0, 1_000),
+                candidate: output(0.5, 2_000),
+            },
+            order: if index % 2 == 0 {
+                RunOrder::BaselineFirst
+            } else {
+                RunOrder::CandidateFirst
+            },
+        }
+    }
+
     #[test]
     fn measurements_csv_contains_complete_pairs() -> Result<()> {
-        let repetitions: Repetitions = (0..10)
-            .map(|index| Repetition {
-                outputs: Pair {
-                    baseline: output(1.0, 1_000),
-                    candidate: output(0.5, 2_000),
-                },
-                order: if index % 2 == 0 {
-                    RunOrder::BaselineFirst
-                } else {
-                    RunOrder::CandidateFirst
-                },
-            })
-            .collect::<Vec<_>>()
-            .try_into()?;
         let directory = tempdir()?;
         let path = directory.path().join("measurements.csv");
 
-        write_measurements_csv(&path, &repetitions)?;
+        let mut csv = MeasurementsCsv::create(&path)?;
+        for index in 0..10 {
+            csv.append(&repetition(index))?;
+        }
+        drop(csv);
 
         const EXPECTED: &str = concat!(
             "repetition,order,baseline_seconds,candidate_seconds\n",
@@ -158,6 +172,23 @@ mod tests {
         );
 
         assert_eq!(read_to_string(path)?, EXPECTED);
+
+        Ok(())
+    }
+
+    #[test]
+    fn each_appended_repetition_reaches_disk_immediately() -> Result<()> {
+        let directory = tempdir()?;
+        let path = directory.path().join("measurements.csv");
+
+        let mut csv = MeasurementsCsv::create(&path)?;
+        assert_eq!(
+            read_to_string(&path)?,
+            "repetition,order,baseline_seconds,candidate_seconds\n"
+        );
+
+        csv.append(&repetition(0))?;
+        assert_eq!(read_to_string(&path)?.lines().count(), 2);
 
         Ok(())
     }

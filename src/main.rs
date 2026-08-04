@@ -2,8 +2,8 @@ mod config;
 
 use crate::config::{Cli, ResolvedSuiteConfig, RunConfig, Suite};
 use b3::{
-    BenchmarkLog, Config, Pair, Posterior, Repetition, Repetitions, Revision, RunCommand, RunOrder,
-    Side, Summary, Time, Worktree, write_config_json, write_measurements_csv, write_posterior_csv,
+    BenchmarkLog, Config, MeasurementsCsv, Pair, Posterior, Repetition, Repetitions, Revision,
+    RunCommand, RunOrder, Side, Summary, Time, Worktree, write_config_json, write_posterior_csv,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -152,6 +152,10 @@ fn compare(
         repetition_count * 2,
     );
 
+    let measurements_path = output_dir.join("measurements.csv");
+    let mut measurements = MeasurementsCsv::create(&measurements_path)
+        .with_context(|| format!("Failed to create {}.", measurements_path.display()))?;
+
     for order in RunOrder::schedule(repetition_count, &mut rng) {
         let [first, second] = order.sides();
 
@@ -170,7 +174,11 @@ fn compare(
         );
 
         let outputs = Pair::from_execution_order([first_output, second_output], order);
-        measured_repetitions.push(Repetition { outputs, order });
+        let repetition = Repetition { outputs, order };
+        measurements
+            .append(&repetition)
+            .with_context(|| format!("Failed to write {}.", measurements_path.display()))?;
+        measured_repetitions.push(repetition);
     }
 
     drop(log);
@@ -178,10 +186,6 @@ fn compare(
     run_in_both(run_command(&teardown), worktrees, "teardown")?;
 
     let repetitions = Repetitions::try_from(measured_repetitions)?;
-
-    let measurements_path = output_dir.join("measurements.csv");
-    write_measurements_csv(&measurements_path, &repetitions)
-        .with_context(|| format!("Failed to write {}.", measurements_path.display()))?;
 
     let posterior = Posterior::<Time>::bootstrap(&repetitions, draws, shrinkage, &mut rng)?;
 
