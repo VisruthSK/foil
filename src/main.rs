@@ -1,6 +1,6 @@
 use b3::{
     BenchmarkLog, Config, Interval, Pair, Posterior, Repetition, Repetitions, Revision, RunCommand,
-    RunOrder, Shrinkage, Side, Time, Worktree, write_config_json, write_measurements_csv,
+    RunOrder, Shrinkage, Time, Worktree, write_config_json, write_measurements_csv,
     write_posterior_csv,
 };
 
@@ -155,24 +155,22 @@ fn main() -> Result<()> {
     for order in RunOrder::schedule(repetition_count, &mut rng) {
         let [first, second] = order.sides();
 
-        let outputs = Pair::from_execution_order(
-            [
-                log.measure(&benchmark, first, worktrees.get(first))?,
-                log.measure(&benchmark, second, worktrees.get(second))?,
-            ],
-            order,
+        // TODO: Better handling of failing runs to find systematic errors. Should record and write out?
+        let first_output = log.measure(&benchmark, first, worktrees.get(first))?;
+        ensure!(
+            first_output.exit_status().success(),
+            "The {first} benchmark failed with {}.",
+            first_output.exit_status()
         );
 
-        // TODO: Better handling of failing runs to find systematic errors. Should record and write out?
-        for side in [Side::Baseline, Side::Candidate] {
-            let status = outputs.get(side).exit_status();
+        let second_output = log.measure(&benchmark, second, worktrees.get(second))?;
+        ensure!(
+            second_output.exit_status().success(),
+            "The {second} benchmark failed with {}.",
+            second_output.exit_status()
+        );
 
-            ensure!(
-                status.success(),
-                "The {side} benchmark failed with {status}."
-            );
-        }
-
+        let outputs = Pair::from_execution_order([first_output, second_output], order);
         measured_repetitions.push(Repetition { outputs, order });
     }
 
