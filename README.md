@@ -29,7 +29,7 @@ command = ["Rscript", "benchmark.R"]
 
 With that file, the run above is just `b3`. Arguments override the file, which overrides the builtin defaults, and `b3 --help` reports the defaults the file leaves in place.
 
-A `[benchmarks]` table names benchmarks for `--benchmark` to select. Each one sets `command` and may override any option above, plus set `working-directory` and `env`:
+A `[benchmarks]` table names benchmarks for `--benchmark` to select. Each one sets `command` and may override any option above, including `working-directory` and `env`:
 
 ```toml
 repetitions = 10

@@ -355,19 +355,14 @@ fn unusable_benchmarks_are_reported() -> Result<()> {
             "has no benchmark named `parse`",
         ),
         (
-            "[benchmarks.parse]\ncommand = ['echo']\nworking-directory = 1",
-            &["--benchmark", "parse"][..],
-            "must set `benchmarks.parse.working-directory` to a string",
-        ),
-        (
             "[benchmarks.parse]\ncommand = ['echo']\nenv = 1",
             &["--benchmark", "parse"][..],
-            "must set `benchmarks.parse.env` to a table",
+            "is not `KEY=VALUE`",
         ),
         (
             "[benchmarks.parse]\ncommand = ['echo']\n[benchmarks.parse.env]\nVAR = 1",
             &["--benchmark", "parse"][..],
-            "must set `benchmarks.parse.env.VAR` to a string",
+            "must set `env` to a string, number, boolean, list of those, or table of strings",
         ),
         (
             "[benchmarks.parse]\ncommand = ['echo']\nbogus = 1",
@@ -447,6 +442,72 @@ fn a_benchmark_can_set_environment_variables() -> Result<()> {
 
     let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
     assert!(log.contains("benchmark-env"), "{log}");
+
+    Ok(())
+}
+
+#[test]
+fn working_directory_and_env_are_ordinary_options() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        working-directory = 'sub'\n\
+        command = ['git', 'config', 'user.name']\n\
+        \n\
+        [env]\n\
+        GIT_CONFIG_COUNT = '1'\n\
+        GIT_CONFIG_KEY_0 = 'user.name'\n\
+        GIT_CONFIG_VALUE_0 = 'top-level-env'\n",
+    )?;
+    fs::create_dir(project.path().join("sub"))?;
+    fs::write(project.path().join("sub").join(".gitkeep"), "")?;
+    git(&project, &["add", "sub"])?;
+    git(&project, &["commit", "--quiet", "--message", "add sub"])?;
+
+    let (succeeded, _, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
+    assert!(log.contains("top-level-env"), "{log}");
+
+    Ok(())
+}
+
+#[test]
+fn an_explicit_env_argument_overrides_the_configuration() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        command = ['git', 'config', 'user.name']\n\
+        \n\
+        [env]\n\
+        GIT_CONFIG_COUNT = '1'\n\
+        GIT_CONFIG_KEY_0 = 'user.name'\n\
+        GIT_CONFIG_VALUE_0 = 'configured-env'\n",
+    )?;
+
+    let (succeeded, _, stderr) = run(
+        &project,
+        &[
+            "--env",
+            "GIT_CONFIG_COUNT=1",
+            "--env",
+            "GIT_CONFIG_KEY_0=user.name",
+            "--env",
+            "GIT_CONFIG_VALUE_0=argument-env",
+        ],
+    )?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
+    assert!(log.contains("argument-env"), "{log}");
+    assert!(!log.contains("configured-env"), "{log}");
 
     Ok(())
 }

@@ -15,14 +15,6 @@ const MIN_DRAWS: usize = 1_000;
 const CONFIG: &str = "config";
 const DEFAULT_CONFIG: &str = "b3.toml";
 const BENCHMARK: &str = "benchmark";
-const WORKING_DIRECTORY: &str = "working-directory";
-const ENV: &str = "env";
-
-#[derive(Default)]
-struct Extras {
-    working_directory: Option<PathBuf>,
-    env: Vec<(String, String)>,
-}
 
 #[derive(Parser)]
 #[command(name = "b3")]
@@ -64,6 +56,16 @@ struct Cli {
     #[arg(long)]
     seed: Option<u64>,
 
+    /// Working directory for the benchmark command, relative to the worktree root.
+    #[arg(long, value_name = "DIR")]
+    working_directory: Option<PathBuf>,
+
+    /// Environment variable for the benchmark command, as `KEY=VALUE`.
+    ///
+    /// May be repeated. In a configuration file, may instead be given as a table.
+    #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env)]
+    envs: Vec<(String, String)>,
+
     /// TOML file whose keys are the long names of the options above, or `command`.
     ///
     /// Defaults to `b3.toml`, which is read when present.
@@ -72,8 +74,7 @@ struct Cli {
 
     /// Name of a benchmark from the configuration file's `[benchmarks]` table.
     ///
-    /// A benchmark's table may override any option above and must set `command`;
-    /// it may also set `working-directory` and `env`.
+    /// A benchmark's table may override any option above and must set `command`.
     #[arg(long, value_name = "NAME")]
     benchmark: Option<String>,
 
@@ -85,7 +86,7 @@ struct Cli {
 }
 
 impl Cli {
-    fn layered() -> Result<(Self, Extras)> {
+    fn layered() -> Result<Self> {
         let mut first_pass = Self::command()
             .ignore_errors(true)
             .disable_help_flag(true)
@@ -94,19 +95,14 @@ impl Cli {
         let path = first_pass.remove_one::<PathBuf>(CONFIG);
         let benchmark = first_pass.remove_one::<String>(BENCHMARK);
 
-        let (command, extras) = configure(Self::command(), path, benchmark.as_deref())?;
+        let command = configure(Self::command(), path, benchmark.as_deref())?;
         let mut matches = command.get_matches();
-        let cli = Self::from_arg_matches_mut(&mut matches).map_err(|error| error.exit())?;
 
-        Ok((cli, extras))
+        Self::from_arg_matches_mut(&mut matches).map_err(|error| error.exit())
     }
 }
 
-fn configure(
-    command: Command,
-    path: Option<PathBuf>,
-    benchmark: Option<&str>,
-) -> Result<(Command, Extras)> {
+fn configure(command: Command, path: Option<PathBuf>, benchmark: Option<&str>) -> Result<Command> {
     let (path, optional) = path.map_or((DEFAULT_CONFIG.into(), true), |path| (path, false));
     let mut config: Table = match fs::read_to_string(&path) {
         Err(error) if optional && error.kind() == ErrorKind::NotFound => Table::new(),
@@ -117,93 +113,51 @@ fn configure(
     };
 
     let benchmarks = config.remove("benchmarks");
-
-    let extras = match benchmark {
-        None => Extras::default(),
-        Some(name) => {
-            let entry = benchmarks.and_then(|value| match value {
-                Value::Table(mut table) => table.remove(name),
-                _ => None,
-            });
-            let mut table = match entry {
-                Some(Value::Table(table)) => table,
-                _ => bail!("{} has no benchmark named `{name}`.", path.display()),
-            };
-
-            let working_directory = match table.remove(WORKING_DIRECTORY) {
-                Some(Value::String(directory)) => Some(PathBuf::from(directory)),
-                Some(_) => bail!(
-                    "{} must set `benchmarks.{name}.{WORKING_DIRECTORY}` to a string.",
-                    path.display()
-                ),
-                None => None,
-            };
-            let env = match table.remove(ENV) {
-                Some(Value::Table(vars)) => vars
-                    .into_iter()
-                    .map(|(key, value)| match value {
-                        Value::String(value) => Ok((key, value)),
-                        _ => bail!(
-                            "{} must set `benchmarks.{name}.{ENV}.{key}` to a string.",
-                            path.display()
-                        ),
-                    })
-                    .collect::<Result<_>>()?,
-                Some(_) => bail!(
-                    "{} must set `benchmarks.{name}.{ENV}` to a table.",
-                    path.display()
-                ),
-                None => Vec::new(),
-            };
-
-            config.extend(table);
-            Extras {
-                working_directory,
-                env,
-            }
+    if let Some(name) = benchmark {
+        let entry = benchmarks.and_then(|value| match value {
+            Value::Table(mut table) => table.remove(name),
+            _ => None,
+        });
+        match entry {
+            Some(Value::Table(table)) => config.extend(table),
+            _ => bail!("{} has no benchmark named `{name}`.", path.display()),
         }
-    };
+    }
 
-    let command = config
-        .into_iter()
-        .try_fold(command, |command, (key, value)| {
-            ensure!(
-                key != CONFIG,
-                "{} cannot set `{key}`; pass --{CONFIG} instead.",
-                path.display()
-            );
-            ensure!(
-                key != BENCHMARK,
-                "{} cannot set `{key}`; pass --{BENCHMARK} instead.",
-                path.display()
-            );
+    config.into_iter().try_fold(command, |command, (key, value)| {
+        ensure!(
+            key != CONFIG,
+            "{} cannot set `{key}`; pass --{CONFIG} instead.",
+            path.display()
+        );
+        ensure!(
+            key != BENCHMARK,
+            "{} cannot set `{key}`; pass --{BENCHMARK} instead.",
+            path.display()
+        );
 
-            let id = command
-                .get_arguments()
-                .find(|argument| configuration_key(argument) == Some(key.as_str()))
-                .with_context(|| {
-                    format!("{} sets `{key}`, which is not an option.", path.display())
-                })?
-                .get_id()
-                .to_string();
-            let defaults = defaults(&value).with_context(|| {
-                format!(
-                    "{} must set `{key}` to a string, number, boolean, or list of those.",
-                    path.display()
-                )
-            })?;
-            ensure!(
-                !defaults.is_empty(),
-                "{} sets `{key}` to an empty list.",
+        let id = command
+            .get_arguments()
+            .find(|argument| configuration_key(argument) == Some(key.as_str()))
+            .with_context(|| format!("{} sets `{key}`, which is not an option.", path.display()))?
+            .get_id()
+            .to_string();
+        let defaults = defaults(&value).with_context(|| {
+            format!(
+                "{} must set `{key}` to a string, number, boolean, list of those, or table of strings.",
                 path.display()
-            );
-
-            Ok(command.mut_arg(id, |argument| {
-                argument.required(false).default_values(defaults)
-            }))
+            )
         })?;
+        ensure!(
+            !defaults.is_empty(),
+            "{} sets `{key}` to an empty list.",
+            path.display()
+        );
 
-    Ok((command, extras))
+        Ok(command.mut_arg(id, |argument| {
+            argument.required(false).default_values(defaults)
+        }))
+    })
 }
 
 fn configuration_key(argument: &Arg) -> Option<&str> {
@@ -215,6 +169,10 @@ fn configuration_key(argument: &Arg) -> Option<&str> {
 fn defaults(value: &Value) -> Option<Vec<Str>> {
     match value {
         Value::Array(array) => array.iter().map(scalar).collect(),
+        Value::Table(table) => table
+            .iter()
+            .map(|(key, value)| Some(format!("{key}={}", value.as_str()?).into()))
+            .collect(),
         value => Some(vec![scalar(value)?]),
     }
 }
@@ -225,6 +183,14 @@ fn scalar(value: &Value) -> Option<Str> {
         Value::Integer(_) | Value::Float(_) | Value::Boolean(_) => Some(value.to_string().into()),
         _ => None,
     }
+}
+
+fn parse_env(text: &str) -> Result<(String, String)> {
+    let (key, value) = text
+        .split_once('=')
+        .with_context(|| format!("`{text}` is not `KEY=VALUE`."))?;
+
+    Ok((key.to_owned(), value.to_owned()))
 }
 
 fn parse_repetitions(text: &str) -> Result<NonZeroUsize> {
@@ -255,25 +221,21 @@ fn parse_draws(text: &str) -> Result<NonZeroUsize> {
 }
 
 fn main() -> Result<()> {
-    let (
-        Cli {
-            baseline,
-            candidate,
-            shrinkage,
-            output_dir,
-            repetitions: repetition_count,
-            draws,
-            intervals,
-            seed,
-            config: _,
-            benchmark: _,
-            command,
-        },
-        Extras {
-            working_directory,
-            env,
-        },
-    ) = Cli::layered()?;
+    let Cli {
+        baseline,
+        candidate,
+        shrinkage,
+        output_dir,
+        repetitions: repetition_count,
+        draws,
+        intervals,
+        seed,
+        working_directory,
+        envs,
+        config: _,
+        benchmark: _,
+        command,
+    } = Cli::layered()?;
 
     let worktree_dir = tempdir().context("Failed to create temporary directory.")?;
     fs::create_dir_all(&output_dir).with_context(|| {
@@ -290,7 +252,7 @@ fn main() -> Result<()> {
     let program = command
         .next()
         .expect("Clap requires at least one command argument.");
-    let benchmark = RunCommand::new(program, command.collect(), working_directory, env);
+    let benchmark = RunCommand::new(program, command.collect(), working_directory, envs);
 
     let worktrees = Pair {
         baseline: Worktree::create(
