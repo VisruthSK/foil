@@ -1,6 +1,7 @@
 use b3::{
-    BenchmarkLog, Interval, Pair, Posterior, Repetition, Repetitions, RunCommand, RunOrder,
-    Shrinkage, Side, Time, Worktree, write_posterior_csv,
+    BenchmarkLog, Config, Interval, Pair, Posterior, Repetition, Repetitions, Revision, RunCommand,
+    RunOrder, Shrinkage, Side, Time, Worktree, write_config_json, write_measurements_csv,
+    write_posterior_csv,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -109,6 +110,7 @@ fn main() -> Result<()> {
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
     eprintln!("Seed: {seed}");
 
+    let config_command = command.clone();
     let mut command = command.into_iter();
     let program = command
         .next()
@@ -116,11 +118,30 @@ fn main() -> Result<()> {
     let benchmark = RunCommand::new(program, command.collect());
 
     let worktrees = Pair {
-        baseline: Worktree::create(worktree_dir.path().join("baseline"), baseline)?,
-        candidate: Worktree::create(worktree_dir.path().join("candidate"), candidate)?,
+        baseline: Worktree::create(
+            worktree_dir.path().join("baseline"),
+            Revision::resolve(baseline)?,
+        )?,
+        candidate: Worktree::create(
+            worktree_dir.path().join("candidate"),
+            Revision::resolve(candidate)?,
+        )?,
     };
-
     let repetition_count = repetition_count.get();
+
+    let config_path = output_dir.join("config.json");
+    write_config_json(
+        &config_path,
+        &Config {
+            seed,
+            repetitions: repetition_count,
+            baseline: worktrees.baseline.revision(),
+            candidate: worktrees.candidate.revision(),
+            command: &config_command,
+        },
+    )
+    .with_context(|| format!("Failed to write {}.", config_path.display()))?;
+
     let mut measured_repetitions = Vec::with_capacity(repetition_count);
 
     let log_path = output_dir.join("benchmark.log");
@@ -158,6 +179,10 @@ fn main() -> Result<()> {
     drop(log);
 
     let repetitions = Repetitions::try_from(measured_repetitions)?;
+
+    let measurements_path = output_dir.join("measurements.csv");
+    write_measurements_csv(&measurements_path, &repetitions)
+        .with_context(|| format!("Failed to write {}.", measurements_path.display()))?;
 
     // TODO: Add memory report. Needs one output path per metric.
     let posterior = Posterior::<Time>::bootstrap(&repetitions, draws, shrinkage, &mut rng)?;

@@ -6,21 +6,58 @@ use std::{
 
 pub struct Worktree {
     path: PathBuf,
-    revision: String,
+    revision: Revision,
+}
+
+pub struct Revision {
+    name: String,
+    hash: String,
+}
+
+impl Revision {
+    pub fn resolve(name: String) -> Result<Self> {
+        let commit = format!("{name}^{{commit}}");
+        anyhow::ensure!(!name.is_empty(), "Git revision must not be empty.");
+        let output = Command::new("git")
+            .args(["rev-parse", "--verify"])
+            .arg(commit)
+            .output()
+            .context("Failed to run git.")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "Git could not resolve {name} to a commit."
+        );
+        let hash = String::from_utf8(output.stdout)
+            .context("Git returned a non-UTF-8 commit hash.")?
+            .trim()
+            .to_owned();
+
+        Ok(Self { name, hash })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
 }
 
 impl Worktree {
-    pub fn create(path: PathBuf, revision: String) -> Result<Self> {
+    pub fn create(path: PathBuf, revision: Revision) -> Result<Self> {
         let status = Command::new("git")
             .args(["worktree", "add", "--quiet", "--detach"])
             .arg(&path)
-            .arg(&revision)
+            .arg(revision.hash())
             .status()
             .context("Failed to run git.")?;
 
         anyhow::ensure!(
             status.success(),
-            "Git worktree add failed for {revision} with {status}."
+            "Git worktree add failed for {} ({}) with {status}.",
+            revision.name(),
+            revision.hash()
         );
 
         Ok(Self { path, revision })
@@ -30,7 +67,7 @@ impl Worktree {
         &self.path
     }
 
-    pub(crate) fn revision(&self) -> &str {
+    pub fn revision(&self) -> &Revision {
         &self.revision
     }
 }

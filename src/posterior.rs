@@ -5,13 +5,7 @@ use crate::summary::{Interval, Summary};
 use anyhow::{Context, Result, ensure};
 use rand::Rng;
 use rand_distr::{Distribution, Exp1, Gamma};
-use std::{
-    fs::File,
-    io::{BufWriter, Write},
-    num::NonZeroUsize,
-    path::Path,
-    str::FromStr,
-};
+use std::{num::NonZeroUsize, str::FromStr};
 
 struct RegressionRow {
     midpoint: f64,
@@ -237,26 +231,10 @@ impl<M: Metric> Posterior<M> {
     }
 }
 
-// NOTE: Could swap to CSV crate if this gets annoying.
-pub fn write_posterior_csv<M: Metric>(path: &Path, posterior: &Posterior<M>) -> Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
-
-    let unit = M::BASE_UNIT;
-
-    writeln!(writer, "baseline_{unit},candidate_{unit}")?;
-
-    for draw in posterior.draws() {
-        writeln!(writer, "{},{}", draw.baseline.base(), draw.candidate.base())?;
-    }
-
-    writer.flush()?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::write_posterior_csv;
     use crate::metric::{PeakMemory, Time};
     use crate::repetition::{Pair, Repetition, RunOrder};
     use crate::run::{Bytes, RunOutput};

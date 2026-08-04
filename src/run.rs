@@ -2,9 +2,10 @@ use crate::repetition::Side;
 use crate::worktree::Worktree;
 
 use anyhow::{Context, Result};
+use serde_json::json;
 use std::{
     ffi::OsString,
-    io::{self, Write},
+    io::Write,
     path::Path,
     process::{Command, ExitStatus},
     time::{Duration, Instant},
@@ -123,7 +124,7 @@ impl<W: Write> BenchmarkLog<W> {
 
         let run = benchmark.run_in(worktree.path())?;
 
-        self.append(side, worktree.revision(), &run)?;
+        self.append(side, &run)?;
 
         Ok(run.output)
     }
@@ -132,35 +133,21 @@ impl<W: Write> BenchmarkLog<W> {
         eprint!("\rBenchmarking run {}/{}", self.run + 1, self.runs);
     }
 
-    fn append(&mut self, side: Side, revision: &str, run: &Run) -> io::Result<()> {
+    fn append(&mut self, side: Side, run: &Run) -> Result<()> {
         self.run += 1;
 
-        writeln!(
-            self.writer,
-            "run {}/{}  {side} ({revision})",
-            self.run, self.runs
-        )?;
-
-        self.append_stream(&run.stdout)?;
-
-        if !run.stderr.is_empty() {
-            writeln!(self.writer, "--- stderr")?;
-            self.append_stream(&run.stderr)?;
-        }
-
-        writeln!(self.writer, "{:.3?}", run.output.elapsed_time)?;
-        writeln!(self.writer, "{}", run.output.exit_status)?;
+        let entry = json!({
+            "run": self.run,
+            "side": side.to_string(),
+            "elapsed_seconds": run.output.elapsed_time.as_secs_f64(),
+            "exit_code": run.output.exit_status.code(),
+            "stdout": String::from_utf8_lossy(&run.stdout),
+            "stderr": String::from_utf8_lossy(&run.stderr),
+        });
+        serde_json::to_writer(&mut self.writer, &entry)?;
         writeln!(self.writer)?;
 
-        self.writer.flush()
-    }
-
-    fn append_stream(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.writer.write_all(bytes)?;
-
-        if bytes.last().is_some_and(|&byte| byte != b'\n') {
-            writeln!(self.writer)?;
-        }
+        self.writer.flush()?;
 
         Ok(())
     }
@@ -204,38 +191,43 @@ mod tests {
         }
     }
 
-    /// Two runs' worth of log, pinned exactly. The second prints to stderr and ends
-    /// without a newline, which is what would otherwise run its output into the
-    /// closing line.
+    /// Every line is a complete JSON object, including embedded newlines.
     #[test]
-    fn the_log_matches_golden() -> io::Result<()> {
-        const EXPECTED: &str = concat!(
-            "run 1/2  baseline (main)\n",
-            "first\n",
-            "1.500s\n",
-            "exit code: 0\n",
-            "\n",
-            "run 2/2  candidate (HEAD)\n",
-            "second\n",
-            "--- stderr\n",
-            "warning\n",
-            "1.500s\n",
-            "exit code: 0\n",
-            "\n",
-        );
-
+    fn the_log_matches_golden() -> Result<()> {
         let mut buffer = Vec::new();
 
         {
             let mut log = BenchmarkLog::new(&mut buffer, 2);
 
-            log.append(Side::Baseline, "main", &run("first\n", ""))?;
-            log.append(Side::Candidate, "HEAD", &run("second", "warning"))?;
+            log.append(Side::Baseline, &run("first\n", ""))?;
+            log.append(Side::Candidate, &run("second", "warning"))?;
         }
 
+        let entries: Vec<serde_json::Value> = String::from_utf8(buffer)
+            .expect("The test writes UTF-8.")
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<serde_json::Result<_>>()?;
         assert_eq!(
-            String::from_utf8(buffer).expect("The test writes UTF-8."),
-            EXPECTED
+            entries,
+            [
+                json!({
+                    "run": 1,
+                    "side": "baseline",
+                    "elapsed_seconds": 1.5,
+                    "exit_code": 0,
+                    "stdout": "first\n",
+                    "stderr": "",
+                }),
+                json!({
+                    "run": 2,
+                    "side": "candidate",
+                    "elapsed_seconds": 1.5,
+                    "exit_code": 0,
+                    "stdout": "second",
+                    "stderr": "warning",
+                }),
+            ]
         );
 
         Ok(())
