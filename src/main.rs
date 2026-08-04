@@ -4,7 +4,7 @@ use b3::{
     write_posterior_csv,
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use clap::{Arg, Command, CommandFactory, FromArgMatches, Parser, builder::Str};
 use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
 use std::{ffi::OsString, fs, io::ErrorKind, num::NonZeroUsize, path::PathBuf};
@@ -14,6 +14,15 @@ use toml::{Table, Value};
 const MIN_DRAWS: usize = 1_000;
 const CONFIG: &str = "config";
 const DEFAULT_CONFIG: &str = "b3.toml";
+const BENCHMARK: &str = "benchmark";
+const WORKING_DIRECTORY: &str = "working-directory";
+const ENV: &str = "env";
+
+#[derive(Default)]
+struct Extras {
+    working_directory: Option<PathBuf>,
+    env: Vec<(String, String)>,
+}
 
 #[derive(Parser)]
 #[command(name = "b3")]
@@ -61,6 +70,13 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
 
+    /// Name of a benchmark from the configuration file's `[benchmarks]` table.
+    ///
+    /// A benchmark's table may override any option above and must set `command`;
+    /// it may also set `working-directory` and `env`.
+    #[arg(long, value_name = "NAME")]
+    benchmark: Option<String>,
+
     /// Benchmark program and arguments.
     ///
     /// Place the command after `--`, for example: `b3 --output-dir benchmark/ --repetitions 10 -- Rscript benchmark.R`.
@@ -69,35 +85,96 @@ struct Cli {
 }
 
 impl Cli {
-    fn layered() -> Result<Self> {
-        let path = Self::command()
+    fn layered() -> Result<(Self, Extras)> {
+        let mut first_pass = Self::command()
             .ignore_errors(true)
             .disable_help_flag(true)
             .disable_version_flag(true)
-            .get_matches()
-            .remove_one::<PathBuf>(CONFIG);
-        let mut matches = configure(Self::command(), path)?.get_matches();
+            .get_matches();
+        let path = first_pass.remove_one::<PathBuf>(CONFIG);
+        let benchmark = first_pass.remove_one::<String>(BENCHMARK);
 
-        Self::from_arg_matches_mut(&mut matches).map_err(|error| error.exit())
+        let (command, extras) = configure(Self::command(), path, benchmark.as_deref())?;
+        let mut matches = command.get_matches();
+        let cli = Self::from_arg_matches_mut(&mut matches).map_err(|error| error.exit())?;
+
+        Ok((cli, extras))
     }
 }
 
-fn configure(command: Command, path: Option<PathBuf>) -> Result<Command> {
+fn configure(
+    command: Command,
+    path: Option<PathBuf>,
+    benchmark: Option<&str>,
+) -> Result<(Command, Extras)> {
     let (path, optional) = path.map_or((DEFAULT_CONFIG.into(), true), |path| (path, false));
-    let config: Table = match fs::read_to_string(&path) {
-        Err(error) if optional && error.kind() == ErrorKind::NotFound => return Ok(command),
+    let mut config: Table = match fs::read_to_string(&path) {
+        Err(error) if optional && error.kind() == ErrorKind::NotFound => Table::new(),
         result => result
             .with_context(|| format!("Failed to read {}.", path.display()))?
             .parse()
             .with_context(|| format!("Failed to parse {}.", path.display()))?,
     };
 
-    config
+    let benchmarks = config.remove("benchmarks");
+
+    let extras = match benchmark {
+        None => Extras::default(),
+        Some(name) => {
+            let entry = benchmarks.and_then(|value| match value {
+                Value::Table(mut table) => table.remove(name),
+                _ => None,
+            });
+            let mut table = match entry {
+                Some(Value::Table(table)) => table,
+                _ => bail!("{} has no benchmark named `{name}`.", path.display()),
+            };
+
+            let working_directory = match table.remove(WORKING_DIRECTORY) {
+                Some(Value::String(directory)) => Some(PathBuf::from(directory)),
+                Some(_) => bail!(
+                    "{} must set `benchmarks.{name}.{WORKING_DIRECTORY}` to a string.",
+                    path.display()
+                ),
+                None => None,
+            };
+            let env = match table.remove(ENV) {
+                Some(Value::Table(vars)) => vars
+                    .into_iter()
+                    .map(|(key, value)| match value {
+                        Value::String(value) => Ok((key, value)),
+                        _ => bail!(
+                            "{} must set `benchmarks.{name}.{ENV}.{key}` to a string.",
+                            path.display()
+                        ),
+                    })
+                    .collect::<Result<_>>()?,
+                Some(_) => bail!(
+                    "{} must set `benchmarks.{name}.{ENV}` to a table.",
+                    path.display()
+                ),
+                None => Vec::new(),
+            };
+
+            config.extend(table);
+            Extras {
+                working_directory,
+                env,
+            }
+        }
+    };
+
+    let command = config
         .into_iter()
         .try_fold(command, |command, (key, value)| {
             ensure!(
                 key != CONFIG,
                 "{} cannot set `{key}`; pass --{CONFIG} instead.",
+                path.display()
+            );
+            ensure!(
+                key != BENCHMARK,
+                "{} cannot set `{key}`; pass --{BENCHMARK} instead.",
                 path.display()
             );
 
@@ -124,7 +201,9 @@ fn configure(command: Command, path: Option<PathBuf>) -> Result<Command> {
             Ok(command.mut_arg(id, |argument| {
                 argument.required(false).default_values(defaults)
             }))
-        })
+        })?;
+
+    Ok((command, extras))
 }
 
 fn configuration_key(argument: &Arg) -> Option<&str> {
@@ -176,18 +255,25 @@ fn parse_draws(text: &str) -> Result<NonZeroUsize> {
 }
 
 fn main() -> Result<()> {
-    let Cli {
-        baseline,
-        candidate,
-        shrinkage,
-        output_dir,
-        repetitions: repetition_count,
-        draws,
-        intervals,
-        seed,
-        config: _,
-        command,
-    } = Cli::layered()?;
+    let (
+        Cli {
+            baseline,
+            candidate,
+            shrinkage,
+            output_dir,
+            repetitions: repetition_count,
+            draws,
+            intervals,
+            seed,
+            config: _,
+            benchmark: _,
+            command,
+        },
+        Extras {
+            working_directory,
+            env,
+        },
+    ) = Cli::layered()?;
 
     let worktree_dir = tempdir().context("Failed to create temporary directory.")?;
     fs::create_dir_all(&output_dir).with_context(|| {
@@ -204,7 +290,7 @@ fn main() -> Result<()> {
     let program = command
         .next()
         .expect("Clap requires at least one command argument.");
-    let benchmark = RunCommand::new(program, command.collect());
+    let benchmark = RunCommand::new(program, command.collect(), working_directory, env);
 
     let worktrees = Pair {
         baseline: Worktree::create(

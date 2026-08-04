@@ -257,3 +257,196 @@ fn a_missing_explicit_configuration_is_an_error() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn a_benchmark_supplies_its_own_command() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        \n\
+        [benchmarks.parse]\n\
+        command = ['git', '--version']\n",
+    )?;
+    let (succeeded, stdout, stderr) = run(&project, &["--benchmark", "parse"])?;
+
+    ensure!(succeeded, "b3 failed with {stderr}");
+    assert!(stdout.contains("10 paired repetitions"), "{stdout}");
+
+    Ok(())
+}
+
+#[test]
+fn a_benchmark_overrides_the_configuration() -> Result<()> {
+    let project = project(&[(
+        "b3.toml",
+        "output-dir = 'bench'\n\
+        repetitions = 10\n\
+        \n\
+        [benchmarks.parse]\n\
+        command = ['git', '--version']\n\
+        repetitions = 15\n",
+    )])?;
+    let help = help(&project, &["--benchmark", "parse"])?;
+
+    assert!(help.contains("[default: 15]"), "{help}");
+    assert!(help.contains("[default: git --version]"), "{help}");
+
+    Ok(())
+}
+
+#[test]
+fn an_argument_overrides_a_selected_benchmark() -> Result<()> {
+    let project = project(&[(
+        "b3.toml",
+        "output-dir = 'bench'\n\
+        \n\
+        [benchmarks.parse]\n\
+        command = ['git', '--version']\n\
+        repetitions = 15\n",
+    )])?;
+    let error = failure(&project, &["--benchmark", "parse", "--repetitions", "5"])?;
+
+    assert!(
+        error.contains("At least 10 repetitions are required."),
+        "{error}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn an_unknown_benchmark_is_reported() -> Result<()> {
+    let project = project(&[("b3.toml", "output-dir = 'bench'\n")])?;
+    let error = failure(&project, &["--benchmark", "nope"])?;
+
+    assert!(error.contains("has no benchmark named `nope`"), "{error}");
+
+    Ok(())
+}
+
+#[test]
+fn benchmark_definitions_are_not_exposed_as_options() -> Result<()> {
+    let project = project(&[(
+        "b3.toml",
+        "[benchmarks.parse]\ncommand = ['git', '--version']\n",
+    )])?;
+    let help = help(&project, &[])?;
+
+    assert!(!help.contains("parse"), "{help}");
+
+    Ok(())
+}
+
+#[test]
+fn unusable_benchmarks_are_reported() -> Result<()> {
+    for (contents, arguments, expected) in [
+        ("benchmark = 'parse'", &[][..], "cannot set `benchmark`"),
+        (
+            "benchmarks = 1",
+            &["--benchmark", "parse"][..],
+            "has no benchmark named `parse`",
+        ),
+        (
+            "[benchmarks]\nparse = 1",
+            &["--benchmark", "parse"][..],
+            "has no benchmark named `parse`",
+        ),
+        (
+            "[benchmarks.parse]\ncommand = ['echo']\nworking-directory = 1",
+            &["--benchmark", "parse"][..],
+            "must set `benchmarks.parse.working-directory` to a string",
+        ),
+        (
+            "[benchmarks.parse]\ncommand = ['echo']\nenv = 1",
+            &["--benchmark", "parse"][..],
+            "must set `benchmarks.parse.env` to a table",
+        ),
+        (
+            "[benchmarks.parse]\ncommand = ['echo']\n[benchmarks.parse.env]\nVAR = 1",
+            &["--benchmark", "parse"][..],
+            "must set `benchmarks.parse.env.VAR` to a string",
+        ),
+        (
+            "[benchmarks.parse]\ncommand = ['echo']\nbogus = 1",
+            &["--benchmark", "parse"][..],
+            "sets `bogus`, which is not an option",
+        ),
+    ] {
+        let project = project(&[("b3.toml", contents)])?;
+        let error = failure(&project, arguments)?;
+
+        assert!(error.contains(expected), "{contents} gave {error}");
+    }
+
+    Ok(())
+}
+
+#[test]
+fn an_unselected_benchmarks_table_is_not_validated() -> Result<()> {
+    let project = project(&[("b3.toml", "output-dir = 'bench'\nbenchmarks = 1\n")])?;
+    let error = failure(&project, &["--repetitions", "5"])?;
+
+    assert!(
+        error.contains("At least 10 repetitions are required."),
+        "{error}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn a_benchmark_can_set_its_working_directory() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        \n\
+        [benchmarks.parse]\n\
+        command = ['git', 'rev-parse', '--show-prefix']\n\
+        working-directory = 'sub'\n",
+    )?;
+    fs::create_dir(project.path().join("sub"))?;
+    fs::write(project.path().join("sub").join(".gitkeep"), "")?;
+    git(&project, &["add", "sub"])?;
+    git(&project, &["commit", "--quiet", "--message", "add sub"])?;
+
+    let (succeeded, _, stderr) = run(&project, &["--benchmark", "parse"])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
+    assert!(log.contains("sub/"), "{log}");
+
+    Ok(())
+}
+
+#[test]
+fn a_benchmark_can_set_environment_variables() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        \n\
+        [benchmarks.parse]\n\
+        command = ['git', 'config', 'user.name']\n\
+        \n\
+        [benchmarks.parse.env]\n\
+        GIT_CONFIG_COUNT = '1'\n\
+        GIT_CONFIG_KEY_0 = 'user.name'\n\
+        GIT_CONFIG_VALUE_0 = 'benchmark-env'\n",
+    )?;
+
+    let (succeeded, _, stderr) = run(&project, &["--benchmark", "parse"])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
+    assert!(log.contains("benchmark-env"), "{log}");
+
+    Ok(())
+}
