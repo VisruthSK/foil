@@ -451,6 +451,38 @@ fn a_benchmark_can_set_environment_variables() -> Result<()> {
 }
 
 #[test]
+fn a_benchmarks_env_merges_with_the_top_level_env() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        command = ['git', 'config', 'user.name']\n\
+        \n\
+        [env]\n\
+        GIT_CONFIG_COUNT = '1'\n\
+        GIT_CONFIG_KEY_0 = 'user.name'\n\
+        GIT_CONFIG_VALUE_0 = 'top-level-env'\n\
+        \n\
+        [benchmarks.parse]\n\
+        command = ['git', 'config', 'user.name']\n\
+        \n\
+        [benchmarks.parse.env]\n\
+        GIT_CONFIG_VALUE_0 = 'benchmark-env'\n",
+    )?;
+
+    let (succeeded, _, stderr) = run(&project, &["--benchmark", "parse"])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
+    assert!(log.contains("benchmark-env"), "{log}");
+    assert!(!log.contains("top-level-env"), "{log}");
+
+    Ok(())
+}
+
+#[test]
 fn working_directory_and_env_are_ordinary_options() -> Result<()> {
     let project = repository(
         "baseline = 'HEAD'\n\

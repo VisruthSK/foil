@@ -28,7 +28,7 @@ output-dir = "benchmark/"
 
 With that file, the run above is `b3 -- cargo bench`. Arguments override the file, which overrides the builtin defaults, and `b3 --help` reports the defaults the file leaves in place. The command itself always comes from the command line: pass it after `--`, whether or not a configuration file is in play.
 
-A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and must set its own `command`; it may also override any option above, including `working-directory` and `env`:
+A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and must set its own `command`; it may also override any option above, including `working-directory`. Its `env` table is merged with the top-level one instead, variable by variable, with the benchmark's values winning on conflicts:
 
 ```toml
 repetitions = 10
