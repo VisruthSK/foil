@@ -559,9 +559,9 @@ fn every_named_benchmark_runs_by_default() -> Result<()> {
 }
 
 #[test]
-fn repeated_benchmark_arguments_select_a_subset() -> Result<()> {
+fn a_single_benchmark_argument_selects_a_subset() -> Result<()> {
     let project = repository(SUITE)?;
-    let (succeeded, _, stderr) = run(&project, &["--benchmark", "first", "--benchmark", "third"])?;
+    let (succeeded, _, stderr) = run(&project, &["--benchmark", "first", "third"])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
     let bench = project.path().join("bench");

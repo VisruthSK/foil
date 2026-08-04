@@ -49,7 +49,9 @@ RAYON_NUM_THREADS = "1"
 
 `b3 --benchmark render` runs with 50 repetitions in `benchmarks/render`; `b3 --benchmark parse` runs with the top-level 10. An explicit argument still overrides a benchmark's setting.
 
-With no `--benchmark`, every benchmark in the table runs, each in its own `--output-dir` subdirectory named after it. Pass `--benchmark` (repeatable) to run only some of them. A configuration with no `[benchmarks]` table always runs the single command above, unnamed, exactly as without one.
+With no `--benchmark`, every benchmark in the table runs, each in its own `--output-dir` subdirectory named after it. Pass `--benchmark render parse` to run only some of them. A configuration with no `[benchmarks]` table always runs the single command above, unnamed, exactly as without one.
+
+The intended workflow is a `b3.toml` with named benchmarks, run with a plain `b3`; the trailing `-- <COMMAND>...` is there for one-off, unconfigured runs.
 
 ## Output
 
