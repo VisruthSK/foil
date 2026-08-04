@@ -10,7 +10,11 @@ rand = "0.10.2"
 rand_distr = "0.6.0"
 tempfile = "3.27.0"
 
-# KaTeX renders the `$...$` math in doc comments. Locally this comes from
-# .cargo/config.toml; docs.rs needs it declared here.
 [package.metadata.docs.rs]
 rustdoc-args = ["--html-in-header", "katex-header.html"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
