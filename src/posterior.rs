@@ -141,6 +141,10 @@ impl Shrinkage {
 
         Ok(Self(value))
     }
+
+    pub const fn get(self) -> f64 {
+        self.0
+    }
 }
 
 impl FromStr for Shrinkage {

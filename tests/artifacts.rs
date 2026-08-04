@@ -1,5 +1,5 @@
 use anyhow::Result;
-use b3::{Config, Revision, write_config_json};
+use b3::{Config, Revision, Shrinkage, write_config_json};
 use serde_json::json;
 use std::{ffi::OsString, fs::read_to_string};
 use tempfile::tempdir;
@@ -14,6 +14,8 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
     let config = Config {
         seed: 42,
         repetitions: 10,
+        draws: 1000,
+        shrinkage: Shrinkage::new(5.0)?,
         baseline: &baseline,
         candidate: &candidate,
         command: &command,
@@ -25,6 +27,8 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
     let expected = json!({
         "seed": 42,
         "repetitions": 10,
+        "draws": 1000,
+        "shrinkage": 5.0,
         "b3_version": env!("CARGO_PKG_VERSION"),
         "baseline": { "revision": "main", "hash": baseline.hash() },
         "candidate": { "revision": "HEAD", "hash": candidate.hash() },

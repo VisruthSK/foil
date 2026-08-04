@@ -157,7 +157,8 @@ impl<W: Write> BenchmarkLog<W> {
 impl<W> Drop for BenchmarkLog<W> {
     fn drop(&mut self) {
         if self.run > 0 {
-            eprintln!();
+            let width = format!("Benchmarking run {0}/{0}", self.runs).len();
+            eprint!("\r{}\r", " ".repeat(width));
         }
     }
 }

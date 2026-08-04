@@ -108,7 +108,6 @@ fn main() -> Result<()> {
     })?;
     let seed = seed.unwrap_or_else(rand::random);
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-    eprintln!("Seed: {seed}");
 
     let config_command = command.clone();
     let mut command = command.into_iter();
@@ -135,6 +134,8 @@ fn main() -> Result<()> {
         &Config {
             seed,
             repetitions: repetition_count,
+            draws: draws.get(),
+            shrinkage,
             baseline: worktrees.baseline.revision(),
             candidate: worktrees.candidate.revision(),
             command: &config_command,
@@ -175,7 +176,7 @@ fn main() -> Result<()> {
         measured_repetitions.push(Repetition { outputs, order });
     }
 
-    // Ends the progress line before the report starts printing.
+    // Clears the progress line before the report starts printing.
     drop(log);
 
     let repetitions = Repetitions::try_from(measured_repetitions)?;
@@ -191,7 +192,13 @@ fn main() -> Result<()> {
     write_posterior_csv(&posterior_path, &posterior)
         .with_context(|| format!("Failed to write {}.", posterior_path.display()))?;
 
-    let report = posterior.summarize(&intervals)?.to_string();
+    let report = format!(
+        "Comparing candidate ({}) to baseline ({}) with {repetition_count} paired repetitions and {} Bayesian bootstrap draws.\n\n{}",
+        worktrees.candidate.revision().name(),
+        worktrees.baseline.revision().name(),
+        draws.get(),
+        posterior.summarize(&intervals)?,
+    );
     print!("{report}");
 
     let report_path = output_dir.join("report.txt");

@@ -1,4 +1,4 @@
-use crate::{Metric, Pair, Posterior, Repetitions, Revision, RunOrder};
+use crate::{Metric, Pair, Posterior, Repetitions, Revision, RunOrder, Shrinkage};
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -12,6 +12,8 @@ use std::{
 pub struct Config<'a> {
     pub seed: u64,
     pub repetitions: usize,
+    pub draws: usize,
+    pub shrinkage: Shrinkage,
     pub baseline: &'a Revision,
     pub candidate: &'a Revision,
     pub command: &'a [OsString],
@@ -29,6 +31,8 @@ pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
     let value = json!({
         "seed": config.seed,
         "repetitions": config.repetitions,
+        "draws": config.draws,
+        "shrinkage": config.shrinkage.get(),
         "b3_version": env!("CARGO_PKG_VERSION"),
         "baseline": {
             "revision": config.baseline.name(),
