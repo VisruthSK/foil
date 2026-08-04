@@ -9,14 +9,14 @@ NB: `b3` is currently experimental, the API may change without warning.
 ## Usage
 
 ```sh
-b3 --baseline main --candidate HEAD --repetitions 30 --output-dir benchmark/ -- Rscript benchmark.R
+b3 --baseline main --candidate HEAD --repetitions 30 --interval 0.5 0.8 0.98 --output-dir benchmark/ -- cargo bench
 ```
 
 Run `b3 --help` for the full set of options.
 
 ## Configuration
 
-Options can also be set in a TOML file, keyed by the long name of the option, plus `command` for the benchmark itself. `b3` reads `b3.toml` from the working directory when it is present, or the file given by `--config`.
+The flags above can also be set in a TOML file, keyed by their long names. `b3` reads `b3.toml` from the working directory when present, or the file given by `--config`.
 
 ```toml
 baseline = "main"
@@ -24,12 +24,11 @@ candidate = "HEAD"
 repetitions = 30
 interval = [0.5, 0.8, 0.98]
 output-dir = "benchmark/"
-command = ["Rscript", "benchmark.R"]
 ```
 
-With that file, the run above is just `b3`. Arguments override the file, which overrides the builtin defaults, and `b3 --help` reports the defaults the file leaves in place.
+With that file, the run above is `b3 -- cargo bench`. Arguments override the file, which overrides the builtin defaults, and `b3 --help` reports the defaults the file leaves in place. The command itself always comes from the command line: pass it after `--`, whether or not a configuration file is in play.
 
-A `[benchmarks]` table names benchmarks for `--benchmark` to select. Each one sets `command` and may override any option above, including `working-directory` and `env`:
+A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and must set its own `command`; it may also override any option above, including `working-directory` and `env`:
 
 ```toml
 repetitions = 10
@@ -39,9 +38,9 @@ draws = 20000
 command = ["cargo", "run", "--release", "--", "parse"]
 
 [benchmarks.render]
-command = ["cargo", "run", "--release", "--", "render"]
-working-directory = "benchmarks/render"
 repetitions = 50
+working-directory = "benchmarks/render"
+command = ["cargo", "run", "--release", "--", "render"]
 
 [benchmarks.render.env]
 RAYON_NUM_THREADS = "1"
@@ -49,9 +48,9 @@ RAYON_NUM_THREADS = "1"
 
 `b3 --benchmark render` runs with 50 repetitions in `benchmarks/render`; `b3 --benchmark parse` runs with the top-level 10. An explicit argument still overrides a benchmark's setting.
 
-With no `--benchmark`, every benchmark in the table runs, each in its own `--output-dir` subdirectory named after it. Pass `--benchmark render parse` to run only some of them. A configuration with no `[benchmarks]` table always runs the single command above, unnamed, exactly as without one.
+With no `--benchmark`, every benchmark in the table runs, each in its own `--output-dir` subdirectory named after it. Pass `--benchmark render parse` to run only some of them. A configuration with no `[benchmarks]` table always runs a single, unnamed command, exactly as with no configuration file at all.
 
-The intended workflow is a `b3.toml` with named benchmarks, run with a plain `b3`; the trailing `-- <COMMAND>...` is there for one-off, unconfigured runs.
+The intended workflow is a `b3.toml` with named benchmarks, run with a plain `b3`; the trailing `-- <COMMAND>...` is for one-off runs that skip configuration entirely.
 
 ## Output
 
