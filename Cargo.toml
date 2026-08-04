@@ -2,6 +2,12 @@
 name = "b3"
 version = "0.1.0"
 edition = "2024"
+description = "Bayesian Branch Benchmarking: compares runtime and memory between two git revisions."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/VisruthSK/b3"
+readme = "README.md"
+keywords = ["benchmark", "performance", "statistics", "bayesian", "git"]
+categories = ["command-line-utilities", "development-tools::profiling"]
 
 [dependencies]
 anyhow = "1.0.104"
