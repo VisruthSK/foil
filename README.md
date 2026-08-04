@@ -14,6 +14,21 @@ b3 --baseline main --candidate HEAD --repetitions 30 --output-dir benchmark/ -- 
 
 Run `b3 --help` for the full set of options.
 
+## Configuration
+
+Options can also be set in a TOML file, keyed by the long name of the option, plus `command` for the benchmark itself. `b3` reads `b3.toml` from the working directory when it is present, or the file given by `--config`.
+
+```toml
+baseline = "main"
+candidate = "HEAD"
+repetitions = 30
+interval = [0.5, 0.8, 0.98]
+output-dir = "benchmark/"
+command = ["Rscript", "benchmark.R"]
+```
+
+With that file, the run above is just `b3`. Arguments override the file, which overrides the builtin defaults, and `b3 --help` reports the defaults the file leaves in place.
+
 ## Output
 
 Each run writes to `--output-dir`:
