@@ -66,8 +66,8 @@ Each run writes to its output directory:
 Running more than one benchmark also prints a one-line-per-benchmark summary and writes it to `report_short.txt` in `--output-dir`:
 
 ```
-ggplot2: 1.2s -> 554.0ms [-52.41%, -51.31%]
-dplyr: 3.1s -> 3.0s [-4.02%, +1.15%]
+parse: 1.2s -> 554.0ms [-52.41%, -51.31%]
+render: 3.1s -> 3.0s [-4.02%, +1.15%]
 ```
 
 ## License
