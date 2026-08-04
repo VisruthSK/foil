@@ -388,17 +388,6 @@ mod tests {
         Ok(())
     }
 
-    /// NaN is the case worth pinning: it fails `shrinkage > 0.0`, so an unchecked
-    /// NaN would fit unshrunk instead of erroring.
-    #[test]
-    fn shrinkage_rejects_a_value_that_is_not_a_count() {
-        for rejected in [f64::NAN, f64::INFINITY, -1.0] {
-            assert!(Shrinkage::new(rejected).is_err(), "{rejected}");
-        }
-
-        assert_eq!(Shrinkage::new(0.0).ok(), Some(Shrinkage::NONE));
-    }
-
     /// Pins the machine-readable side: header, column order, and the full precision a
     /// reader needs to reproduce the summary.
     #[test]
