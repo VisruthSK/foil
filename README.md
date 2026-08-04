@@ -29,6 +29,26 @@ command = ["Rscript", "benchmark.R"]
 
 With that file, the run above is just `b3`. Arguments override the file, which overrides the builtin defaults, and `b3 --help` reports the defaults the file leaves in place.
 
+A `[benchmarks]` table names benchmarks for `--benchmark` to select. Each one sets `command` and may override any option above, plus set `working-directory` and `env`:
+
+```toml
+repetitions = 10
+draws = 20000
+
+[benchmarks.parse]
+command = ["cargo", "run", "--release", "--", "parse"]
+
+[benchmarks.render]
+command = ["cargo", "run", "--release", "--", "render"]
+working-directory = "benchmarks/render"
+repetitions = 50
+
+[benchmarks.render.env]
+RAYON_NUM_THREADS = "1"
+```
+
+`b3 --benchmark render` runs with 50 repetitions in `benchmarks/render`; `b3 --benchmark parse` runs with the top-level 10. An explicit argument still overrides a benchmark's setting.
+
 ## Output
 
 Each run writes to `--output-dir`:
