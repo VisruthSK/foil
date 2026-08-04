@@ -16,6 +16,7 @@ const CONFIG: &str = "config";
 const DEFAULT_CONFIG: &str = "b3.toml";
 const BENCHMARK: &str = "benchmark";
 const BENCHMARKS: &str = "benchmarks";
+const OUTPUT_DIR: &str = "output-dir";
 
 #[derive(Parser)]
 #[command(name = "b3")]
@@ -152,6 +153,15 @@ fn benchmark_names(path: Option<PathBuf>) -> Result<Vec<String>> {
     })
 }
 
+fn configured_output_dir(path: Option<PathBuf>) -> Result<Option<PathBuf>> {
+    let (_, config) = read_config(path)?;
+
+    Ok(match config.get(OUTPUT_DIR) {
+        Some(Value::String(text)) => Some(text.into()),
+        _ => None,
+    })
+}
+
 fn configure(command: Command, path: Option<PathBuf>, benchmark: Option<&str>) -> Result<Command> {
     let (path, mut config) = read_config(path)?;
 
@@ -266,7 +276,9 @@ fn parse_draws(text: &str) -> Result<NonZeroUsize> {
 fn main() -> Result<()> {
     let runs = Cli::layered()?;
     let multiple = runs.len() > 1;
-    let suite_output_dir = runs[0].1.output_dir.clone();
+    let (_, first) = runs.first().expect("At least one run is always produced.");
+    let suite_output_dir =
+        configured_output_dir(first.config.clone())?.unwrap_or_else(|| first.output_dir.clone());
 
     let mut compact = Vec::with_capacity(runs.len());
 

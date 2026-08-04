@@ -601,3 +601,41 @@ fn a_lone_benchmark_skips_the_short_report() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn report_short_uses_the_top_level_output_directory() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        \n\
+        [benchmarks.a]\n\
+        command = ['git', '--version']\n\
+        output-dir = 'special'\n\
+        \n\
+        [benchmarks.b]\n\
+        command = ['git', '--version']\n",
+    )?;
+    let (succeeded, _, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    assert!(
+        project
+            .path()
+            .join("bench")
+            .join("report_short.txt")
+            .is_file()
+    );
+    assert!(
+        project
+            .path()
+            .join("special")
+            .join("a")
+            .join("report.txt")
+            .is_file()
+    );
+
+    Ok(())
+}
