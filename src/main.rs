@@ -24,6 +24,7 @@ const DEFAULT_CONFIG: &str = "b3.toml";
 const BENCHMARK: &str = "benchmark";
 const BENCHMARKS: &str = "benchmarks";
 const OUTPUT_DIR: &str = "output-dir";
+const ENV: &str = "env";
 
 #[derive(Parser)]
 #[command(name = "b3")]
@@ -179,7 +180,17 @@ fn configure(command: Command, path: Option<PathBuf>, benchmark: Option<&str>) -
             _ => None,
         });
         match entry {
-            Some(Value::Table(table)) => config.extend(table),
+            Some(Value::Table(mut table)) => {
+                if let (Some(Value::Table(base)), Some(Value::Table(over))) =
+                    (config.get(ENV), table.get(ENV))
+                {
+                    let mut env = base.clone();
+                    env.extend(over.clone());
+                    table.insert(ENV.to_owned(), Value::Table(env));
+                }
+
+                config.extend(table);
+            }
             _ => bail!("{} has no benchmark named `{name}`.", path.display()),
         }
     }
