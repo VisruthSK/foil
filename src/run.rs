@@ -65,7 +65,7 @@ impl RunCommand {
         let captured = Command::new(&self.program)
             .args(&self.args)
             .current_dir(working_dir)
-            .envs(self.env.iter().cloned())
+            .envs(self.env.iter().map(|(key, value)| (key, value)))
             .output()
             .with_context(|| format!("Failed to run {:?}.", self.program))?;
         let elapsed_time = start.elapsed();
