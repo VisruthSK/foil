@@ -5,12 +5,15 @@ use b3::{
 };
 
 use anyhow::{Context, Result, ensure};
-use clap::Parser;
+use clap::{Arg, Command, CommandFactory, FromArgMatches, Parser, builder::Str};
 use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
-use std::{ffi::OsString, fs, num::NonZeroUsize, path::PathBuf};
+use std::{ffi::OsString, fs, io::ErrorKind, num::NonZeroUsize, path::PathBuf};
 use tempfile::tempdir;
+use toml::{Table, Value};
 
 const MIN_DRAWS: usize = 1_000;
+const CONFIG: &str = "config";
+const DEFAULT_CONFIG: &str = "b3.toml";
 
 #[derive(Parser)]
 #[command(name = "b3")]
@@ -52,11 +55,97 @@ struct Cli {
     #[arg(long)]
     seed: Option<u64>,
 
+    /// TOML file whose keys are the long names of the options above, or `command`.
+    ///
+    /// Defaults to `b3.toml`, which is read when present.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
     /// Benchmark program and arguments.
     ///
     /// Place the command after `--`, for example: `b3 --output-dir benchmark/ --repetitions 10 -- Rscript benchmark.R`.
     #[arg(last = true, required = true, num_args = 1..)]
     command: Vec<OsString>,
+}
+
+impl Cli {
+    fn layered() -> Result<Self> {
+        let path = Self::command()
+            .ignore_errors(true)
+            .disable_help_flag(true)
+            .disable_version_flag(true)
+            .get_matches()
+            .remove_one::<PathBuf>(CONFIG);
+        let mut matches = configure(Self::command(), path)?.get_matches();
+
+        Self::from_arg_matches_mut(&mut matches).map_err(|error| error.exit())
+    }
+}
+
+fn configure(command: Command, path: Option<PathBuf>) -> Result<Command> {
+    let (path, optional) = path.map_or((DEFAULT_CONFIG.into(), true), |path| (path, false));
+    let config: Table = match fs::read_to_string(&path) {
+        Err(error) if optional && error.kind() == ErrorKind::NotFound => return Ok(command),
+        result => result
+            .with_context(|| format!("Failed to read {}.", path.display()))?
+            .parse()
+            .with_context(|| format!("Failed to parse {}.", path.display()))?,
+    };
+
+    config
+        .into_iter()
+        .try_fold(command, |command, (key, value)| {
+            ensure!(
+                key != CONFIG,
+                "{} cannot set `{key}`; pass --{CONFIG} instead.",
+                path.display()
+            );
+
+            let id = command
+                .get_arguments()
+                .find(|argument| configuration_key(argument) == Some(key.as_str()))
+                .with_context(|| {
+                    format!("{} sets `{key}`, which is not an option.", path.display())
+                })?
+                .get_id()
+                .to_string();
+            let defaults = defaults(&value).with_context(|| {
+                format!(
+                    "{} must set `{key}` to a string, number, boolean, or list of those.",
+                    path.display()
+                )
+            })?;
+            ensure!(
+                !defaults.is_empty(),
+                "{} sets `{key}` to an empty list.",
+                path.display()
+            );
+
+            Ok(command.mut_arg(id, |argument| {
+                argument.required(false).default_values(defaults)
+            }))
+        })
+}
+
+fn configuration_key(argument: &Arg) -> Option<&str> {
+    argument
+        .get_long()
+        .or_else(|| argument.is_last_set().then(|| argument.get_id().as_str()))
+}
+
+fn defaults(value: &Value) -> Option<Vec<Str>> {
+    match value {
+        Value::Array(array) => array.iter().map(scalar).collect(),
+        value => Some(vec![scalar(value)?]),
+    }
+}
+
+fn scalar(value: &Value) -> Option<Str> {
+    match value {
+        Value::String(text) => Some(text.clone().into()),
+        Value::Integer(_) | Value::Float(_) | Value::Boolean(_) => Some(value.to_string().into()),
+        _ => None,
+    }
 }
 
 fn parse_repetitions(text: &str) -> Result<NonZeroUsize> {
@@ -96,8 +185,9 @@ fn main() -> Result<()> {
         draws,
         intervals,
         seed,
+        config: _,
         command,
-    } = Cli::parse();
+    } = Cli::layered()?;
 
     let worktree_dir = tempdir().context("Failed to create temporary directory.")?;
     fs::create_dir_all(&output_dir).with_context(|| {
