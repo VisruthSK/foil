@@ -1,11 +1,50 @@
 use anyhow::Result;
 use b3::{Config, Revision, Shrinkage, write_config_json};
 use serde_json::json;
-use std::{ffi::OsString, fs::read_to_string};
+use std::{
+    env::{current_dir, set_current_dir},
+    ffi::OsString,
+    fs::read_to_string,
+    path::{Path, PathBuf},
+    process::Command,
+};
 use tempfile::tempdir;
+
+struct RestoreCwd(PathBuf);
+
+impl Drop for RestoreCwd {
+    fn drop(&mut self) {
+        let _ = set_current_dir(&self.0);
+    }
+}
+
+fn init_repo(path: &Path) -> Result<()> {
+    let git = |args: &[&str]| -> Result<()> {
+        anyhow::ensure!(
+            Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .status()?
+                .success(),
+            "git {args:?} failed."
+        );
+        Ok(())
+    };
+
+    git(&["init", "--quiet", "--initial-branch=main"])?;
+    git(&["config", "user.email", "b3@example.com"])?;
+    git(&["config", "user.name", "b3"])?;
+    git(&["commit", "--quiet", "--allow-empty", "-m", "root"])
+}
 
 #[test]
 fn config_json_contains_reproduction_metadata() -> Result<()> {
+    let repo = tempdir()?;
+    init_repo(repo.path())?;
+
+    let _restore = RestoreCwd(current_dir()?);
+    set_current_dir(&repo)?;
+
     let directory = tempdir()?;
     let path = directory.path().join("config.json");
     let command = ["cargo", "test --workspace"].map(OsString::from);
