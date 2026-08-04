@@ -73,12 +73,12 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
 
-    /// Name of a benchmark from the configuration file's `[benchmarks]` table. May be repeated.
+    /// Names of benchmarks from the configuration file's `[benchmarks]` table, e.g. `--benchmark a b c`.
     ///
     /// A benchmark's table may override any option above and must set `command`. With
     /// none named, every benchmark in the table runs; with no `[benchmarks]` table,
     /// `command` and the options above are used as given.
-    #[arg(long = "benchmark", value_name = "NAME")]
+    #[arg(long = "benchmark", value_name = "NAME", num_args = 1..)]
     benchmarks: Vec<String>,
 
     /// Benchmark program and arguments.
