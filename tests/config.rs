@@ -762,6 +762,26 @@ fn teardown_still_runs_when_a_benchmark_fails() -> Result<()> {
 }
 
 #[test]
+fn a_teardown_failure_is_reported_alongside_a_benchmark_failure() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
+        command = ['git', 'cat-file', '-p', 'absent-object']\n",
+    )?;
+
+    let error = failure(&project, &[])?;
+
+    assert!(error.contains("benchmark failed"), "{error}");
+    assert!(error.contains("The baseline teardown failed."), "{error}");
+
+    Ok(())
+}
+
+#[test]
 fn a_benchmark_inherits_the_top_level_command() -> Result<()> {
     let project = repository(
         "baseline = 'HEAD'\n\

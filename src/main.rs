@@ -183,6 +183,9 @@ fn compare(
         &mut rng,
     );
     let torn_down = run_in_both(run_command(&teardown), worktrees, "teardown");
+    if let (Err(_), Err(error)) = (&measured, &torn_down) {
+        eprintln!("{error:#}");
+    }
     let repetitions = measured?;
     torn_down?;
 
