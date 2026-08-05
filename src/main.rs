@@ -3,7 +3,8 @@ mod config;
 use crate::config::{Cli, ResolvedSuiteConfig, RunConfig, Suite};
 use b3::{
     BenchmarkLog, Config, MeasurementsCsv, Pair, Posterior, Repetition, Repetitions, Revision,
-    RunCommand, RunOrder, Side, Summary, Time, Worktree, write_config_json, write_posterior_csv,
+    RunCommand, RunOrder, Side, Summary, Time, Worktree, working_tree_is_dirty, write_config_json,
+    write_posterior_csv,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -43,6 +44,10 @@ fn main() -> Result<()> {
         output_dir: suite_output_dir,
         runs,
     } = Cli::suite()?;
+
+    if working_tree_is_dirty() {
+        eprintln!("Warning: the working tree has uncommitted changes, which are never benchmarked.");
+    }
     let multiple = runs.len() > 1;
     let revisions = Pair {
         baseline: suite.baseline.clone(),

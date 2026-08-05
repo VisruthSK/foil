@@ -14,6 +14,8 @@ b3 --baseline main --candidate HEAD --repetitions 30 --interval 0.5 0.8 0.98 --o
 
 Run `b3 --help` for the full set of options.
 
+Each revision runs in its own clean worktree, so uncommitted changes are never part of a measurement; `b3` warns when the working tree is dirty.
+
 ## Configuration
 
 The flags above can also be set in a TOML file, keyed by their long names. `b3` reads `b3.toml` from the working directory when present, or the file given by `--config`.

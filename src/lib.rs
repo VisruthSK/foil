@@ -13,4 +13,4 @@ pub use posterior::{Draw, Posterior, Shrinkage};
 pub use repetition::{Pair, Repetition, Repetitions, RunOrder, Side};
 pub use run::{BenchmarkLog, Bytes, RunCommand, RunOutput};
 pub use summary::{Change, ChangeBounds, Interval, Range, Summary};
-pub use worktree::{Revision, Worktree};
+pub use worktree::{Revision, Worktree, working_tree_is_dirty};

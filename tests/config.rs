@@ -697,6 +697,48 @@ fn a_failing_benchmark_leaves_the_measurements_recorded_so_far() -> Result<()> {
 }
 
 #[test]
+fn a_dirty_working_tree_prints_a_warning() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        command = ['git', '--version']\n",
+    )?;
+    fs::write(project.path().join("tracked.txt"), "before")?;
+    git(&project, &["add", "tracked.txt"])?;
+    git(&project, &["commit", "--quiet", "--message", "tracked"])?;
+    fs::write(project.path().join("tracked.txt"), "after")?;
+
+    let (succeeded, _, stderr) = run(&project, &[])?;
+
+    ensure!(succeeded, "b3 failed with {stderr}");
+    assert!(stderr.contains("uncommitted changes"), "{stderr}");
+
+    Ok(())
+}
+
+#[test]
+fn a_clean_working_tree_prints_no_warning() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        command = ['git', '--version']\n",
+    )?;
+
+    let (succeeded, _, stderr) = run(&project, &[])?;
+
+    ensure!(succeeded, "b3 failed with {stderr}");
+    assert!(!stderr.contains("uncommitted changes"), "{stderr}");
+
+    Ok(())
+}
+
+#[test]
 fn teardown_still_runs_when_a_benchmark_fails() -> Result<()> {
     let project = repository(
         "baseline = 'HEAD'\n\

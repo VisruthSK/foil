@@ -45,6 +45,13 @@ impl Revision {
     }
 }
 
+pub fn working_tree_is_dirty() -> bool {
+    Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+}
+
 impl Worktree {
     pub fn create(path: PathBuf, revision: Revision) -> Result<Self> {
         let status = Command::new("git")
