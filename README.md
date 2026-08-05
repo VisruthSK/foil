@@ -39,7 +39,7 @@ command = ["./target/release/parse", "corpus/"]
 
 Each runs once per revision, so a side effect reaching outside the worktree happens twice, once for the baseline and once for the candidate. A failing `setup` or `teardown` stops the run and reports what the command printed, and `teardown` still runs when a benchmark fails. On the command line these take a bare command, as in `--setup make`; one carrying flags of its own, like `cargo build --release`, belongs in the configuration file as a list.
 
-A `[benchmarks]` table is where commands belong in TOML. Each entry names a benchmark for `--benchmark` to select and must set its own `command`; it may override run options such as `repetitions`, `working-directory`, `isolate`, `setup`, and `teardown`. An empty list such as `setup = []` clears an inherited setup or teardown. `baseline`, `candidate`, and `seed` apply to the whole suite. A benchmark's `env` table is merged with the top-level one variable by variable, with the benchmark's values winning on conflicts:
+A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override any option above, and anything it leaves unset, including `command`, is inherited from the top level. An empty list, `setup = []`, clears an inherited `setup` or `teardown`. Its `env` table is merged with the top-level one instead, variable by variable, with the benchmark's values winning on conflicts:
 
 ```toml
 repetitions = 10

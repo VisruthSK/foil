@@ -49,7 +49,7 @@ struct Selectors {
 
     /// Names of benchmarks from the configuration file's `[benchmarks]` table, e.g. `--benchmark a b c`.
     ///
-    /// A benchmark's table may override run options and must set `command`. With none
+    /// A benchmark's table may override run options, including `command`. With none
     /// named, every benchmark in the table runs; with no `[benchmarks]` table,
     /// `command` and the options above are used as given.
     #[arg(long = "benchmark", value_name = "NAME", num_args = 1..)]
@@ -112,11 +112,11 @@ pub(crate) struct RunConfig {
     #[arg(long = "interval", default_values = ["0.5", "0.8", "0.98"])]
     pub(crate) intervals: Vec<Interval>,
 
-    /// Working directory for the benchmark command, relative to the worktree root.
+    /// Working directory for the benchmark, setup, and teardown commands, relative to the worktree root.
     #[arg(long, value_name = "DIR", value_parser = parse_working_directory)]
     pub(crate) working_directory: Option<PathBuf>,
 
-    /// Environment variable for the benchmark command, as `KEY=VALUE`.
+    /// Environment variable for the benchmark, setup, and teardown commands, as `KEY=VALUE`.
     ///
     /// May be repeated. In a configuration file, may instead be given as a table.
     #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env)]
@@ -321,11 +321,6 @@ fn validate_config(config: &Configuration) -> Result<()> {
                 config.path.display()
             )
         })?;
-        ensure!(
-            table.contains_key("command"),
-            "{} benchmark `{name}` must set `command`.",
-            config.path.display()
-        );
         if let Some(key) = table.keys().find(|key| option_in::<SuiteConfig>(key)) {
             bail!(
                 "{} benchmark `{name}` cannot set suite-level `{key}`.",
@@ -359,7 +354,6 @@ fn resolve(
             .with_context(|| {
                 format!("{} has no benchmark named `{name}`.", config.path.display())
             })?;
-        values.remove("command");
         if let (Some(Value::Table(base)), Some(Value::Table(over))) =
             (values.get(ENV), overrides.get(ENV))
         {

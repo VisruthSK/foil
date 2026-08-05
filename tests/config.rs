@@ -759,6 +759,27 @@ fn teardown_still_runs_when_a_benchmark_fails() -> Result<()> {
 }
 
 #[test]
+fn a_benchmark_inherits_the_top_level_command() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        command = ['git', '--version']\n\
+        \n\
+        [benchmarks.inherits]\n\
+        draws = 2000\n",
+    )?;
+    let (succeeded, stdout, stderr) = run(&project, &["--benchmark", "inherits"])?;
+
+    ensure!(succeeded, "b3 failed with {stderr}");
+    assert!(stdout.contains("2000 Bayesian bootstrap draws"), "{stdout}");
+
+    Ok(())
+}
+
+#[test]
 fn a_benchmark_can_set_its_own_setup_and_teardown() -> Result<()> {
     let project = repository(
         "baseline = 'HEAD'\n\
@@ -980,22 +1001,6 @@ fn benchmarks_run_in_declaration_order() -> Result<()> {
     assert!(
         stdout.find("zebra: Comparing") < stdout.find("apple: Comparing"),
         "{stdout}"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn every_benchmark_must_define_its_own_command() -> Result<()> {
-    let project = project(&[(
-        "b3.toml",
-        "command = ['git', '--version']\n[benchmarks.parse]\nrepetitions = 10\n",
-    )])?;
-    let error = failure(&project, &[])?;
-
-    assert!(
-        error.contains("benchmark `parse` must set `command`"),
-        "{error}"
     );
 
     Ok(())
