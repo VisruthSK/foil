@@ -84,13 +84,16 @@ impl RunCommand {
         let stdout = drain(child.stdout.take().expect("Stdout is piped."));
         let stderr = drain(child.stderr.take().expect("Stderr is piped."));
 
+        let failed_waiting = || format!("Failed to wait for {:?}.", self.program);
         let exit_status = match self.timeout {
-            None => child.wait()?,
-            Some(limit) => match child.wait_timeout(limit)? {
+            None => child.wait().with_context(failed_waiting)?,
+            Some(limit) => match child.wait_timeout(limit).with_context(failed_waiting)? {
                 Some(status) => status,
                 None => {
-                    child.kill()?;
-                    child.wait()?;
+                    child
+                        .kill()
+                        .with_context(|| format!("Failed to kill {:?}.", self.program))?;
+                    child.wait().with_context(failed_waiting)?;
                     bail!("{:?} timed out after {limit:?}.", self.program);
                 }
             },
