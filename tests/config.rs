@@ -675,7 +675,7 @@ fn teardown_runs_after_the_measured_runs() -> Result<()> {
 }
 
 #[test]
-fn a_failing_benchmark_leaves_the_measurements_recorded_so_far() -> Result<()> {
+fn a_failing_benchmark_still_leaves_a_measurements_file() -> Result<()> {
     let project = repository(
         "baseline = 'HEAD'\n\
         candidate = 'HEAD'\n\
