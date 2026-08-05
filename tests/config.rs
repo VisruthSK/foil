@@ -4,6 +4,12 @@ use tempfile::{TempDir, tempdir};
 
 const REQUIRED: &str = "output-dir = 'bench'\nrepetitions = 12\ncommand = ['benchmark']\n";
 
+const PREAMBLE: &str = "baseline = 'HEAD'\n\
+    candidate = 'HEAD'\n\
+    output-dir = 'bench'\n\
+    repetitions = 10\n\
+    draws = 1000\n";
+
 const CONFIG: &str = "\
     baseline = 'baseline-branch'\n\
     candidate = 'candidate-branch'\n\
@@ -297,16 +303,11 @@ fn selectors_are_found_after_run_options() -> Result<()> {
 
 #[test]
 fn a_benchmark_supplies_its_own_command() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        \n\
+    let project = repository(&format!(
+        "{PREAMBLE}\n\
         [benchmarks.parse]\n\
-        command = ['git', '--version']\n",
-    )?;
+        command = ['git', '--version']\n"
+    ))?;
     let (succeeded, stdout, stderr) = run(&project, &["--benchmark", "parse"])?;
 
     ensure!(succeeded, "b3 failed with {stderr}");
@@ -432,17 +433,12 @@ fn a_malformed_benchmarks_table_is_always_rejected() -> Result<()> {
 
 #[test]
 fn a_benchmark_can_set_its_working_directory() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        \n\
+    let project = repository(&format!(
+        "{PREAMBLE}\n\
         [benchmarks.parse]\n\
         command = ['git', 'rev-parse', '--show-prefix']\n\
-        working-directory = 'sub'\n",
-    )?;
+        working-directory = 'sub'\n"
+    ))?;
     fs::create_dir(project.path().join("sub"))?;
     fs::write(project.path().join("sub").join(".gitkeep"), "")?;
     git(&project, &["add", "sub"])?;
@@ -465,21 +461,16 @@ fn a_benchmark_can_set_its_working_directory() -> Result<()> {
 
 #[test]
 fn a_benchmark_can_set_environment_variables() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        \n\
+    let project = repository(&format!(
+        "{PREAMBLE}\n\
         [benchmarks.parse]\n\
         command = ['git', 'config', 'user.name']\n\
         \n\
         [benchmarks.parse.env]\n\
         GIT_CONFIG_COUNT = '1'\n\
         GIT_CONFIG_KEY_0 = 'user.name'\n\
-        GIT_CONFIG_VALUE_0 = 'benchmark-env'\n",
-    )?;
+        GIT_CONFIG_VALUE_0 = 'benchmark-env'\n"
+    ))?;
 
     let (succeeded, _, stderr) = run(&project, &["--benchmark", "parse"])?;
     ensure!(succeeded, "b3 failed with {stderr}");
@@ -498,13 +489,8 @@ fn a_benchmark_can_set_environment_variables() -> Result<()> {
 
 #[test]
 fn a_benchmarks_env_merges_with_the_top_level_env() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        command = ['git', 'config', 'user.name']\n\
+    let project = repository(&format!(
+        "{PREAMBLE}command = ['git', 'config', 'user.name']\n\
         \n\
         [env]\n\
         GIT_CONFIG_COUNT = '1'\n\
@@ -515,8 +501,8 @@ fn a_benchmarks_env_merges_with_the_top_level_env() -> Result<()> {
         command = ['git', 'config', 'user.name']\n\
         \n\
         [benchmarks.parse.env]\n\
-        GIT_CONFIG_VALUE_0 = 'benchmark-env'\n",
-    )?;
+        GIT_CONFIG_VALUE_0 = 'benchmark-env'\n"
+    ))?;
 
     let (succeeded, _, stderr) = run(&project, &["--benchmark", "parse"])?;
     ensure!(succeeded, "b3 failed with {stderr}");
@@ -536,20 +522,15 @@ fn a_benchmarks_env_merges_with_the_top_level_env() -> Result<()> {
 
 #[test]
 fn working_directory_and_env_are_ordinary_options() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        working-directory = 'sub'\n\
+    let project = repository(&format!(
+        "{PREAMBLE}working-directory = 'sub'\n\
         command = ['git', 'config', 'user.name']\n\
         \n\
         [env]\n\
         GIT_CONFIG_COUNT = '1'\n\
         GIT_CONFIG_KEY_0 = 'user.name'\n\
-        GIT_CONFIG_VALUE_0 = 'top-level-env'\n",
-    )?;
+        GIT_CONFIG_VALUE_0 = 'top-level-env'\n"
+    ))?;
     fs::create_dir(project.path().join("sub"))?;
     fs::write(project.path().join("sub").join(".gitkeep"), "")?;
     git(&project, &["add", "sub"])?;
@@ -566,19 +547,14 @@ fn working_directory_and_env_are_ordinary_options() -> Result<()> {
 
 #[test]
 fn an_explicit_env_argument_overrides_the_configuration() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        command = ['git', 'config', 'user.name']\n\
+    let project = repository(&format!(
+        "{PREAMBLE}command = ['git', 'config', 'user.name']\n\
         \n\
         [env]\n\
         GIT_CONFIG_COUNT = '1'\n\
         GIT_CONFIG_KEY_0 = 'user.name'\n\
-        GIT_CONFIG_VALUE_0 = 'configured-env'\n",
-    )?;
+        GIT_CONFIG_VALUE_0 = 'configured-env'\n"
+    ))?;
 
     let (succeeded, _, stderr) = run(
         &project,
@@ -602,15 +578,10 @@ fn an_explicit_env_argument_overrides_the_configuration() -> Result<()> {
 
 #[test]
 fn setup_runs_in_each_worktree_before_the_measured_runs() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        setup = ['git', 'config', '--file', 'marker.txt', 'setup.ran', 'yes']\n\
-        command = ['git', 'config', '--file', 'marker.txt', 'setup.ran']\n",
-    )?;
+    let project = repository(&format!(
+        "{PREAMBLE}setup = ['git', 'config', '--file', 'marker.txt', 'setup.ran', 'yes']\n\
+        command = ['git', 'config', '--file', 'marker.txt', 'setup.ran']\n"
+    ))?;
 
     let (succeeded, _, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
@@ -623,15 +594,10 @@ fn setup_runs_in_each_worktree_before_the_measured_runs() -> Result<()> {
 
 #[test]
 fn a_failing_setup_stops_before_the_measured_runs() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        setup = ['git', 'cat-file', '-p', 'absent-object']\n\
-        command = ['git', '--version']\n",
-    )?;
+    let project = repository(&format!(
+        "{PREAMBLE}setup = ['git', 'cat-file', '-p', 'absent-object']\n\
+        command = ['git', '--version']\n"
+    ))?;
 
     let error = failure(&project, &[])?;
 
@@ -650,15 +616,10 @@ fn a_failing_setup_stops_before_the_measured_runs() -> Result<()> {
 
 #[test]
 fn teardown_runs_after_the_measured_runs() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
-        command = ['git', '--version']\n",
-    )?;
+    let project = repository(&format!(
+        "{PREAMBLE}teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
+        command = ['git', '--version']\n"
+    ))?;
 
     let error = failure(&project, &[])?;
 
@@ -676,14 +637,9 @@ fn teardown_runs_after_the_measured_runs() -> Result<()> {
 
 #[test]
 fn a_failing_benchmark_still_leaves_a_measurements_file() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        command = ['git', 'cat-file', '-p', 'absent-object']\n",
-    )?;
+    let project = repository(&format!(
+        "{PREAMBLE}command = ['git', 'cat-file', '-p', 'absent-object']\n"
+    ))?;
 
     let error = failure(&project, &[])?;
 
@@ -698,14 +654,7 @@ fn a_failing_benchmark_still_leaves_a_measurements_file() -> Result<()> {
 
 #[test]
 fn a_dirty_working_tree_prints_a_warning() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        command = ['git', '--version']\n",
-    )?;
+    let project = repository(&format!("{PREAMBLE}command = ['git', '--version']\n"))?;
     fs::write(project.path().join("tracked.txt"), "before")?;
     git(&project, &["add", "tracked.txt"])?;
     git(&project, &["commit", "--quiet", "--message", "tracked"])?;
@@ -721,14 +670,7 @@ fn a_dirty_working_tree_prints_a_warning() -> Result<()> {
 
 #[test]
 fn a_clean_working_tree_prints_no_warning() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        command = ['git', '--version']\n",
-    )?;
+    let project = repository(&format!("{PREAMBLE}command = ['git', '--version']\n"))?;
 
     let (succeeded, _, stderr) = run(&project, &[])?;
 
@@ -740,15 +682,10 @@ fn a_clean_working_tree_prints_no_warning() -> Result<()> {
 
 #[test]
 fn teardown_still_runs_when_a_benchmark_fails() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        teardown = ['git', 'tag', '--force', 'teardown-ran']\n\
-        command = ['git', 'cat-file', '-p', 'absent-object']\n",
-    )?;
+    let project = repository(&format!(
+        "{PREAMBLE}teardown = ['git', 'tag', '--force', 'teardown-ran']\n\
+        command = ['git', 'cat-file', '-p', 'absent-object']\n"
+    ))?;
 
     let error = failure(&project, &[])?;
 
@@ -763,15 +700,10 @@ fn teardown_still_runs_when_a_benchmark_fails() -> Result<()> {
 
 #[test]
 fn a_teardown_failure_is_reported_alongside_a_benchmark_failure() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
-        command = ['git', 'cat-file', '-p', 'absent-object']\n",
-    )?;
+    let project = repository(&format!(
+        "{PREAMBLE}teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
+        command = ['git', 'cat-file', '-p', 'absent-object']\n"
+    ))?;
 
     let error = failure(&project, &[])?;
 
@@ -783,17 +715,12 @@ fn a_teardown_failure_is_reported_alongside_a_benchmark_failure() -> Result<()> 
 
 #[test]
 fn a_benchmark_inherits_the_top_level_command() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        command = ['git', '--version']\n\
+    let project = repository(&format!(
+        "{PREAMBLE}command = ['git', '--version']\n\
         \n\
         [benchmarks.inherits]\n\
-        draws = 2000\n",
-    )?;
+        draws = 2000\n"
+    ))?;
     let (succeeded, stdout, stderr) = run(&project, &["--benchmark", "inherits"])?;
 
     ensure!(succeeded, "b3 failed with {stderr}");
@@ -804,20 +731,15 @@ fn a_benchmark_inherits_the_top_level_command() -> Result<()> {
 
 #[test]
 fn a_benchmark_can_set_its_own_setup_and_teardown() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        setup = ['git', 'config', '--file', 'marker.txt', 'setup.ran', 'top-level-setup']\n\
+    let project = repository(&format!(
+        "{PREAMBLE}setup = ['git', 'config', '--file', 'marker.txt', 'setup.ran', 'top-level-setup']\n\
         teardown = ['git', '--version']\n\
         \n\
         [benchmarks.parse]\n\
         setup = ['git', 'config', '--file', 'marker.txt', 'setup.ran', 'benchmark-setup']\n\
         teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
-        command = ['git', 'config', '--file', 'marker.txt', 'setup.ran']\n",
-    )?;
+        command = ['git', 'config', '--file', 'marker.txt', 'setup.ran']\n"
+    ))?;
 
     let error = failure(&project, &[])?;
 
@@ -838,20 +760,15 @@ fn a_benchmark_can_set_its_own_setup_and_teardown() -> Result<()> {
 
 #[test]
 fn a_benchmark_clears_an_inherited_setup_and_teardown_with_an_empty_list() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        setup = ['git', 'cat-file', '-p', 'absent-object']\n\
+    let project = repository(&format!(
+        "{PREAMBLE}setup = ['git', 'cat-file', '-p', 'absent-object']\n\
         teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
         \n\
         [benchmarks.standalone]\n\
         setup = []\n\
         teardown = []\n\
-        command = ['git', '--version']\n",
-    )?;
+        command = ['git', '--version']\n"
+    ))?;
 
     let (succeeded, _, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
@@ -926,16 +843,11 @@ fn a_single_benchmark_argument_selects_a_subset() -> Result<()> {
 
 #[test]
 fn a_lone_benchmark_skips_the_short_report() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        \n\
+    let project = repository(&format!(
+        "{PREAMBLE}\n\
         [benchmarks.parse]\n\
-        command = ['git', '--version']\n",
-    )?;
+        command = ['git', '--version']\n"
+    ))?;
     let (succeeded, stdout, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
@@ -950,20 +862,15 @@ fn a_lone_benchmark_skips_the_short_report() -> Result<()> {
 
 #[test]
 fn report_short_uses_the_top_level_output_directory() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        \n\
+    let project = repository(&format!(
+        "{PREAMBLE}\n\
         [benchmarks.a]\n\
         command = ['git', '--version']\n\
         output-dir = 'special'\n\
         \n\
         [benchmarks.b]\n\
-        command = ['git', '--version']\n",
-    )?;
+        command = ['git', '--version']\n"
+    ))?;
     let (succeeded, _, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
