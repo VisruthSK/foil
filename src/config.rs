@@ -10,7 +10,7 @@ use std::{
     ffi::OsString,
     fs,
     io::ErrorKind,
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     path::{Component, Path, PathBuf},
 };
 use toml::{Table, Value};
@@ -101,6 +101,12 @@ pub(crate) struct RunConfig {
     /// Number of Bayesian bootstrap draws.
     #[arg(long, value_parser = parse_draws, default_value = "10000")]
     pub(crate) draws: NonZeroUsize,
+
+    /// Fail when a single benchmark run takes longer than this many seconds.
+    ///
+    /// Applies to each measured run separately; `setup` and `teardown` are never limited.
+    #[arg(long, value_name = "SECONDS")]
+    pub(crate) timeout: Option<NonZeroU64>,
 
     /// Central credible interval widths.
     #[arg(long = "interval", default_values = ["0.5", "0.8", "0.98"])]

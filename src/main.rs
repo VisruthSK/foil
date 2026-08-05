@@ -14,6 +14,7 @@ use std::{
     path::Path,
     process,
     sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
 };
 use tempfile::{TempDir, tempdir};
 
@@ -114,6 +115,7 @@ fn compare(
         output_dir: _,
         repetitions: repetition_count,
         draws,
+        timeout,
         intervals,
         working_directory,
         envs,
@@ -140,7 +142,9 @@ fn compare(
             envs.clone(),
         ))
     };
-    let benchmark = run_command(&command).expect("Clap requires at least one command argument.");
+    let benchmark = run_command(&command)
+        .expect("Clap requires at least one command argument.")
+        .with_timeout(timeout.map(|seconds| Duration::from_secs(seconds.get())));
 
     let repetition_count = repetition_count.get();
 

@@ -1,21 +1,24 @@
 use crate::repetition::Side;
 use crate::worktree::Worktree;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::json;
 use std::{
     ffi::OsString,
-    io::Write,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, ExitStatus},
+    process::{Command, ExitStatus, Stdio},
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+use wait_timeout::ChildExt;
 
 pub struct RunCommand {
     program: OsString,
     args: Vec<OsString>,
     working_directory: Option<PathBuf>,
     env: Vec<(String, String)>,
+    timeout: Option<Duration>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -52,7 +55,14 @@ impl RunCommand {
             args,
             working_directory,
             env,
+            timeout: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     pub(crate) fn run_in(&self, worktree: &Path) -> Result<Run> {
@@ -62,22 +72,39 @@ impl RunCommand {
         };
 
         let start = Instant::now();
-        let captured = Command::new(&self.program)
+        let mut child = Command::new(&self.program)
             .args(&self.args)
             .current_dir(working_dir)
             .envs(self.env.iter().map(|(key, value)| (key, value)))
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .with_context(|| format!("Failed to run {:?}.", self.program))?;
+        let stdout = drain(child.stdout.take().expect("Stdout is piped."));
+        let stderr = drain(child.stderr.take().expect("Stderr is piped."));
+
+        let exit_status = match self.timeout {
+            None => child.wait()?,
+            Some(limit) => match child.wait_timeout(limit)? {
+                Some(status) => status,
+                None => {
+                    child.kill()?;
+                    child.wait()?;
+                    bail!("{:?} timed out after {limit:?}.", self.program);
+                }
+            },
+        };
         let elapsed_time = start.elapsed();
 
         Ok(Run {
             output: RunOutput {
-                exit_status: captured.status,
+                exit_status,
                 elapsed_time,
                 peak_sampled_memory: None,
             },
-            stdout: captured.stdout,
-            stderr: captured.stderr,
+            stdout: stdout.join().expect("The stdout reader does not panic.")?,
+            stderr: stderr.join().expect("The stderr reader does not panic.")?,
         })
     }
 
@@ -122,6 +149,15 @@ impl RunOutput {
     pub fn peak_memory(&self) -> Option<Bytes> {
         self.peak_sampled_memory
     }
+}
+
+fn drain(mut stream: impl Read + Send + 'static) -> JoinHandle<io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes)?;
+
+        Ok(bytes)
+    })
 }
 
 pub(crate) struct Run {
@@ -198,6 +234,50 @@ impl<W> Drop for BenchmarkLog<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    fn command(program: &str, args: &[&str]) -> RunCommand {
+        RunCommand::new(
+            program.into(),
+            args.iter().map(Into::into).collect(),
+            None,
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn a_run_that_exceeds_the_timeout_fails() -> Result<()> {
+        let directory = tempdir()?;
+        let slow = if cfg!(windows) {
+            command("ping", &["-n", "31", "127.0.0.1"])
+        } else {
+            command("sleep", &["30"])
+        };
+
+        let error = slow
+            .with_timeout(Some(Duration::from_millis(100)))
+            .run_in(directory.path())
+            .err()
+            .context("The run should time out.")?;
+
+        assert!(error.to_string().contains("timed out"), "{error}");
+
+        Ok(())
+    }
+
+    #[test]
+    fn a_run_within_the_timeout_succeeds() -> Result<()> {
+        let directory = tempdir()?;
+
+        let run = command("git", &["--version"])
+            .with_timeout(Some(Duration::from_secs(60)))
+            .run_in(directory.path())?;
+
+        assert!(run.output.exit_status.success());
+        assert!(!run.stdout.is_empty());
+
+        Ok(())
+    }
 
     /// 1.5 is exactly representable, so it round-trips cleanly.
     fn output() -> RunOutput {
