@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::json;
 use std::{
     ffi::OsString,
-    io::{self, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     thread::{self, JoinHandle},
@@ -170,6 +170,9 @@ pub struct BenchmarkLog<W> {
     writer: W,
     run: usize,
     runs: usize,
+    started: Instant,
+    interactive: bool,
+    cleared_width: usize,
 }
 
 impl<W: Write> BenchmarkLog<W> {
@@ -178,6 +181,9 @@ impl<W: Write> BenchmarkLog<W> {
             writer,
             run: 0,
             runs,
+            started: Instant::now(),
+            interactive: io::stderr().is_terminal(),
+            cleared_width: 0,
         }
     }
 
@@ -197,8 +203,35 @@ impl<W: Write> BenchmarkLog<W> {
         Ok(run.output)
     }
 
-    fn starting(&self) {
-        eprint!("\rBenchmarking run {}/{}", self.run + 1, self.runs);
+    fn starting(&mut self) {
+        let progress = format!(
+            "Benchmarking run {}/{}{}",
+            self.run + 1,
+            self.runs,
+            self.eta()
+        );
+
+        if self.interactive {
+            eprint!("\r{progress:<width$}", width = self.cleared_width);
+            self.cleared_width = self.cleared_width.max(progress.len());
+        } else {
+            eprintln!("{progress}");
+        }
+    }
+
+    fn eta(&self) -> String {
+        if self.run == 0 {
+            return String::new();
+        }
+
+        let per_run = self.started.elapsed().as_secs_f64() / self.run as f64;
+        let seconds = (per_run * (self.runs - self.run) as f64).round() as u64;
+
+        if seconds >= 60 {
+            format!(" (ETA {}m{:02}s)", seconds / 60, seconds % 60)
+        } else {
+            format!(" (ETA {seconds}s)")
+        }
     }
 
     fn append(&mut self, side: Side, run: &Run) -> Result<()> {
@@ -224,9 +257,8 @@ impl<W: Write> BenchmarkLog<W> {
 
 impl<W> Drop for BenchmarkLog<W> {
     fn drop(&mut self) {
-        if self.run > 0 {
-            let width = format!("Benchmarking run {0}/{0}", self.runs).len();
-            eprint!("\r{}\r", " ".repeat(width));
+        if self.interactive && self.run > 0 {
+            eprint!("\r{}\r", " ".repeat(self.cleared_width));
         }
     }
 }
