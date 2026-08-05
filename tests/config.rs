@@ -706,6 +706,29 @@ fn a_benchmark_can_set_its_own_setup_and_teardown() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn a_benchmark_clears_an_inherited_setup_and_teardown_with_an_empty_list() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        setup = ['git', 'cat-file', '-p', 'absent-object']\n\
+        teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
+        \n\
+        [benchmarks.standalone]\n\
+        setup = []\n\
+        teardown = []\n\
+        command = ['git', '--version']\n",
+    )?;
+
+    let (succeeded, _, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    Ok(())
+}
+
 const SUITE: &str = "baseline = 'HEAD'\n\
     candidate = 'HEAD'\n\
     output-dir = 'bench'\n\

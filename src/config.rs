@@ -21,6 +21,8 @@ const BENCHMARKS: &str = "benchmarks";
 const OUTPUT_DIR: &str = "output-dir";
 const OUTPUT_DIR_ID: &str = "output_dir";
 const ENV: &str = "env";
+const SETUP: &str = "setup";
+const TEARDOWN: &str = "teardown";
 
 #[derive(Parser)]
 #[command(name = "b3")]
@@ -402,11 +404,14 @@ fn configure_value(command: Command, path: &Path, key: &str, value: &Value) -> R
             path.display()
         )
     })?;
-    ensure!(
-        !defaults.is_empty(),
-        "{} sets `{key}` to an empty list.",
-        path.display()
-    );
+    if defaults.is_empty() {
+        ensure!(
+            key == SETUP || key == TEARDOWN,
+            "{} sets `{key}` to an empty list.",
+            path.display()
+        );
+        return Ok(command);
+    }
     ensure!(
         repeatable || defaults.len() == 1,
         "{} sets `{key}` to {} values, but it takes only one.",
