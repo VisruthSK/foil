@@ -45,8 +45,7 @@ fn main() -> Result<()> {
 
         let summary = compare(&suite, config, &worktrees.pair, &output_dir, heading)?;
 
-        if multiple {
-            let name = name.expect("Multi-benchmark runs are always named.");
+        if let Some(name) = name {
             compact.push(format!("{name}: {}", summary.compact()));
         }
     }
