@@ -8,7 +8,13 @@ use b3::{
 
 use anyhow::{Context, Result, ensure};
 use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
-use std::{ffi::OsString, fs, path::Path};
+use std::{
+    ffi::OsString,
+    fs,
+    path::Path,
+    process,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use tempfile::{TempDir, tempdir};
 
 struct Worktrees {
@@ -16,7 +22,21 @@ struct Worktrees {
     _directory: TempDir,
 }
 
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::Relaxed)
+}
+
 fn main() -> Result<()> {
+    ctrlc::set_handler(|| {
+        if INTERRUPTED.swap(true, Ordering::Relaxed) {
+            process::exit(130);
+        }
+        eprintln!("\nInterrupted; cleaning up. Press Ctrl+C again to exit immediately.");
+    })
+    .context("Failed to set the Ctrl+C handler.")?;
+
     let Suite {
         config: suite,
         output_dir: suite_output_dir,
@@ -203,6 +223,7 @@ fn measure_all(
 
         // TODO: Better handling of failing runs to find systematic errors. Should record and write out?
         let first_output = log.measure(benchmark, first, worktrees.get(first))?;
+        ensure!(!interrupted(), "Interrupted.");
         ensure!(
             first_output.exit_status().success(),
             "The {first} benchmark failed with {}.",
@@ -210,6 +231,7 @@ fn measure_all(
         );
 
         let second_output = log.measure(benchmark, second, worktrees.get(second))?;
+        ensure!(!interrupted(), "Interrupted.");
         ensure!(
             second_output.exit_status().success(),
             "The {second} benchmark failed with {}.",
