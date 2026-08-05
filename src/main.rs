@@ -46,7 +46,9 @@ fn main() -> Result<()> {
     } = Cli::suite()?;
 
     if working_tree_is_dirty() {
-        eprintln!("Warning: the working tree has uncommitted changes, which are never benchmarked.");
+        eprintln!(
+            "Warning: the working tree has uncommitted changes, which are never benchmarked."
+        );
     }
     let multiple = runs.len() > 1;
     let revisions = Pair {

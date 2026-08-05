@@ -753,7 +753,10 @@ fn teardown_still_runs_when_a_benchmark_fails() -> Result<()> {
     let error = failure(&project, &[])?;
 
     assert!(error.contains("benchmark failed"), "{error}");
-    git(&project, &["rev-parse", "--verify", "refs/tags/teardown-ran"])?;
+    git(
+        &project,
+        &["rev-parse", "--verify", "refs/tags/teardown-ran"],
+    )?;
 
     Ok(())
 }
