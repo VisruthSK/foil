@@ -3,8 +3,8 @@ mod config;
 use crate::config::{Cli, ResolvedSuiteConfig, RunConfig, Suite};
 use b3::{
     BenchmarkLog, Config, MeasurementsCsv, Pair, Posterior, Repetition, Repetitions, Revision,
-    RunCommand, RunOrder, Side, Summary, Time, Worktree, working_tree_is_dirty, write_config_json,
-    write_posterior_csv,
+    RunCommand, RunOrder, RunOutput, Side, Summary, Time, Worktree, working_tree_is_dirty,
+    write_config_json, write_posterior_csv,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -238,21 +238,19 @@ fn measure_all(
         let [first, second] = order.sides();
 
         // TODO: Better handling of failing runs to find systematic errors. Should record and write out?
-        let first_output = log.measure(benchmark, first, worktrees.get(first))?;
-        ensure!(!interrupted(), "Interrupted.");
-        ensure!(
-            first_output.exit_status().success(),
-            "The {first} benchmark failed with {}.",
-            first_output.exit_status()
-        );
+        let mut measure = |side: Side| -> Result<RunOutput> {
+            let output = log.measure(benchmark, side, worktrees.get(side))?;
+            ensure!(!interrupted(), "Interrupted.");
+            ensure!(
+                output.exit_status().success(),
+                "The {side} benchmark failed with {}.",
+                output.exit_status()
+            );
 
-        let second_output = log.measure(benchmark, second, worktrees.get(second))?;
-        ensure!(!interrupted(), "Interrupted.");
-        ensure!(
-            second_output.exit_status().success(),
-            "The {second} benchmark failed with {}.",
-            second_output.exit_status()
-        );
+            Ok(output)
+        };
+        let first_output = measure(first)?;
+        let second_output = measure(second)?;
 
         let outputs = Pair::from_execution_order([first_output, second_output], order);
         let repetition = Repetition { outputs, order };
