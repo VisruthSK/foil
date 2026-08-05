@@ -60,6 +60,7 @@ fn main() -> Result<()> {
     let mut compact = Vec::with_capacity(runs.len());
 
     for (name, config) in runs {
+        ensure!(!interrupted(), "Interrupted.");
         let output_dir = match &name {
             Some(name) => config.output_dir.join(name),
             _ => config.output_dir.clone(),
@@ -230,6 +231,7 @@ fn measure_all(
         .with_context(|| format!("Failed to create {}.", measurements_path.display()))?;
 
     for order in RunOrder::schedule(repetition_count, rng) {
+        ensure!(!interrupted(), "Interrupted.");
         let [first, second] = order.sides();
 
         // TODO: Better handling of failing runs to find systematic errors. Should record and write out?
