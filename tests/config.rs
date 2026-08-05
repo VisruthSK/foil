@@ -697,6 +697,26 @@ fn a_failing_benchmark_leaves_the_measurements_recorded_so_far() -> Result<()> {
 }
 
 #[test]
+fn teardown_still_runs_when_a_benchmark_fails() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        teardown = ['git', 'tag', '--force', 'teardown-ran']\n\
+        command = ['git', 'cat-file', '-p', 'absent-object']\n",
+    )?;
+
+    let error = failure(&project, &[])?;
+
+    assert!(error.contains("benchmark failed"), "{error}");
+    git(&project, &["rev-parse", "--verify", "refs/tags/teardown-ran"])?;
+
+    Ok(())
+}
+
+#[test]
 fn a_benchmark_can_set_its_own_setup_and_teardown() -> Result<()> {
     let project = repository(
         "baseline = 'HEAD'\n\

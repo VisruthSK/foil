@@ -143,49 +143,16 @@ fn compare(
 
     run_in_both(run_command(&setup), worktrees, "setup")?;
 
-    let mut measured_repetitions = Vec::with_capacity(repetition_count);
-
-    let log_path = output_dir.join("benchmark.log");
-    let mut log = BenchmarkLog::new(
-        fs::File::create(&log_path)
-            .with_context(|| format!("Failed to create {}.", log_path.display()))?,
-        repetition_count * 2,
+    let measured = measure_all(
+        &benchmark,
+        worktrees,
+        repetition_count,
+        output_dir,
+        &mut rng,
     );
-
-    let measurements_path = output_dir.join("measurements.csv");
-    let mut measurements = MeasurementsCsv::create(&measurements_path)
-        .with_context(|| format!("Failed to create {}.", measurements_path.display()))?;
-
-    for order in RunOrder::schedule(repetition_count, &mut rng) {
-        let [first, second] = order.sides();
-
-        let first_output = log.measure(&benchmark, first, worktrees.get(first))?;
-        ensure!(
-            first_output.exit_status().success(),
-            "The {first} benchmark failed with {}.",
-            first_output.exit_status()
-        );
-
-        let second_output = log.measure(&benchmark, second, worktrees.get(second))?;
-        ensure!(
-            second_output.exit_status().success(),
-            "The {second} benchmark failed with {}.",
-            second_output.exit_status()
-        );
-
-        let outputs = Pair::from_execution_order([first_output, second_output], order);
-        let repetition = Repetition { outputs, order };
-        measurements
-            .append(&repetition)
-            .with_context(|| format!("Failed to write {}.", measurements_path.display()))?;
-        measured_repetitions.push(repetition);
-    }
-
-    drop(log);
-
-    run_in_both(run_command(&teardown), worktrees, "teardown")?;
-
-    let repetitions = Repetitions::try_from(measured_repetitions)?;
+    let torn_down = run_in_both(run_command(&teardown), worktrees, "teardown");
+    let repetitions = measured?;
+    torn_down?;
 
     let posterior = Posterior::<Time>::bootstrap(&repetitions, draws, shrinkage, &mut rng)?;
 
@@ -209,6 +176,58 @@ fn compare(
         .with_context(|| format!("Failed to write {}.", report_path.display()))?;
 
     Ok(summary)
+}
+
+fn measure_all(
+    benchmark: &RunCommand,
+    worktrees: &Pair<Worktree>,
+    repetition_count: usize,
+    output_dir: &Path,
+    rng: &mut Xoshiro256PlusPlus,
+) -> Result<Repetitions> {
+    let mut measured_repetitions = Vec::with_capacity(repetition_count);
+
+    let log_path = output_dir.join("benchmark.log");
+    let mut log = BenchmarkLog::new(
+        fs::File::create(&log_path)
+            .with_context(|| format!("Failed to create {}.", log_path.display()))?,
+        repetition_count * 2,
+    );
+
+    let measurements_path = output_dir.join("measurements.csv");
+    let mut measurements = MeasurementsCsv::create(&measurements_path)
+        .with_context(|| format!("Failed to create {}.", measurements_path.display()))?;
+
+    for order in RunOrder::schedule(repetition_count, rng) {
+        let [first, second] = order.sides();
+
+        // TODO: Better handling of failing runs to find systematic errors. Should record and write out?
+        let first_output = log.measure(benchmark, first, worktrees.get(first))?;
+        ensure!(
+            first_output.exit_status().success(),
+            "The {first} benchmark failed with {}.",
+            first_output.exit_status()
+        );
+
+        let second_output = log.measure(benchmark, second, worktrees.get(second))?;
+        ensure!(
+            second_output.exit_status().success(),
+            "The {second} benchmark failed with {}.",
+            second_output.exit_status()
+        );
+
+        let outputs = Pair::from_execution_order([first_output, second_output], order);
+        let repetition = Repetition { outputs, order };
+        measurements
+            .append(&repetition)
+            .with_context(|| format!("Failed to write {}.", measurements_path.display()))?;
+        measured_repetitions.push(repetition);
+    }
+
+    // Clears the progress line before the report starts printing.
+    drop(log);
+
+    Repetitions::try_from(measured_repetitions)
 }
 
 fn run_in_both(command: Option<RunCommand>, worktrees: &Pair<Worktree>, phase: &str) -> Result<()> {

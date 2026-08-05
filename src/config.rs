@@ -124,7 +124,7 @@ pub(crate) struct RunConfig {
 
     /// Command run once in each worktree after the last measured run.
     ///
-    /// Never measured, and skipped entirely when a run fails.
+    /// Never measured, and still runs when a benchmark run fails.
     #[arg(long, value_name = "COMMAND", num_args = 1..)]
     pub(crate) teardown: Vec<OsString>,
     /// Benchmark program and arguments.
