@@ -21,8 +21,19 @@ const BENCHMARKS: &str = "benchmarks";
 const OUTPUT_DIR: &str = "output-dir";
 const OUTPUT_DIR_ID: &str = "output_dir";
 const ENV: &str = "env";
+const ENV_ID: &str = "envs";
 const SETUP: &str = "setup";
 const TEARDOWN: &str = "teardown";
+const COMMAND: &str = "command";
+const WORKING_DIRECTORY: &str = "working-directory";
+const WORKING_DIRECTORY_ID: &str = "working_directory";
+const PER_BENCHMARK: [(&str, &str); 5] = [
+    (COMMAND, COMMAND),
+    (WORKING_DIRECTORY_ID, WORKING_DIRECTORY),
+    (ENV_ID, ENV),
+    (SETUP, SETUP),
+    (TEARDOWN, TEARDOWN),
+];
 
 #[derive(Parser)]
 #[command(name = "b3")]
@@ -368,6 +379,14 @@ fn resolve(
     let mut matches = command.get_matches_from(arguments);
     let output_from_command_line =
         matches.value_source(OUTPUT_DIR_ID) == Some(ValueSource::CommandLine);
+    if let Some(name) = benchmark {
+        for (id, key) in PER_BENCHMARK {
+            ensure!(
+                matches.value_source(id) != Some(ValueSource::CommandLine),
+                "`{key}` cannot be passed on the command line; set it in [benchmarks.{name}] instead."
+            );
+        }
+    }
     let cli = Cli::from_arg_matches_mut(&mut matches).map_err(|error| error.exit())?;
 
     Ok(ResolvedCli {

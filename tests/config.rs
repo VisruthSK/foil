@@ -357,6 +357,40 @@ fn an_argument_overrides_a_selected_benchmark() -> Result<()> {
 }
 
 #[test]
+fn a_benchmarks_own_options_cannot_be_passed_as_arguments() -> Result<()> {
+    let project = project(&[(
+        "b3.toml",
+        "output-dir = 'bench'\n\
+        repetitions = 10\n\
+        \n\
+        [benchmarks.parse]\n\
+        command = ['git', '--version']\n",
+    )])?;
+
+    for (arguments, key) in [
+        (&["--working-directory", "sub"][..], "working-directory"),
+        (&["--env", "KEY=VALUE"][..], "env"),
+        (&["--setup", "make"][..], "setup"),
+        (&["--teardown", "make"][..], "teardown"),
+        (&["--", "git", "--version"][..], "command"),
+    ] {
+        let error = failure(
+            &project,
+            &[&["--benchmark", "parse"][..], arguments].concat(),
+        )?;
+
+        assert!(
+            error.contains(&format!(
+                "`{key}` cannot be passed on the command line; set it in [benchmarks.parse] instead."
+            )),
+            "{arguments:?} gave {error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn an_unknown_benchmark_is_reported() -> Result<()> {
     let project = project(&[("b3.toml", "output-dir = 'bench'\n")])?;
     let error = failure(&project, &["--benchmark", "nope"])?;
