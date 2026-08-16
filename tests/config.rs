@@ -600,6 +600,135 @@ fn an_explicit_env_argument_overrides_the_configuration() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn setup_runs_in_each_worktree_before_the_measured_runs() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        setup = ['git', 'config', '--file', 'marker.txt', 'setup.ran', 'yes']\n\
+        command = ['git', 'config', '--file', 'marker.txt', 'setup.ran']\n",
+    )?;
+
+    let (succeeded, _, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
+    assert_eq!(log.matches("yes").count(), 20, "{log}");
+
+    Ok(())
+}
+
+#[test]
+fn a_failing_setup_stops_before_the_measured_runs() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        setup = ['git', 'cat-file', '-p', 'absent-object']\n\
+        command = ['git', '--version']\n",
+    )?;
+
+    let error = failure(&project, &[])?;
+
+    assert!(error.contains("The baseline setup failed."), "{error}");
+    assert!(
+        error.contains("Not a valid object name absent-object"),
+        "{error}"
+    );
+
+    let bench = project.path().join("bench");
+    assert!(bench.join("config.json").is_file());
+    assert!(!bench.join("benchmark.log").exists());
+
+    Ok(())
+}
+
+#[test]
+fn teardown_runs_after_the_measured_runs() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
+        command = ['git', '--version']\n",
+    )?;
+
+    let error = failure(&project, &[])?;
+
+    assert!(error.contains("The baseline teardown failed."), "{error}");
+
+    let bench = project.path().join("bench");
+    let log = fs::read_to_string(bench.join("benchmark.log"))?;
+    assert_eq!(log.lines().count(), 20, "{log}");
+    assert!(!bench.join("measurements.csv").exists());
+
+    Ok(())
+}
+
+#[test]
+fn a_benchmark_can_set_its_own_setup_and_teardown() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        setup = ['git', 'config', '--file', 'marker.txt', 'setup.ran', 'top-level-setup']\n\
+        teardown = ['git', '--version']\n\
+        \n\
+        [benchmarks.parse]\n\
+        setup = ['git', 'config', '--file', 'marker.txt', 'setup.ran', 'benchmark-setup']\n\
+        teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
+        command = ['git', 'config', '--file', 'marker.txt', 'setup.ran']\n",
+    )?;
+
+    let error = failure(&project, &[])?;
+
+    assert!(error.contains("The baseline teardown failed."), "{error}");
+
+    let log = fs::read_to_string(
+        project
+            .path()
+            .join("bench")
+            .join("parse")
+            .join("benchmark.log"),
+    )?;
+    assert_eq!(log.matches("benchmark-setup").count(), 20, "{log}");
+    assert!(!log.contains("top-level-setup"), "{log}");
+
+    Ok(())
+}
+
+#[test]
+fn a_benchmark_clears_an_inherited_setup_and_teardown_with_an_empty_list() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        setup = ['git', 'cat-file', '-p', 'absent-object']\n\
+        teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
+        \n\
+        [benchmarks.standalone]\n\
+        setup = []\n\
+        teardown = []\n\
+        command = ['git', '--version']\n",
+    )?;
+
+    let (succeeded, _, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    Ok(())
+}
+
 const SUITE: &str = "baseline = 'HEAD'\n\
     candidate = 'HEAD'\n\
     output-dir = 'bench'\n\

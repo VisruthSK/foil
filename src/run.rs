@@ -1,7 +1,7 @@
 use crate::repetition::Side;
 use crate::worktree::Worktree;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -79,6 +79,20 @@ impl RunCommand {
             stdout: captured.stdout,
             stderr: captured.stderr,
         })
+    }
+
+    pub fn run_once_in(&self, worktree: &Worktree) -> Result<()> {
+        let run = self.run_in(worktree.path())?;
+
+        ensure!(
+            run.output.exit_status.success(),
+            "{:?} failed with {}.\n{}",
+            self.program,
+            run.output.exit_status,
+            String::from_utf8_lossy(&run.stderr).trim_end()
+        );
+
+        Ok(())
     }
 }
 
