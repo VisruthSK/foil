@@ -3,8 +3,8 @@ mod config;
 use crate::config::{Cli, ResolvedSuiteConfig, RunConfig, Suite};
 use b3::{
     BenchmarkLog, Config, MeasurementsCsv, Pair, Posterior, Repetition, Repetitions, Revision,
-    RunCommand, RunOrder, RunOutput, Side, Summary, Time, Worktree, working_tree_is_dirty,
-    write_config_json, write_posterior_csv,
+    RunCommand, RunOrder, RunOutput, Side, Summary, Time, Worktree,
+    working_tree_has_modified_tracked_files, write_config_json, write_posterior_csv,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -45,9 +45,9 @@ fn main() -> Result<()> {
         runs,
     } = Cli::suite()?;
 
-    if working_tree_is_dirty() {
+    if working_tree_has_modified_tracked_files() {
         eprintln!(
-            "Warning: the working tree has uncommitted changes, which are never benchmarked."
+            "Warning: the working tree has modified tracked files, which are never benchmarked."
         );
     }
     let multiple = runs.len() > 1;
@@ -128,6 +128,7 @@ fn compare(
         working_directory,
         envs,
         setup,
+        prepare,
         teardown,
         command,
     } = config;
@@ -163,10 +164,12 @@ fn compare(
             seed: suite.seed,
             repetitions: repetition_count,
             draws: draws.get(),
+            timeout_seconds: timeout.map(|seconds| seconds.get()),
             shrinkage,
             baseline: worktrees.baseline.revision(),
             candidate: worktrees.candidate.revision(),
             setup: &setup,
+            prepare: &prepare,
             command: &command,
             teardown: &teardown,
         },
@@ -174,9 +177,11 @@ fn compare(
     .with_context(|| format!("Failed to write {}.", config_path.display()))?;
 
     run_in_both(run_command(&setup), worktrees, "setup")?;
+    ensure!(!interrupted(), "Interrupted.");
 
     let measured = measure_all(
         &benchmark,
+        run_command(&prepare).as_ref(),
         worktrees,
         repetition_count,
         output_dir,
@@ -189,7 +194,12 @@ fn compare(
     let repetitions = measured?;
     torn_down?;
 
-    let posterior = Posterior::<Time>::bootstrap(&repetitions, draws, shrinkage, &mut rng)?;
+    let posterior =
+        Posterior::<Time>::bootstrap_checked(&repetitions, draws, shrinkage, &mut rng, || {
+            ensure!(!interrupted(), "Interrupted.");
+            Ok(())
+        })?;
+    ensure!(!interrupted(), "Interrupted.");
 
     let posterior_path = output_dir.join("posterior.csv");
     write_posterior_csv(&posterior_path, &posterior)
@@ -215,6 +225,7 @@ fn compare(
 
 fn measure_all(
     benchmark: &RunCommand,
+    prepare: Option<&RunCommand>,
     worktrees: &Pair<Worktree>,
     repetition_count: usize,
     output_dir: &Path,
@@ -239,6 +250,12 @@ fn measure_all(
 
         // TODO: Better handling of failing runs to find systematic errors. Should record and write out?
         let mut measure = |side: Side| -> Result<RunOutput> {
+            if let Some(prepare) = prepare {
+                prepare
+                    .run_once_in(worktrees.get(side))
+                    .with_context(|| format!("The {side} preparation failed."))?;
+                ensure!(!interrupted(), "Interrupted.");
+            }
             let output = log.measure(benchmark, side, worktrees.get(side))?;
             ensure!(!interrupted(), "Interrupted.");
             ensure!(
@@ -271,11 +288,19 @@ fn run_in_both(command: Option<RunCommand>, worktrees: &Pair<Worktree>, phase: &
         return Ok(());
     };
 
+    let mut first_error = None;
     for side in [Side::Baseline, Side::Candidate] {
-        command
+        if let Err(error) = command
             .run_once_in(worktrees.get(side))
-            .with_context(|| format!("The {side} {phase} failed."))?;
+            .with_context(|| format!("The {side} {phase} failed."))
+        {
+            if first_error.is_some() {
+                eprintln!("{error:#}");
+            } else {
+                first_error = Some(error);
+            }
+        }
     }
 
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }

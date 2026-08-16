@@ -14,7 +14,7 @@ b3 --baseline main --candidate HEAD --repetitions 30 --interval 0.5 0.8 0.98 --o
 
 Run `b3 --help` for the full set of options.
 
-Each revision runs in its own clean worktree, so uncommitted changes are never part of a measurement; `b3` warns when the working tree is dirty.
+Each revision runs in its own clean worktree, so local changes are never part of a measurement; `b3` warns when tracked files have been modified.
 
 ## Configuration
 
@@ -32,14 +32,17 @@ With that file, the run above is `b3 -- cargo bench`. Arguments override the fil
 
 `setup` and `teardown` are commands `b3` runs once in each worktree, before the first and after the last measured run, and never times. A `setup` is where a build belongs, so that compilation stays out of the measurements. Both share the benchmark's `working-directory` and `env`.
 
+`prepare` runs before every individual measured command, outside the timed interval. It is useful when each repetition needs fresh state, such as cleaning release artifacts before measuring compilation. It shares the same `working-directory` and `env`; successful lifecycle output is forwarded to the terminal.
+
 ```toml
 setup = ["cargo", "build", "--release"]
+prepare = ["cargo", "clean", "--release"]
 command = ["./target/release/parse", "corpus/"]
 ```
 
 Each runs once per revision, so a side effect reaching outside the worktree happens twice, once for the baseline and once for the candidate. A failing `setup` or `teardown` stops the run and reports what the command printed, and `teardown` still runs when a benchmark fails. On the command line these take a bare command, as in `--setup make`; one carrying flags of its own, like `cargo build --release`, belongs in the configuration file as a list.
 
-A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override any option above, and anything it leaves unset, including `command`, is inherited from the top level. An empty list, `setup = []`, clears an inherited `setup` or `teardown`. Its `env` table is merged with the top-level one instead, variable by variable, with the benchmark's values winning on conflicts:
+A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override any option above, and anything it leaves unset, including `command`, is inherited from the top level. An empty list, `setup = []`, clears an inherited `setup`, `prepare`, or `teardown`. Its `env` table is merged with the top-level one instead, variable by variable, with the benchmark's values winning on conflicts:
 
 ```toml
 repetitions = 10
@@ -57,7 +60,7 @@ command = ["cargo", "run", "--release", "--", "render"]
 RAYON_NUM_THREADS = "1"
 ```
 
-`b3 --benchmark render` runs with 50 repetitions in `benchmarks/render`; `b3 --benchmark parse` runs with the top-level 10. An explicit argument still overrides a benchmark's setting, except for `command`, `working-directory`, `env`, `setup`, and `teardown`. Those define what a benchmark is, so one argument cannot sensibly stand in for all of the selected benchmarks, and passing one alongside a benchmark is an error.
+`b3 --benchmark render` runs with 50 repetitions in `benchmarks/render`; `b3 --benchmark parse` runs with the top-level 10. An explicit argument still overrides a benchmark's setting, except for `command`, `working-directory`, `env`, `setup`, `prepare`, and `teardown`. Those define what a benchmark is, so one argument cannot sensibly stand in for all of the selected benchmarks, and passing one alongside a benchmark is an error.
 `working-directory` must be a relative path within the worktree; absolute paths and `..` are rejected.
 
 With no `--benchmark`, every benchmark in the table runs in declaration order, each in its own `--output-dir` subdirectory named after it. Pass `--benchmark render parse` to run only some of them in the order given. A configuration with no `[benchmarks]` table always runs a single, unnamed command, exactly as with no configuration file at all.

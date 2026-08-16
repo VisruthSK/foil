@@ -45,7 +45,7 @@ impl Revision {
     }
 }
 
-pub fn working_tree_is_dirty() -> bool {
+pub fn working_tree_has_modified_tracked_files() -> bool {
     Command::new("git")
         .args(["status", "--porcelain", "--untracked-files=no"])
         .output()

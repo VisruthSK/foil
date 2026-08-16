@@ -49,6 +49,7 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
     let path = directory.path().join("config.json");
     let command = ["cargo", "test --workspace"].map(OsString::from);
     let setup = ["cargo", "build --release"].map(OsString::from);
+    let prepare = ["cargo", "clean --release"].map(OsString::from);
     let teardown = ["git", "clean --force"].map(OsString::from);
     let baseline = Revision::resolve("main".to_owned())?;
     let candidate = Revision::resolve("HEAD".to_owned())?;
@@ -56,10 +57,12 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
         seed: 42,
         repetitions: 10,
         draws: 1000,
+        timeout_seconds: Some(30),
         shrinkage: Shrinkage::new(5.0)?,
         baseline: &baseline,
         candidate: &candidate,
         setup: &setup,
+        prepare: &prepare,
         command: &command,
         teardown: &teardown,
     };
@@ -71,11 +74,13 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
         "seed": 42,
         "repetitions": 10,
         "draws": 1000,
+        "timeout_seconds": 30,
         "shrinkage": 5.0,
         "b3_version": env!("CARGO_PKG_VERSION"),
         "baseline": { "revision": "main", "hash": baseline.hash() },
         "candidate": { "revision": "HEAD", "hash": candidate.hash() },
         "setup": ["cargo", "build --release"],
+        "prepare": ["cargo", "clean --release"],
         "command": ["cargo", "test --workspace"],
         "teardown": ["git", "clean --force"],
     });

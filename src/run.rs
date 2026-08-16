@@ -2,6 +2,7 @@ use crate::repetition::Side;
 use crate::worktree::Worktree;
 
 use anyhow::{Context, Result, bail, ensure};
+use command_group::CommandGroup;
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -72,33 +73,50 @@ impl RunCommand {
         };
 
         let start = Instant::now();
-        let mut child = Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .args(&self.args)
             .current_dir(working_dir)
             .envs(self.env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .stderr(Stdio::piped());
+        let mut child = command
+            .group_spawn()
             .with_context(|| format!("Failed to run {:?}.", self.program))?;
-        let stdout = drain(child.stdout.take().expect("Stdout is piped."));
-        let stderr = drain(child.stderr.take().expect("Stderr is piped."));
+        let stdout = drain(child.inner().stdout.take().expect("Stdout is piped."));
+        let stderr = drain(child.inner().stderr.take().expect("Stderr is piped."));
 
         let failed_waiting = || format!("Failed to wait for {:?}.", self.program);
+        let mut timed_out = None;
         let exit_status = match self.timeout {
             None => child.wait().with_context(failed_waiting)?,
-            Some(limit) => match child.wait_timeout(limit).with_context(failed_waiting)? {
+            Some(limit) => match child
+                .inner()
+                .wait_timeout(limit)
+                .with_context(failed_waiting)?
+            {
                 Some(status) => status,
                 None => {
-                    child
-                        .kill()
-                        .with_context(|| format!("Failed to kill {:?}.", self.program))?;
-                    child.wait().with_context(failed_waiting)?;
-                    bail!("{:?} timed out after {limit:?}.", self.program);
+                    child.kill().with_context(|| {
+                        format!("Failed to kill {:?} and its children.", self.program)
+                    })?;
+                    timed_out = Some(limit);
+                    child.wait().with_context(failed_waiting)?
                 }
             },
         };
         let elapsed_time = start.elapsed();
+        let stdout = stdout.join().expect("The stdout reader does not panic.")?;
+        let stderr = stderr.join().expect("The stderr reader does not panic.")?;
+
+        if let Some(limit) = timed_out {
+            bail!(
+                "{:?} timed out after {limit:?}.\n{}",
+                self.program,
+                String::from_utf8_lossy(&stderr).trim_end()
+            );
+        }
 
         Ok(Run {
             output: RunOutput {
@@ -106,8 +124,8 @@ impl RunCommand {
                 elapsed_time,
                 peak_sampled_memory: None,
             },
-            stdout: stdout.join().expect("The stdout reader does not panic.")?,
-            stderr: stderr.join().expect("The stderr reader does not panic.")?,
+            stdout,
+            stderr,
         })
     }
 
@@ -121,6 +139,15 @@ impl RunCommand {
             run.output.exit_status,
             String::from_utf8_lossy(&run.stderr).trim_end()
         );
+
+        io::stdout()
+            .write_all(&run.stdout)
+            .context("Failed to write command stdout.")?;
+        io::stdout().flush().context("Failed to flush stdout.")?;
+        io::stderr()
+            .write_all(&run.stderr)
+            .context("Failed to write command stderr.")?;
+        io::stderr().flush().context("Failed to flush stderr.")?;
 
         Ok(())
     }
@@ -269,7 +296,10 @@ impl<W> Drop for BenchmarkLog<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{env, fs};
     use tempfile::tempdir;
+
+    const TIMEOUT_MARKER: &str = "B3_TIMEOUT_TEST_MARKER";
 
     fn command(program: &str, args: &[&str]) -> RunCommand {
         RunCommand::new(
@@ -312,6 +342,73 @@ mod tests {
         assert!(!run.stdout.is_empty());
 
         Ok(())
+    }
+
+    #[test]
+    fn a_timeout_kills_descendant_processes() -> Result<()> {
+        let directory = tempdir()?;
+        let marker = directory.path().join("descendant-finished");
+        let parent = RunCommand::new(
+            env::current_exe()?.into_os_string(),
+            [
+                "--exact",
+                "run::tests::timeout_parent",
+                "--ignored",
+                "--nocapture",
+            ]
+            .map(OsString::from)
+            .to_vec(),
+            None,
+            vec![(
+                TIMEOUT_MARKER.to_owned(),
+                marker.to_string_lossy().into_owned(),
+            )],
+        );
+
+        let error = parent
+            .with_timeout(Some(Duration::from_millis(100)))
+            .run_in(directory.path())
+            .err()
+            .context("The parent should time out.")?;
+        assert!(error.to_string().contains("timed out"), "{error}");
+
+        thread::sleep(Duration::from_secs(1));
+        assert!(
+            !marker.exists(),
+            "The descendant survived its parent's timeout."
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn timeout_parent() {
+        let status = Command::new(env::current_exe().expect("The test executable exists."))
+            .args([
+                "--exact",
+                "run::tests::timeout_descendant",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(
+                TIMEOUT_MARKER,
+                env::var_os(TIMEOUT_MARKER).expect("The marker path is configured."),
+            )
+            .status()
+            .expect("The descendant starts.");
+        assert!(status.success(), "The descendant failed with {status}.");
+    }
+
+    #[test]
+    #[ignore]
+    fn timeout_descendant() {
+        thread::sleep(Duration::from_millis(750));
+        fs::write(
+            env::var_os(TIMEOUT_MARKER).expect("The marker path is configured."),
+            "finished",
+        )
+        .expect("The descendant writes its marker.");
     }
 
     /// 1.5 is exactly representable, so it round-trips cleanly.

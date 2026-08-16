@@ -23,15 +23,17 @@ const OUTPUT_DIR_ID: &str = "output_dir";
 const ENV: &str = "env";
 const ENV_ID: &str = "envs";
 const SETUP: &str = "setup";
+const PREPARE: &str = "prepare";
 const TEARDOWN: &str = "teardown";
 const COMMAND: &str = "command";
 const WORKING_DIRECTORY: &str = "working-directory";
 const WORKING_DIRECTORY_ID: &str = "working_directory";
-const PER_BENCHMARK: [(&str, &str); 5] = [
+const PER_BENCHMARK: [(&str, &str); 6] = [
     (COMMAND, COMMAND),
     (WORKING_DIRECTORY_ID, WORKING_DIRECTORY),
     (ENV_ID, ENV),
     (SETUP, SETUP),
+    (PREPARE, PREPARE),
     (TEARDOWN, TEARDOWN),
 ];
 
@@ -115,7 +117,7 @@ pub(crate) struct RunConfig {
 
     /// Fail when a single benchmark run takes longer than this many seconds.
     ///
-    /// Applies to each measured run separately; `setup` and `teardown` are never limited.
+    /// Applies to each measured run separately; lifecycle commands are never limited.
     #[arg(long, value_name = "SECONDS")]
     pub(crate) timeout: Option<NonZeroU64>,
 
@@ -123,11 +125,11 @@ pub(crate) struct RunConfig {
     #[arg(long = "interval", default_values = ["0.5", "0.8", "0.98"])]
     pub(crate) intervals: Vec<Interval>,
 
-    /// Working directory for the benchmark, setup, and teardown commands, relative to the worktree root.
+    /// Working directory for the benchmark and lifecycle commands, relative to the worktree root.
     #[arg(long, value_name = "DIR", value_parser = parse_working_directory)]
     pub(crate) working_directory: Option<PathBuf>,
 
-    /// Environment variable for the benchmark, setup, and teardown commands, as `KEY=VALUE`.
+    /// Environment variable for the benchmark and lifecycle commands, as `KEY=VALUE`.
     ///
     /// May be repeated. In a configuration file, may instead be given as a table.
     #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env)]
@@ -138,6 +140,10 @@ pub(crate) struct RunConfig {
     /// Never measured. A command containing flags belongs in a configuration file, as a list.
     #[arg(long, value_name = "COMMAND", num_args = 1..)]
     pub(crate) setup: Vec<OsString>,
+
+    /// Command run before every measured command, outside the timed interval.
+    #[arg(long, value_name = "COMMAND", num_args = 1..)]
+    pub(crate) prepare: Vec<OsString>,
 
     /// Command run once in each worktree after the last measured run.
     ///

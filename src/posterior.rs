@@ -190,6 +190,17 @@ impl<M: Metric> Posterior<M> {
         shrinkage: Shrinkage,
         rng: &mut impl Rng,
     ) -> Result<Self> {
+        Self::bootstrap_checked(repetitions, draws, shrinkage, rng, || Ok(()))
+    }
+
+    /// Draws Bayesian-bootstrap samples while checking for cancellation before each draw.
+    pub fn bootstrap_checked(
+        repetitions: &Repetitions,
+        draws: NonZeroUsize,
+        shrinkage: Shrinkage,
+        rng: &mut impl Rng,
+        mut check: impl FnMut() -> Result<()>,
+    ) -> Result<Self> {
         let shrinkage_distribution = if shrinkage.0 == 0.0 {
             None
         } else {
@@ -199,6 +210,7 @@ impl<M: Metric> Posterior<M> {
 
         (0..draws.get())
             .map(|_| {
+                check()?;
                 let mut moments = WeightedRegressionMoments::default();
 
                 for row in &rows {
@@ -435,6 +447,32 @@ mod tests {
         let draws = || posterior::<Time>(1_000, 0.0).map(|it| it.draws().to_vec());
 
         assert_eq!(draws()?, draws()?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrapping_can_be_cancelled_between_draws() -> Result<()> {
+        let repetitions = fixture()?;
+        let mut rng = rng();
+        let mut checks = 0;
+
+        let error = Posterior::<Time>::bootstrap_checked(
+            &repetitions,
+            NonZeroUsize::new(1_000).unwrap(),
+            Shrinkage::new(0.0)?,
+            &mut rng,
+            || {
+                checks += 1;
+                anyhow::ensure!(checks < 4, "Interrupted.");
+                Ok(())
+            },
+        )
+        .err()
+        .context("Bootstrapping should stop when cancelled.")?;
+
+        assert_eq!(error.to_string(), "Interrupted.");
+        assert_eq!(checks, 4);
 
         Ok(())
     }

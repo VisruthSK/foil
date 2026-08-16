@@ -13,10 +13,12 @@ pub struct Config<'a> {
     pub seed: u64,
     pub repetitions: usize,
     pub draws: usize,
+    pub timeout_seconds: Option<u64>,
     pub shrinkage: Shrinkage,
     pub baseline: &'a Revision,
     pub candidate: &'a Revision,
     pub setup: &'a [OsString],
+    pub prepare: &'a [OsString],
     pub command: &'a [OsString],
     pub teardown: &'a [OsString],
 }
@@ -36,6 +38,7 @@ pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
         "seed": config.seed,
         "repetitions": config.repetitions,
         "draws": config.draws,
+        "timeout_seconds": config.timeout_seconds,
         "shrinkage": config.shrinkage.get(),
         "b3_version": env!("CARGO_PKG_VERSION"),
         "baseline": {
@@ -47,6 +50,7 @@ pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
             "hash": config.candidate.hash(),
         },
         "setup": utf8("setup", config.setup)?,
+        "prepare": utf8("prepare", config.prepare)?,
         "command": utf8("benchmark", config.command)?,
         "teardown": utf8("teardown", config.teardown)?,
     });
@@ -87,16 +91,17 @@ impl MeasurementsCsv {
             RunOrder::CandidateFirst => "candidate_first",
         };
 
-        self.rows += 1;
+        let row = self.rows + 1;
         writeln!(
             self.writer,
             "{},{},{},{}",
-            self.rows,
+            row,
             order,
             baseline.elapsed().as_secs_f64(),
             candidate.elapsed().as_secs_f64(),
         )?;
         self.writer.flush()?;
+        self.rows = row;
 
         Ok(())
     }

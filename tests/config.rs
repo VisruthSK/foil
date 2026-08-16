@@ -371,6 +371,7 @@ fn a_benchmarks_own_options_cannot_be_passed_as_arguments() -> Result<()> {
         (&["--working-directory", "sub"][..], "working-directory"),
         (&["--env", "KEY=VALUE"][..], "env"),
         (&["--setup", "make"][..], "setup"),
+        (&["--prepare", "make"][..], "prepare"),
         (&["--teardown", "make"][..], "teardown"),
         (&["--", "git", "--version"][..], "command"),
     ] {
@@ -670,6 +671,96 @@ fn teardown_runs_after_the_measured_runs() -> Result<()> {
 }
 
 #[test]
+fn candidate_teardown_runs_after_baseline_teardown_fails() -> Result<()> {
+    let project = repository("")?;
+    let baseline = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project.path())
+        .output()?;
+    let baseline = String::from_utf8(baseline.stdout)?.trim().to_owned();
+    git(
+        &project,
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "--message",
+            "candidate",
+        ],
+    )?;
+    let candidate = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project.path())
+        .output()?;
+    let candidate = String::from_utf8(candidate.stdout)?.trim().to_owned();
+    git(
+        &project,
+        &["update-ref", "refs/tags/teardown-state", &candidate],
+    )?;
+    fs::write(
+        project.path().join("b3.toml"),
+        format!(
+            "baseline = '{baseline}'\n\
+             candidate = '{candidate}'\n\
+             output-dir = 'bench'\n\
+             repetitions = 10\n\
+             draws = 1000\n\
+             teardown = ['git', 'update-ref', 'refs/tags/teardown-state', '{baseline}', 'HEAD']\n\
+             command = ['git', '--version']\n"
+        ),
+    )?;
+
+    let error = failure(&project, &[])?;
+    assert!(error.contains("The baseline teardown failed."), "{error}");
+
+    let state = Command::new("git")
+        .args(["rev-parse", "refs/tags/teardown-state"])
+        .current_dir(project.path())
+        .output()?;
+    assert!(state.status.success());
+    assert_eq!(String::from_utf8(state.stdout)?.trim(), baseline);
+
+    Ok(())
+}
+
+#[test]
+fn successful_setup_and_teardown_output_is_visible() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}setup = ['git', '--version']\n\
+         teardown = ['git', '--version']\n\
+         command = ['git', 'rev-parse', '--is-inside-work-tree']\n"
+    ))?;
+
+    let (succeeded, stdout, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+    assert_eq!(stdout.matches("git version").count(), 4, "{stdout}");
+
+    Ok(())
+}
+
+#[test]
+fn prepare_runs_before_every_measured_command() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}prepare = ['git', 'rev-parse', 'HEAD']\n\
+         command = ['git', '--version']\n"
+    ))?;
+
+    let (succeeded, stdout, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.len() == 40
+                && line.chars().all(|character| character.is_ascii_hexdigit()))
+            .count(),
+        20,
+        "{stdout}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn a_failing_benchmark_still_leaves_a_measurements_file() -> Result<()> {
     let project = repository(&format!(
         "{PREAMBLE}command = ['git', 'cat-file', '-p', 'absent-object']\n"
@@ -687,7 +778,7 @@ fn a_failing_benchmark_still_leaves_a_measurements_file() -> Result<()> {
 }
 
 #[test]
-fn a_dirty_working_tree_prints_a_warning() -> Result<()> {
+fn modified_tracked_files_print_a_warning() -> Result<()> {
     let project = repository(&format!("{PREAMBLE}command = ['git', '--version']\n"))?;
     fs::write(project.path().join("tracked.txt"), "before")?;
     git(&project, &["add", "tracked.txt"])?;
@@ -697,7 +788,7 @@ fn a_dirty_working_tree_prints_a_warning() -> Result<()> {
     let (succeeded, _, stderr) = run(&project, &[])?;
 
     ensure!(succeeded, "b3 failed with {stderr}");
-    assert!(stderr.contains("uncommitted changes"), "{stderr}");
+    assert!(stderr.contains("modified tracked files"), "{stderr}");
 
     Ok(())
 }
@@ -709,7 +800,7 @@ fn a_clean_working_tree_prints_no_warning() -> Result<()> {
     let (succeeded, _, stderr) = run(&project, &[])?;
 
     ensure!(succeeded, "b3 failed with {stderr}");
-    assert!(!stderr.contains("uncommitted changes"), "{stderr}");
+    assert!(!stderr.contains("modified tracked files"), "{stderr}");
 
     Ok(())
 }
