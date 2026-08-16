@@ -6,7 +6,7 @@ use serde_json::json;
 use std::{
     ffi::OsString,
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, ExitStatus},
     time::{Duration, Instant},
 };
@@ -14,6 +14,8 @@ use std::{
 pub struct RunCommand {
     program: OsString,
     args: Vec<OsString>,
+    working_directory: Option<PathBuf>,
+    env: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -39,15 +41,31 @@ pub struct RunOutput {
 }
 
 impl RunCommand {
-    pub fn new(program: OsString, args: Vec<OsString>) -> Self {
-        Self { program, args }
+    pub fn new(
+        program: OsString,
+        args: Vec<OsString>,
+        working_directory: Option<PathBuf>,
+        env: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            program,
+            args,
+            working_directory,
+            env,
+        }
     }
 
-    pub(crate) fn run_in(&self, working_dir: &Path) -> Result<Run> {
+    pub(crate) fn run_in(&self, worktree: &Path) -> Result<Run> {
+        let working_dir = match &self.working_directory {
+            Some(directory) => worktree.join(directory),
+            None => worktree.to_path_buf(),
+        };
+
         let start = Instant::now();
         let captured = Command::new(&self.program)
             .args(&self.args)
             .current_dir(working_dir)
+            .envs(self.env.iter().map(|(key, value)| (key, value)))
             .output()
             .with_context(|| format!("Failed to run {:?}.", self.program))?;
         let elapsed_time = start.elapsed();
