@@ -5,7 +5,10 @@ use b3::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use clap::{Arg, ArgAction, Command, CommandFactory, FromArgMatches, Parser, builder::Str};
+use clap::{
+    Arg, ArgAction, Args, Command, CommandFactory, FromArgMatches, Parser, builder::Str,
+    parser::ValueSource,
+};
 use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
 use std::{
     env,
@@ -13,15 +16,13 @@ use std::{
     fs,
     io::ErrorKind,
     num::NonZeroUsize,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 use toml::{Table, Value};
 
 const MIN_DRAWS: usize = 1_000;
-const CONFIG: &str = "config";
 const DEFAULT_CONFIG: &str = "b3.toml";
-const BENCHMARK: &str = "benchmark";
 const BENCHMARKS: &str = "benchmarks";
 const OUTPUT_DIR: &str = "output-dir";
 const OUTPUT_DIR_ID: &str = "output_dir";
@@ -32,7 +33,42 @@ const ENV: &str = "env";
 #[command(version)]
 #[command(about = "Bayesian Branch Benchmarking", long_about = None)]
 struct Cli {
-    // TODO: Reorder args into cogent order.
+    #[command(flatten)]
+    suite: SuiteConfig,
+
+    #[command(flatten)]
+    run: RunConfig,
+
+    #[command(flatten)]
+    selectors: Selectors,
+}
+
+#[derive(Args)]
+struct Selectors {
+    /// TOML file whose keys are the long names of the options above, or `command`.
+    ///
+    /// Defaults to `b3.toml`, which is read when present.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Names of benchmarks from the configuration file's `[benchmarks]` table, e.g. `--benchmark a b c`.
+    ///
+    /// A benchmark's table may override run options and must set `command`. With none
+    /// named, every benchmark in the table runs; with no `[benchmarks]` table,
+    /// `command` and the options above are used as given.
+    #[arg(long = "benchmark", value_name = "NAME", num_args = 1..)]
+    benchmarks: Vec<String>,
+}
+
+#[derive(Parser)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct SelectorCli {
+    #[command(flatten)]
+    selectors: Selectors,
+}
+
+#[derive(Args)]
+struct SuiteConfig {
     /// Git revision used as the baseline.
     #[arg(short, long, default_value = "main")]
     baseline: String,
@@ -40,6 +76,17 @@ struct Cli {
     /// Git revision containing the candidate changes.
     #[arg(short, long, default_value = "HEAD")]
     candidate: String,
+
+    /// Set a seed for reproducible benchmarking.
+    #[arg(long)]
+    seed: Option<u64>,
+}
+
+#[derive(Args)]
+struct RunConfig {
+    /// Give this benchmark its own pair of worktrees.
+    #[arg(long)]
+    isolate: bool,
 
     /// Control shrinkage of the adjusted mean runtime difference toward 0 by specifying a prior number of no-change pseudo-observations.
     #[arg(long, default_value = "0")]
@@ -63,12 +110,8 @@ struct Cli {
     #[arg(long = "interval", default_values = ["0.5", "0.8", "0.98"])]
     intervals: Vec<Interval>,
 
-    /// Set a seed for reproducible benchmarking.
-    #[arg(long)]
-    seed: Option<u64>,
-
     /// Working directory for the benchmark command, relative to the worktree root.
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", value_parser = parse_working_directory)]
     working_directory: Option<PathBuf>,
 
     /// Environment variable for the benchmark command, as `KEY=VALUE`.
@@ -77,20 +120,6 @@ struct Cli {
     #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env)]
     envs: Vec<(String, String)>,
 
-    /// TOML file whose keys are the long names of the options above, or `command`.
-    ///
-    /// Defaults to `b3.toml`, which is read when present.
-    #[arg(long, value_name = "FILE")]
-    config: Option<PathBuf>,
-
-    /// Names of benchmarks from the configuration file's `[benchmarks]` table, e.g. `--benchmark a b c`.
-    ///
-    /// A benchmark's table may override any option above and must set `command`. With
-    /// none named, every benchmark in the table runs; with no `[benchmarks]` table,
-    /// `command` and the options above are used as given.
-    #[arg(long = "benchmark", value_name = "NAME", num_args = 1..)]
-    benchmarks: Vec<String>,
-
     /// Benchmark program and arguments.
     ///
     /// Place the command after `--`, for example: `b3 --output-dir benchmark/ --repetitions 10 -- Rscript benchmark.R`.
@@ -98,57 +127,162 @@ struct Cli {
     command: Vec<OsString>,
 }
 
-type Layered = (Option<PathBuf>, Vec<(Option<String>, Cli)>);
+struct Configuration {
+    path: PathBuf,
+    top: Table,
+    benchmarks: Table,
+}
+
+struct Suite {
+    config: ResolvedSuiteConfig,
+    output_dir: PathBuf,
+    runs: Vec<(Option<String>, RunConfig)>,
+}
+
+struct ResolvedSuiteConfig {
+    baseline: Revision,
+    candidate: Revision,
+    seed: u64,
+}
+
+struct ResolvedCli {
+    cli: Cli,
+    output_from_command_line: bool,
+}
+
+struct Worktrees {
+    pair: Pair<Worktree>,
+    _directory: TempDir,
+}
 
 impl Cli {
-    /// One resolved `Cli` per selected benchmark, paired with its name, alongside any
-    /// `--output-dir` given on the command line. Unnamed when neither `--benchmark` nor
-    /// an auto-selected `[benchmarks]` table applies.
-    fn layered() -> Result<Layered> {
-        let mut first_pass = Self::command()
-            .ignore_errors(true)
-            .disable_help_flag(true)
-            .disable_version_flag(true)
-            .get_matches();
-        let path = first_pass.remove_one::<PathBuf>(CONFIG);
-        let output_dir = first_pass.remove_one::<PathBuf>(OUTPUT_DIR_ID);
-        let explicit: Vec<String> = first_pass
-            .remove_many::<String>(BENCHMARKS)
-            .map(Iterator::collect)
-            .unwrap_or_default();
-
-        let names = if explicit.is_empty() {
-            benchmark_names(path.clone())?
-        } else {
-            explicit
-        };
-
-        if names.is_empty() {
-            return Ok((output_dir, vec![(None, Self::resolve(path, None)?)]));
+    fn suite() -> Result<Suite> {
+        let arguments: Vec<OsString> = env::args_os().collect();
+        if let Some(action) = arguments
+            .iter()
+            .skip(1)
+            .take_while(|argument| *argument != "--")
+            .find(|argument| {
+                matches!(
+                    argument.to_str(),
+                    Some("-h" | "--help" | "-V" | "--version")
+                )
+            })
+        {
+            Self::command().get_matches_from([arguments[0].clone(), action.clone()]);
+            unreachable!("Clap exits after displaying help or version.");
         }
 
-        let runs = names
+        let selectors = SelectorCli::parse_from(selector_arguments(&arguments)).selectors;
+        let configuration = read_config(selectors.config)?;
+        validate_config(&configuration)?;
+
+        let names = if selectors.benchmarks.is_empty() {
+            configuration.benchmarks.keys().cloned().collect()
+        } else {
+            selectors.benchmarks
+        };
+
+        let runs = if names.is_empty() {
+            vec![(None, resolve(&configuration, None, &arguments)?)]
+        } else {
+            names
+                .into_iter()
+                .map(|name| {
+                    let cli = resolve(&configuration, Some(&name), &arguments)?;
+                    Ok((Some(name), cli))
+                })
+                .collect::<Result<_>>()?
+        };
+        let (_, first) = runs.first().expect("At least one run is always produced.");
+        let output_dir = if first.output_from_command_line {
+            first.cli.run.output_dir.clone()
+        } else {
+            match configuration.top.get(OUTPUT_DIR) {
+                Some(Value::String(text)) => Some(text.into()),
+                _ => None,
+            }
+            .unwrap_or_else(|| first.cli.run.output_dir.clone())
+        };
+        let baseline = Revision::resolve(first.cli.suite.baseline.clone())?;
+        let candidate = Revision::resolve(first.cli.suite.candidate.clone())?;
+        let seed = first.cli.suite.seed.unwrap_or_else(rand::random);
+        let runs = runs
             .into_iter()
-            .map(|name| {
-                let cli = Self::resolve(path.clone(), Some(&name))?;
-                Ok((Some(name), cli))
-            })
-            .collect::<Result<_>>()?;
+            .map(|(name, resolved)| (name, resolved.cli.run))
+            .collect();
 
-        Ok((output_dir, runs))
-    }
-
-    fn resolve(path: Option<PathBuf>, benchmark: Option<&str>) -> Result<Self> {
-        let command = configure(Self::command(), path, benchmark)?;
-        let mut matches = command.get_matches_from(env::args_os());
-
-        Self::from_arg_matches_mut(&mut matches).map_err(|error| error.exit())
+        Ok(Suite {
+            config: ResolvedSuiteConfig {
+                baseline,
+                candidate,
+                seed,
+            },
+            output_dir,
+            runs,
+        })
     }
 }
 
-fn read_config(path: Option<PathBuf>) -> Result<(PathBuf, Table)> {
+fn selector_arguments(arguments: &[OsString]) -> Vec<OsString> {
+    let command = SelectorCli::command();
+    let selectors: Vec<_> = command
+        .get_arguments()
+        .filter_map(|argument| {
+            argument
+                .get_long()
+                .map(|long| (format!("--{long}"), argument.get_action().clone()))
+        })
+        .collect();
+    let mut selected = vec![arguments[0].clone()];
+    let mut position = 1;
+
+    while position < arguments.len() {
+        let Some(text) = arguments[position].to_str() else {
+            position += 1;
+            continue;
+        };
+        if text == "--" {
+            break;
+        }
+
+        let Some((_, action)) = selectors
+            .iter()
+            .find(|(option, _)| text == option || text.starts_with(&format!("{option}=")))
+        else {
+            position += 1;
+            continue;
+        };
+        selected.push(arguments[position].clone());
+
+        if !action.takes_values() {
+            position += 1;
+            continue;
+        }
+
+        position += 1;
+        if text.contains('=') && !matches!(action, ArgAction::Append) {
+            continue;
+        }
+        while position < arguments.len() {
+            let value = &arguments[position];
+            if value.to_str().is_some_and(|value| value.starts_with('-')) {
+                break;
+            }
+            selected.push(value.clone());
+            position += 1;
+            if !matches!(action, ArgAction::Append) {
+                break;
+            }
+        }
+    }
+
+    selected
+}
+
+fn read_config(path: Option<PathBuf>) -> Result<Configuration> {
     let (path, optional) = path.map_or_else(|| (DEFAULT_CONFIG.into(), true), |path| (path, false));
-    let config = match fs::read_to_string(&path) {
+    let mut top: Table = match fs::read_to_string(&path) {
         Err(error) if optional && error.kind() == ErrorKind::NotFound => Table::new(),
         result => result
             .with_context(|| format!("Failed to read {}.", path.display()))?
@@ -156,93 +290,133 @@ fn read_config(path: Option<PathBuf>) -> Result<(PathBuf, Table)> {
             .with_context(|| format!("Failed to parse {}.", path.display()))?,
     };
 
-    Ok((path, config))
-}
+    let benchmarks = match top.remove(BENCHMARKS) {
+        None => Table::new(),
+        Some(Value::Table(benchmarks)) => benchmarks,
+        Some(_) => bail!("{} must set `{BENCHMARKS}` to a table.", path.display()),
+    };
 
-fn benchmark_names(path: Option<PathBuf>) -> Result<Vec<String>> {
-    let (_, config) = read_config(path)?;
-
-    Ok(match config.get(BENCHMARKS) {
-        Some(Value::Table(benchmarks)) => benchmarks.keys().cloned().collect(),
-        _ => Vec::new(),
+    Ok(Configuration {
+        path,
+        top,
+        benchmarks,
     })
 }
 
-fn configured_output_dir(path: Option<PathBuf>) -> Result<Option<PathBuf>> {
-    let (_, config) = read_config(path)?;
+fn validate_config(config: &Configuration) -> Result<()> {
+    configure(Cli::command(), &config.path, &config.top)?;
 
-    Ok(match config.get(OUTPUT_DIR) {
-        Some(Value::String(text)) => Some(text.into()),
-        _ => None,
-    })
-}
-
-fn configure(command: Command, path: Option<PathBuf>, benchmark: Option<&str>) -> Result<Command> {
-    let (path, mut config) = read_config(path)?;
-
-    let benchmarks = config.remove(BENCHMARKS);
-    if let Some(name) = benchmark {
-        let entry = benchmarks.and_then(|value| match value {
-            Value::Table(mut table) => table.remove(name),
-            _ => None,
-        });
-        match entry {
-            Some(Value::Table(mut table)) => {
-                if let (Some(Value::Table(base)), Some(Value::Table(over))) =
-                    (config.get(ENV), table.get(ENV))
-                {
-                    let mut env = base.clone();
-                    env.extend(over.clone());
-                    table.insert(ENV.to_owned(), Value::Table(env));
-                }
-
-                config.extend(table);
-            }
-            _ => bail!("{} has no benchmark named `{name}`.", path.display()),
-        }
-    }
-
-    config.into_iter().try_fold(command, |command, (key, value)| {
-        ensure!(
-            key != CONFIG,
-            "{} cannot set `{key}`; pass --{CONFIG} instead.",
-            path.display()
-        );
-        ensure!(
-            key != BENCHMARK,
-            "{} cannot set `{key}`; pass --{BENCHMARK} instead.",
-            path.display()
-        );
-
-        let argument = command
-            .get_arguments()
-            .find(|argument| configuration_key(argument) == Some(key.as_str()))
-            .with_context(|| format!("{} sets `{key}`, which is not an option.", path.display()))?;
-        let id = argument.get_id().to_string();
-        let repeatable = matches!(argument.get_action(), ArgAction::Append);
-
-        let defaults = defaults(&value).with_context(|| {
+    for (name, value) in &config.benchmarks {
+        let table = value.as_table().with_context(|| {
             format!(
-                "{} must set `{key}` to a string, number, boolean, list of those, or table of strings.",
-                path.display()
+                "{} must set benchmark `{name}` to a table.",
+                config.path.display()
             )
         })?;
         ensure!(
-            !defaults.is_empty(),
-            "{} sets `{key}` to an empty list.",
-            path.display()
+            table.contains_key("command"),
+            "{} benchmark `{name}` must set `command`.",
+            config.path.display()
         );
-        ensure!(
-            repeatable || defaults.len() == 1,
-            "{} sets `{key}` to {} values, but it takes only one.",
-            path.display(),
-            defaults.len()
-        );
+        if let Some(key) = table.keys().find(|key| option_in::<SuiteConfig>(key)) {
+            bail!(
+                "{} benchmark `{name}` cannot set suite-level `{key}`.",
+                config.path.display()
+            );
+        }
+        configure(Cli::command(), &config.path, table)?;
+    }
 
-        Ok(command.mut_arg(id, |argument| {
-            argument.required(false).default_values(defaults)
-        }))
+    Ok(())
+}
+
+fn option_in<A: Args>(key: &str) -> bool {
+    A::augment_args(Command::new("options"))
+        .get_arguments()
+        .any(|argument| configuration_key(argument) == Some(key))
+}
+
+fn resolve(
+    config: &Configuration,
+    benchmark: Option<&str>,
+    arguments: &[OsString],
+) -> Result<ResolvedCli> {
+    let mut values = config.top.clone();
+    if let Some(name) = benchmark {
+        let mut overrides = config
+            .benchmarks
+            .get(name)
+            .and_then(Value::as_table)
+            .cloned()
+            .with_context(|| {
+                format!("{} has no benchmark named `{name}`.", config.path.display())
+            })?;
+        values.remove("command");
+        if let (Some(Value::Table(base)), Some(Value::Table(over))) =
+            (values.get(ENV), overrides.get(ENV))
+        {
+            let mut env = base.clone();
+            env.extend(over.clone());
+            overrides.insert(ENV.to_owned(), Value::Table(env));
+        }
+        values.extend(overrides);
+    }
+
+    let command = configure(Cli::command(), &config.path, &values)?;
+    let mut matches = command.get_matches_from(arguments);
+    let output_from_command_line =
+        matches.value_source(OUTPUT_DIR_ID) == Some(ValueSource::CommandLine);
+    let cli = Cli::from_arg_matches_mut(&mut matches).map_err(|error| error.exit())?;
+
+    Ok(ResolvedCli {
+        cli,
+        output_from_command_line,
     })
+}
+
+fn configure(mut command: Command, path: &Path, config: &Table) -> Result<Command> {
+    for (key, value) in config {
+        if option_in::<Selectors>(key) {
+            bail!(
+                "{} cannot set `{key}`; `--{key}` is command-line-only.",
+                path.display()
+            );
+        }
+
+        command = configure_value(command, path, key, value)?;
+    }
+    Ok(command)
+}
+
+fn configure_value(command: Command, path: &Path, key: &str, value: &Value) -> Result<Command> {
+    let argument = command
+        .get_arguments()
+        .find(|argument| configuration_key(argument) == Some(key))
+        .with_context(|| format!("{} sets `{key}`, which is not an option.", path.display()))?;
+    let id = argument.get_id().to_string();
+    let repeatable = matches!(argument.get_action(), ArgAction::Append);
+
+    let defaults = defaults(value).with_context(|| {
+        format!(
+            "{} must set `{key}` to a string, number, boolean, list of those, or table of strings.",
+            path.display()
+        )
+    })?;
+    ensure!(
+        !defaults.is_empty(),
+        "{} sets `{key}` to an empty list.",
+        path.display()
+    );
+    ensure!(
+        repeatable || defaults.len() == 1,
+        "{} sets `{key}` to {} values, but it takes only one.",
+        path.display(),
+        defaults.len()
+    );
+
+    Ok(command.mut_arg(id, |argument| {
+        argument.required(false).default_values(defaults)
+    }))
 }
 
 fn configuration_key(argument: &Arg) -> Option<&str> {
@@ -274,8 +448,25 @@ fn parse_env(text: &str) -> Result<(String, String)> {
     let (key, value) = text
         .split_once('=')
         .with_context(|| format!("`{text}` is not `KEY=VALUE`."))?;
+    ensure!(
+        !key.is_empty(),
+        "Environment variable name cannot be empty."
+    );
 
     Ok((key.to_owned(), value.to_owned()))
+}
+
+fn parse_working_directory(text: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(text);
+    ensure!(
+        !path.has_root()
+            && path
+                .components()
+                .all(|component| matches!(component, Component::CurDir | Component::Normal(_))),
+        "Working directory must be relative to the worktree root and cannot contain `..`."
+    );
+
+    Ok(path)
 }
 
 fn parse_repetitions(text: &str) -> Result<NonZeroUsize> {
@@ -306,23 +497,33 @@ fn parse_draws(text: &str) -> Result<NonZeroUsize> {
 }
 
 fn main() -> Result<()> {
-    let (explicit_output_dir, runs) = Cli::layered()?;
+    let Suite {
+        config,
+        output_dir: suite_output_dir,
+        runs,
+    } = Cli::suite()?;
     let multiple = runs.len() > 1;
-    let (_, first) = runs.first().expect("At least one run is always produced.");
-    let suite_output_dir = explicit_output_dir
-        .or(configured_output_dir(first.config.clone())?)
-        .unwrap_or_else(|| first.output_dir.clone());
+    let revisions = Pair {
+        baseline: config.baseline.clone(),
+        candidate: config.candidate.clone(),
+    };
+    let shared = create_worktrees(&revisions)?;
 
     let mut compact = Vec::with_capacity(runs.len());
 
     for (name, cli) in runs {
         let output_dir = match &name {
-            Some(name) if multiple => cli.output_dir.join(name),
+            Some(name) => cli.output_dir.join(name),
             _ => cli.output_dir.clone(),
         };
         let heading = if multiple { name.as_deref() } else { None };
+        let isolated = cli
+            .isolate
+            .then(|| create_worktrees(&revisions))
+            .transpose()?;
+        let worktrees = isolated.as_ref().unwrap_or(&shared);
 
-        let summary = compare(cli, &output_dir, heading)?;
+        let summary = compare(&config, cli, &worktrees.pair, &output_dir, heading)?;
 
         if multiple {
             let name = name.expect("Multi-benchmark runs are always named.");
@@ -342,32 +543,51 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn compare(cli: Cli, output_dir: &Path, heading: Option<&str>) -> Result<Summary<Time>> {
-    let Cli {
-        baseline,
-        candidate,
+fn create_worktrees(revisions: &Pair<Revision>) -> Result<Worktrees> {
+    let directory = tempdir().context("Failed to create temporary directory.")?;
+    let pair = Pair {
+        baseline: Worktree::create(
+            directory.path().join("baseline"),
+            revisions.baseline.clone(),
+        )?,
+        candidate: Worktree::create(
+            directory.path().join("candidate"),
+            revisions.candidate.clone(),
+        )?,
+    };
+
+    Ok(Worktrees {
+        _directory: directory,
+        pair,
+    })
+}
+
+fn compare(
+    suite: &ResolvedSuiteConfig,
+    config: RunConfig,
+    worktrees: &Pair<Worktree>,
+    output_dir: &Path,
+    heading: Option<&str>,
+) -> Result<Summary<Time>> {
+    let RunConfig {
+        isolate: _,
         shrinkage,
         output_dir: _,
         repetitions: repetition_count,
         draws,
         intervals,
-        seed,
         working_directory,
         envs,
-        config: _,
-        benchmarks: _,
         command,
-    } = cli;
+    } = config;
 
-    let worktree_dir = tempdir().context("Failed to create temporary directory.")?;
     fs::create_dir_all(output_dir).with_context(|| {
         format!(
             "Failed to create output directory {}.",
             output_dir.display()
         )
     })?;
-    let seed = seed.unwrap_or_else(rand::random);
-    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(suite.seed);
 
     let config_command = command.clone();
     let mut command = command.into_iter();
@@ -376,23 +596,13 @@ fn compare(cli: Cli, output_dir: &Path, heading: Option<&str>) -> Result<Summary
         .expect("Clap requires at least one command argument.");
     let benchmark = RunCommand::new(program, command.collect(), working_directory, envs);
 
-    let worktrees = Pair {
-        baseline: Worktree::create(
-            worktree_dir.path().join("baseline"),
-            Revision::resolve(baseline)?,
-        )?,
-        candidate: Worktree::create(
-            worktree_dir.path().join("candidate"),
-            Revision::resolve(candidate)?,
-        )?,
-    };
     let repetition_count = repetition_count.get();
 
     let config_path = output_dir.join("config.json");
     write_config_json(
         &config_path,
         &Config {
-            seed,
+            seed: suite.seed,
             repetitions: repetition_count,
             draws: draws.get(),
             shrinkage,

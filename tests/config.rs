@@ -129,23 +129,21 @@ fn builtin_defaults_apply_without_a_configuration_file() -> Result<()> {
 }
 
 #[test]
-fn configuration_overrides_builtin_defaults() -> Result<()> {
+fn help_ignores_configuration_defaults() -> Result<()> {
     let project = project(&[("b3.toml", CONFIG)])?;
     let help = help(&project, &[])?;
 
     for default in [
-        "[default: baseline-branch]",
-        "[default: candidate-branch]",
-        "[default: 2.5]",
-        "[default: configured]",
-        "[default: 12]",
-        "[default: 2000]",
-        "[default: 0.5 0.9]",
-        "[default: 7]",
-        "[default: Rscript benchmark.R]",
+        "[default: main]",
+        "[default: HEAD]",
+        "[default: 0]",
+        "[default: 10000]",
+        "[default: 0.5 0.8 0.98]",
     ] {
         assert!(help.contains(default), "{default} is missing from\n{help}");
     }
+    assert!(!help.contains("baseline-branch"), "{help}");
+    assert!(!help.contains("[default: Rscript"), "{help}");
 
     Ok(())
 }
@@ -192,12 +190,11 @@ fn configured_values_go_unused_when_an_argument_supplies_them() -> Result<()> {
 }
 
 #[test]
-fn an_explicit_configuration_replaces_the_default_file() -> Result<()> {
-    let project = project(&[("b3.toml", CONFIG), ("other.toml", "draws = 2500\n")])?;
-    let help = help(&project, &["--config", "other.toml"])?;
+fn help_does_not_read_an_explicit_configuration() -> Result<()> {
+    let project = project(&[("b3.toml", "not valid TOML")])?;
+    let help = help(&project, &["--config", "absent.toml"])?;
 
-    assert!(help.contains("[default: 2500]"), "{help}");
-    assert!(!help.contains("[default: baseline-branch]"), "{help}");
+    assert!(help.contains("[default: 10000]"), "{help}");
     assert!(help.contains(BUILTIN_USAGE), "{help}");
 
     Ok(())
@@ -263,6 +260,42 @@ fn a_missing_explicit_configuration_is_an_error() -> Result<()> {
 }
 
 #[test]
+fn selectors_are_found_after_run_options() -> Result<()> {
+    let project = repository("not valid TOML")?;
+    fs::write(
+        project.path().join("other.toml"),
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        [benchmarks.first]\n\
+        command = ['git', '--version']\n\
+        [benchmarks.second]\n\
+        command = ['git', '--version']\n",
+    )?;
+    let (succeeded, stdout, stderr) = run(
+        &project,
+        &[
+            "--output-dir",
+            "bench",
+            "--config",
+            "other.toml",
+            "--draws",
+            "1000",
+            "--benchmark",
+            "second",
+        ],
+    )?;
+
+    ensure!(succeeded, "b3 failed with {stderr}");
+    assert!(project.path().join("bench/second/report.txt").is_file());
+    assert!(!project.path().join("bench/first").exists());
+    assert!(!stdout.contains("first: Comparing"), "{stdout}");
+
+    Ok(())
+}
+
+#[test]
 fn a_benchmark_supplies_its_own_command() -> Result<()> {
     let project = repository(
         "baseline = 'HEAD'\n\
@@ -283,7 +316,7 @@ fn a_benchmark_supplies_its_own_command() -> Result<()> {
 }
 
 #[test]
-fn a_benchmark_overrides_the_configuration() -> Result<()> {
+fn help_does_not_resolve_a_selected_benchmark() -> Result<()> {
     let project = project(&[(
         "b3.toml",
         "output-dir = 'bench'\n\
@@ -295,8 +328,9 @@ fn a_benchmark_overrides_the_configuration() -> Result<()> {
     )])?;
     let help = help(&project, &["--benchmark", "parse"])?;
 
-    assert!(help.contains("[default: 15]"), "{help}");
-    assert!(help.contains("[default: git --version]"), "{help}");
+    assert!(help.contains("[default: 10000]"), "{help}");
+    assert!(!help.contains("[default: 15]"), "{help}");
+    assert!(!help.contains("git --version"), "{help}");
 
     Ok(())
 }
@@ -351,12 +385,12 @@ fn unusable_benchmarks_are_reported() -> Result<()> {
         (
             "benchmarks = 1",
             &["--benchmark", "parse"][..],
-            "has no benchmark named `parse`",
+            "must set `benchmarks` to a table",
         ),
         (
             "[benchmarks]\nparse = 1",
             &["--benchmark", "parse"][..],
-            "has no benchmark named `parse`",
+            "must set benchmark `parse` to a table",
         ),
         (
             "[benchmarks.parse]\ncommand = ['echo']\nenv = 1",
@@ -384,12 +418,12 @@ fn unusable_benchmarks_are_reported() -> Result<()> {
 }
 
 #[test]
-fn an_unselected_benchmarks_table_is_not_validated() -> Result<()> {
+fn a_malformed_benchmarks_table_is_always_rejected() -> Result<()> {
     let project = project(&[("b3.toml", "output-dir = 'bench'\nbenchmarks = 1\n")])?;
     let error = failure(&project, &["--repetitions", "5"])?;
 
     assert!(
-        error.contains("At least 10 repetitions are required."),
+        error.contains("must set `benchmarks` to a table"),
         "{error}"
     );
 
@@ -417,7 +451,13 @@ fn a_benchmark_can_set_its_working_directory() -> Result<()> {
     let (succeeded, _, stderr) = run(&project, &["--benchmark", "parse"])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
-    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
+    let log = fs::read_to_string(
+        project
+            .path()
+            .join("bench")
+            .join("parse")
+            .join("benchmark.log"),
+    )?;
     assert!(log.contains("sub/"), "{log}");
 
     Ok(())
@@ -444,7 +484,13 @@ fn a_benchmark_can_set_environment_variables() -> Result<()> {
     let (succeeded, _, stderr) = run(&project, &["--benchmark", "parse"])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
-    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
+    let log = fs::read_to_string(
+        project
+            .path()
+            .join("bench")
+            .join("parse")
+            .join("benchmark.log"),
+    )?;
     assert!(log.contains("benchmark-env"), "{log}");
 
     Ok(())
@@ -475,7 +521,13 @@ fn a_benchmarks_env_merges_with_the_top_level_env() -> Result<()> {
     let (succeeded, _, stderr) = run(&project, &["--benchmark", "parse"])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
-    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
+    let log = fs::read_to_string(
+        project
+            .path()
+            .join("bench")
+            .join("parse")
+            .join("benchmark.log"),
+    )?;
     assert!(log.contains("benchmark-env"), "{log}");
     assert!(!log.contains("top-level-env"), "{log}");
 
@@ -631,8 +683,7 @@ fn a_lone_benchmark_skips_the_short_report() -> Result<()> {
     assert!(!stdout.contains("parse: Comparing candidate"), "{stdout}");
 
     let bench = project.path().join("bench");
-    assert!(bench.join("report.txt").is_file());
-    assert!(!bench.join("parse").exists());
+    assert!(bench.join("parse").join("report.txt").is_file());
     assert!(!bench.join("report_short.txt").exists());
 
     Ok(())
@@ -689,6 +740,187 @@ fn an_output_dir_argument_relocates_the_short_report_too() -> Result<()> {
     for name in ["first", "second", "third"] {
         assert!(elsewhere.join(name).join("report.txt").is_file());
     }
+
+    Ok(())
+}
+
+#[test]
+fn benchmarks_run_in_declaration_order() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        \n\
+        [benchmarks.zebra]\n\
+        command = ['git', '--version']\n\
+        \n\
+        [benchmarks.apple]\n\
+        command = ['git', '--version']\n",
+    )?;
+    let (succeeded, stdout, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    assert!(
+        stdout.find("zebra: Comparing") < stdout.find("apple: Comparing"),
+        "{stdout}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn every_benchmark_must_define_its_own_command() -> Result<()> {
+    let project = project(&[(
+        "b3.toml",
+        "command = ['git', '--version']\n[benchmarks.parse]\nrepetitions = 10\n",
+    )])?;
+    let error = failure(&project, &[])?;
+
+    assert!(
+        error.contains("benchmark `parse` must set `command`"),
+        "{error}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn suite_settings_cannot_be_overridden_by_a_benchmark() -> Result<()> {
+    for key in ["baseline", "candidate", "seed"] {
+        let value = if key == "seed" { "1" } else { "'HEAD'" };
+        let project = project(&[(
+            "b3.toml",
+            &format!("[benchmarks.parse]\ncommand = ['git', '--version']\n{key} = {value}\n"),
+        )])?;
+        let error = failure(&project, &[])?;
+
+        assert!(
+            error.contains(&format!("cannot set suite-level `{key}`")),
+            "{error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn an_environment_variable_name_cannot_be_empty() -> Result<()> {
+    let project = project(&[("b3.toml", REQUIRED)])?;
+    let error = failure(&project, &["--env", "=value"])?;
+
+    assert!(
+        error.contains("Environment variable name cannot be empty"),
+        "{error}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn working_directory_cannot_escape_the_worktree() -> Result<()> {
+    for directory in ["/etc", "../outside"] {
+        let project = project(&[("b3.toml", REQUIRED)])?;
+        let error = failure(&project, &["--working-directory", directory])?;
+
+        assert!(
+            error.contains("must be relative to the worktree root"),
+            "{error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn every_benchmark_uses_the_suite_seed() -> Result<()> {
+    let project = repository(SUITE)?;
+    let (succeeded, _, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    let seeds = ["first", "second", "third"].map(|name| -> Result<u64> {
+        let text = fs::read_to_string(project.path().join("bench").join(name).join("config.json"))?;
+        Ok(serde_json::from_str::<serde_json::Value>(&text)?["seed"]
+            .as_u64()
+            .expect("seed is an integer"))
+    });
+    let seeds = seeds.into_iter().collect::<Result<Vec<_>>>()?;
+
+    assert!(seeds.windows(2).all(|pair| pair[0] == pair[1]), "{seeds:?}");
+
+    Ok(())
+}
+
+fn logged_worktree(project: &TempDir, benchmark: &str) -> Result<String> {
+    let text = fs::read_to_string(
+        project
+            .path()
+            .join("bench")
+            .join(benchmark)
+            .join("benchmark.log"),
+    )?;
+    let entry: serde_json::Value =
+        serde_json::from_str(text.lines().next().expect("a benchmark log has entries"))?;
+    Ok(entry["stdout"]
+        .as_str()
+        .expect("stdout is a string")
+        .trim()
+        .to_owned())
+}
+
+#[test]
+fn worktrees_are_shared_unless_isolation_is_requested() -> Result<()> {
+    const WORKTREES: &str = "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        [benchmarks.first]\n\
+        command = ['git', 'rev-parse', '--show-toplevel']\n\
+        [benchmarks.second]\n\
+        command = ['git', 'rev-parse', '--show-toplevel']\n";
+
+    let shared = repository(WORKTREES)?;
+    let (succeeded, _, stderr) = run(&shared, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+    assert_eq!(
+        logged_worktree(&shared, "first")?,
+        logged_worktree(&shared, "second")?
+    );
+
+    let isolated = repository(WORKTREES)?;
+    let (succeeded, _, stderr) = run(&isolated, &["--isolate"])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+    assert_ne!(
+        logged_worktree(&isolated, "first")?,
+        logged_worktree(&isolated, "second")?
+    );
+
+    let selective = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        [benchmarks.isolated]\n\
+        isolate = true\n\
+        command = ['git', 'rev-parse', '--show-toplevel']\n\
+        [benchmarks.shared_one]\n\
+        command = ['git', 'rev-parse', '--show-toplevel']\n\
+        [benchmarks.shared_two]\n\
+        command = ['git', 'rev-parse', '--show-toplevel']\n",
+    )?;
+    let (succeeded, _, stderr) = run(&selective, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+    assert_ne!(
+        logged_worktree(&selective, "isolated")?,
+        logged_worktree(&selective, "shared_one")?
+    );
+    assert_eq!(
+        logged_worktree(&selective, "shared_one")?,
+        logged_worktree(&selective, "shared_two")?
+    );
 
     Ok(())
 }

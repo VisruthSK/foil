@@ -26,9 +26,9 @@ interval = [0.5, 0.8, 0.98]
 output-dir = "benchmark/"
 ```
 
-With that file, the run above is `b3 -- cargo bench`. Arguments override the file, which overrides the builtin defaults, and `b3 --help` reports the defaults the file leaves in place. The command may also live in the file as a `command` list; one passed after `--` overrides it.
+With that file, the run above is `b3 -- cargo bench`. Arguments override the file, which overrides the built-in defaults. `b3 --help` always shows only the built-in CLI defaults. The command may also live in the file as a `command` list; one passed after `--` overrides it.
 
-A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and must set its own `command`; it may also override any option above, including `working-directory`. Its `env` table is merged with the top-level one instead, variable by variable, with the benchmark's values winning on conflicts:
+A `[benchmarks]` table is where commands belong in TOML. Each entry names a benchmark for `--benchmark` to select and must set its own `command`; it may override run options such as `repetitions`, `working-directory`, and `isolate`. `baseline`, `candidate`, and `seed` apply to the whole suite. A benchmark's `env` table is merged with the top-level one variable by variable, with the benchmark's values winning on conflicts:
 
 ```toml
 repetitions = 10
@@ -47,8 +47,11 @@ RAYON_NUM_THREADS = "1"
 ```
 
 `b3 --benchmark render` runs with 50 repetitions in `benchmarks/render`; `b3 --benchmark parse` runs with the top-level 10. An explicit argument still overrides a benchmark's setting.
+`working-directory` must be a relative path within the worktree; absolute paths and `..` are rejected.
 
-With no `--benchmark`, every benchmark in the table runs, each in its own `--output-dir` subdirectory named after it. Pass `--benchmark render parse` to run only some of them. A configuration with no `[benchmarks]` table always runs a single, unnamed command, exactly as with no configuration file at all.
+With no `--benchmark`, every benchmark in the table runs in declaration order, each in its own `--output-dir` subdirectory named after it. Pass `--benchmark render parse` to run only some of them in the order given. A configuration with no `[benchmarks]` table always runs a single, unnamed command, exactly as with no configuration file at all.
+
+One seed is drawn for the suite when `seed` is omitted, recorded in every benchmark's `config.json`, and used for every benchmark's run schedule and bootstrap. Benchmarks share the same baseline and candidate worktrees by default. Set `isolate = true` on a benchmark that needs a fresh pair, or pass `--isolate` to isolate every selected benchmark.
 
 The intended workflow is a `b3.toml` with named benchmarks, run with a plain `b3`; the trailing `-- <COMMAND>...` is for one-off runs that skip configuration entirely.
 

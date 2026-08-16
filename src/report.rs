@@ -21,7 +21,7 @@ fn bracket<M: Metric>(range: Range<M>) -> String {
     let Unit { scale, symbol } = shared(range.lower, range.upper);
 
     format!(
-        "[{:+.1}, {:+.1}]{symbol}",
+        "[{:+.1}{symbol}, {:+.1}{symbol}]",
         range.lower.base() * scale,
         range.upper.base() * scale
     )
@@ -186,9 +186,9 @@ mod tests {
             "Candidate: 10.1s\n",
             "\n",
             "Change: +20.0ms (+0.20%)\n",
-            "  50% CrI: [+19.4, +20.4]ms (+0.19%, +0.20%)\n",
-            "  80% CrI: [+19.0, +20.9]ms (+0.19%, +0.21%)\n",
-            "  98% CrI: [+18.1, +21.4]ms (+0.18%, +0.21%)\n",
+            "  50% CrI: [+19.4ms, +20.4ms] (+0.19%, +0.20%)\n",
+            "  80% CrI: [+19.0ms, +20.9ms] (+0.19%, +0.21%)\n",
+            "  98% CrI: [+18.1ms, +21.4ms] (+0.18%, +0.21%)\n",
             "\n",
             "P(candidate faster): 0.0%\n",
         );
@@ -219,7 +219,7 @@ mod tests {
             "Candidate: 0.0B\n",
             "\n",
             "Change: +0.0B\n",
-            "  50% CrI: [+0.0, +0.0]B\n",
+            "  50% CrI: [+0.0B, +0.0B]\n",
             "\n",
             "P(candidate smaller): 0.0%\n",
         );
@@ -238,7 +238,7 @@ mod tests {
         let half = [Interval::new(0.5)?];
         let summary = tiny_change_on_large_totals::<PeakMemory>(500).summarize(&half)?;
 
-        assert_eq!(summary.compact(), "0.0B -> 0.0B [+0.0, +0.0]B");
+        assert_eq!(summary.compact(), "0.0B -> 0.0B [+0.0B, +0.0B]");
 
         Ok(())
     }
