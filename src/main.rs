@@ -64,22 +64,14 @@ fn main() -> Result<()> {
         runs,
     } = Cli::suite()?;
 
+    write_configs(&suite, &lifecycle, &runs)?;
+
     let startup = build_command(&lifecycle.startup, None, &[]);
     let teardown = build_command(&lifecycle.teardown, None, &[]);
     scoped(
-        run_at(
-            startup.as_ref(),
-            Path::new("."),
-            "The suite startup failed.",
-        ),
+        run_at(startup.as_ref(), Path::new("."), "suite startup"),
         || execute_suite(&suite, &lifecycle, &suite_output_dir, runs),
-        || {
-            run_at(
-                teardown.as_ref(),
-                Path::new("."),
-                "The suite teardown failed.",
-            )
-        },
+        || run_at(teardown.as_ref(), Path::new("."), "suite teardown"),
     )
 }
 
@@ -105,10 +97,7 @@ fn execute_suite(
 
     for (name, config) in runs {
         ensure!(!interrupted(), "Interrupted.");
-        let output_dir = match &name {
-            Some(name) => config.output_dir.join(name),
-            _ => config.output_dir.clone(),
-        };
+        let output_dir = output_directory(name.as_deref(), &config);
         let heading = if multiple { name.as_deref() } else { None };
         let isolated = config
             .isolate
@@ -161,6 +150,43 @@ fn create_worktrees(revisions: &Pair<Revision>) -> Result<Worktrees> {
     })
 }
 
+fn output_directory(name: Option<&str>, config: &RunConfig) -> std::path::PathBuf {
+    name.map_or_else(
+        || config.output_dir.clone(),
+        |name| config.output_dir.join(name),
+    )
+}
+
+fn write_configs(
+    suite: &ResolvedSuiteConfig,
+    suite_lifecycle: &Lifecycle,
+    runs: &[(Option<String>, RunConfig)],
+) -> Result<()> {
+    for (name, config) in runs {
+        let output_dir = output_directory(name.as_deref(), config);
+        fs::create_dir_all(&output_dir)
+            .with_context(|| format!("Failed to create {}.", output_dir.display()))?;
+        let path = output_dir.join("config.json");
+        write_config_json(
+            &path,
+            &Config {
+                seed: suite.seed,
+                repetitions: config.repetitions.get(),
+                draws: config.draws.get(),
+                timeout_seconds: config.timeout.map(|seconds| seconds.get()),
+                shrinkage: config.shrinkage,
+                baseline: &suite.baseline,
+                candidate: &suite.candidate,
+                suite_lifecycle: lifecycle_config(suite_lifecycle),
+                benchmark_lifecycle: lifecycle_config(&config.lifecycle),
+                command: &config.command,
+            },
+        )
+        .with_context(|| format!("Failed to write {}.", path.display()))?;
+    }
+    Ok(())
+}
+
 fn compare(
     suite: &ResolvedSuiteConfig,
     suite_lifecycle: &Lifecycle,
@@ -183,12 +209,6 @@ fn compare(
         command,
     } = config;
 
-    fs::create_dir_all(output_dir).with_context(|| {
-        format!(
-            "Failed to create output directory {}.",
-            output_dir.display()
-        )
-    })?;
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(suite.seed);
 
     let run_command = |parts: &[OsString]| build_command(parts, working_directory.clone(), &envs);
@@ -199,24 +219,6 @@ fn compare(
         .with_timeout(timeout.map(|seconds| Duration::from_secs(seconds.get())));
 
     let repetition_count = repetition_count.get();
-
-    let config_path = output_dir.join("config.json");
-    write_config_json(
-        &config_path,
-        &Config {
-            seed: suite.seed,
-            repetitions: repetition_count,
-            draws: draws.get(),
-            timeout_seconds: timeout.map(|seconds| seconds.get()),
-            shrinkage,
-            baseline: worktrees.baseline.revision(),
-            candidate: worktrees.candidate.revision(),
-            suite_lifecycle: lifecycle_config(suite_lifecycle),
-            benchmark_lifecycle: lifecycle_config(&lifecycle),
-            command: &command,
-        },
-    )
-    .with_context(|| format!("Failed to write {}.", config_path.display()))?;
 
     let repetitions = scoped(
         run_in_both(benchmark_commands.startup.as_ref(), worktrees, "startup"),
@@ -327,49 +329,53 @@ fn measure_one<W: std::io::Write>(
     log: &mut BenchmarkLog<W>,
 ) -> Result<RunOutput> {
     let worktree = worktrees.get(side);
+    let progress = log.progress();
     scoped(
-        run_in(
-            suite.startup_each_run.as_ref(),
-            worktree,
-            side,
-            "suite startup-each-run",
-        ),
+        progress.suspend(|| {
+            run_in(
+                suite.startup_each_run.as_ref(),
+                worktree,
+                side,
+                "suite startup-each-run",
+            )
+        }),
         || {
             scoped(
-                run_in(
-                    benchmark_lifecycle.startup_each_run.as_ref(),
-                    worktree,
-                    side,
-                    "benchmark startup-each-run",
-                ),
+                progress.suspend(|| {
+                    run_in(
+                        benchmark_lifecycle.startup_each_run.as_ref(),
+                        worktree,
+                        side,
+                        "benchmark startup-each-run",
+                    )
+                }),
                 || {
                     ensure!(!interrupted(), "Interrupted.");
                     let output = log.measure(benchmark, side, worktree)?;
                     ensure!(!interrupted(), "Interrupted.");
-                    ensure!(
-                        output.exit_status().success(),
-                        "The {side} benchmark failed with {}.",
-                        output.exit_status()
-                    );
                     Ok(output)
                 },
                 || {
-                    run_in(
-                        benchmark_lifecycle.teardown_each_run.as_ref(),
-                        worktree,
-                        side,
-                        "benchmark teardown-each-run",
-                    )
+                    progress.suspend(|| {
+                        run_in(
+                            benchmark_lifecycle.teardown_each_run.as_ref(),
+                            worktree,
+                            side,
+                            "benchmark teardown-each-run",
+                        )
+                    })
                 },
             )
         },
         || {
-            run_in(
-                suite.teardown_each_run.as_ref(),
-                worktree,
-                side,
-                "suite teardown-each-run",
-            )
+            progress.suspend(|| {
+                run_in(
+                    suite.teardown_each_run.as_ref(),
+                    worktree,
+                    side,
+                    "suite teardown-each-run",
+                )
+            })
         },
     )
 }
@@ -404,15 +410,18 @@ fn run_in(
     phase: &str,
 ) -> Result<()> {
     command.map_or(Ok(()), |command| {
+        let label = format!("{side} {phase}");
         command
-            .run_once_in(worktree)
-            .with_context(|| format!("The {side} {phase} failed."))
+            .run_once_in(worktree, &label)
+            .with_context(|| format!("The {label} failed."))
     })
 }
 
-fn run_at(command: Option<&RunCommand>, directory: &Path, context: &str) -> Result<()> {
+fn run_at(command: Option<&RunCommand>, directory: &Path, label: &str) -> Result<()> {
     command.map_or(Ok(()), |command| {
-        command.run_once_at(directory).context(context.to_owned())
+        command
+            .run_once_at(directory, label)
+            .with_context(|| format!("The {label} failed."))
     })
 }
 
@@ -443,7 +452,7 @@ fn run_in_both(
     let mut first_error = None;
     for side in [Side::Baseline, Side::Candidate] {
         if let Err(error) = command
-            .run_once_in(worktrees.get(side))
+            .run_once_in(worktrees.get(side), &format!("{side} benchmark {phase}"))
             .with_context(|| format!("The {side} {phase} failed."))
         {
             if first_error.is_some() {

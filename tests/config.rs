@@ -743,6 +743,14 @@ fn suite_and_benchmark_lifecycle_output_is_visible() -> Result<()> {
     let (succeeded, stdout, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
     assert_eq!(stdout.matches("git version").count(), 6, "{stdout}");
+    for label in [
+        "[suite startup stdout]",
+        "[baseline benchmark startup stdout]",
+        "[candidate benchmark teardown stdout]",
+        "[suite teardown stdout]",
+    ] {
+        assert!(stdout.contains(label), "{label} is missing from {stdout}");
+    }
 
     Ok(())
 }
@@ -820,6 +828,7 @@ fn a_failing_benchmark_still_leaves_a_measurements_file() -> Result<()> {
     let error = failure(&project, &[])?;
 
     assert!(error.contains("benchmark failed"), "{error}");
+    assert!(error.contains("benchmark stderr]"), "{error}");
     assert_eq!(
         fs::read_to_string(project.path().join("bench").join("measurements.csv"))?,
         "repetition,order,baseline_seconds,candidate_seconds\n"
@@ -949,6 +958,12 @@ fn an_empty_benchmark_lifecycle_does_not_clear_the_suite_lifecycle() -> Result<(
 
     let error = failure(&project, &[])?;
     assert!(error.contains("The suite startup failed."), "{error}");
+    assert!(
+        project
+            .path()
+            .join("bench/standalone/config.json")
+            .is_file()
+    );
     git(
         &project,
         &["rev-parse", "--verify", "refs/tags/suite-cleaned-up"],

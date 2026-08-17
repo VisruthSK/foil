@@ -2,11 +2,12 @@ use crate::repetition::Side;
 use crate::worktree::Worktree;
 
 use anyhow::{Context, Result, bail, ensure};
-use command_group::CommandGroup;
+use command_group::{CommandGroup, GroupChild};
+use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::json;
 use std::{
     ffi::OsString,
-    io::{self, IsTerminal, Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     thread::{self, JoinHandle},
@@ -20,6 +21,30 @@ pub struct RunCommand {
     working_directory: Option<PathBuf>,
     env: Vec<(String, String)>,
     timeout: Option<Duration>,
+}
+
+struct ProcessTree(GroupChild);
+
+impl ProcessTree {
+    fn spawn(command: &mut Command) -> io::Result<Self> {
+        command.group_spawn().map(Self)
+    }
+
+    fn child(&mut self) -> &mut std::process::Child {
+        self.0.inner()
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        self.0.wait()
+    }
+
+    fn wait_timeout(&mut self, timeout: Duration) -> io::Result<Option<ExitStatus>> {
+        self.child().wait_timeout(timeout)
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        self.0.kill()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -66,7 +91,7 @@ impl RunCommand {
         self
     }
 
-    pub(crate) fn run_in(&self, worktree: &Path) -> Result<Run> {
+    pub(crate) fn run_in(&self, worktree: &Path, label: &str) -> Result<Run> {
         let working_dir = match &self.working_directory {
             Some(directory) => worktree.join(directory),
             None => worktree.to_path_buf(),
@@ -81,21 +106,16 @@ impl RunCommand {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command
-            .group_spawn()
+        let mut child = ProcessTree::spawn(&mut command)
             .with_context(|| format!("Failed to run {:?}.", self.program))?;
-        let stdout = drain(child.inner().stdout.take().expect("Stdout is piped."));
-        let stderr = drain(child.inner().stderr.take().expect("Stderr is piped."));
+        let stdout = drain(child.child().stdout.take().expect("Stdout is piped."));
+        let stderr = drain(child.child().stderr.take().expect("Stderr is piped."));
 
         let failed_waiting = || format!("Failed to wait for {:?}.", self.program);
         let mut timed_out = None;
         let exit_status = match self.timeout {
             None => child.wait().with_context(failed_waiting)?,
-            Some(limit) => match child
-                .inner()
-                .wait_timeout(limit)
-                .with_context(failed_waiting)?
-            {
+            Some(limit) => match child.wait_timeout(limit).with_context(failed_waiting)? {
                 Some(status) => status,
                 None => {
                     child.kill().with_context(|| {
@@ -110,15 +130,7 @@ impl RunCommand {
         let stdout = stdout.join().expect("The stdout reader does not panic.")?;
         let stderr = stderr.join().expect("The stderr reader does not panic.")?;
 
-        if let Some(limit) = timed_out {
-            bail!(
-                "{:?} timed out after {limit:?}.\n{}",
-                self.program,
-                String::from_utf8_lossy(&stderr).trim_end()
-            );
-        }
-
-        Ok(Run {
+        let run = Run {
             output: RunOutput {
                 exit_status,
                 elapsed_time,
@@ -126,32 +138,36 @@ impl RunCommand {
             },
             stdout,
             stderr,
-        })
+        };
+
+        if let Some(limit) = timed_out {
+            bail!(
+                "{:?} timed out after {limit:?}.{}",
+                self.program,
+                display_output(label, &run)
+            );
+        }
+
+        Ok(run)
     }
 
-    pub fn run_once_in(&self, worktree: &Worktree) -> Result<()> {
-        self.run_once_at(worktree.path())
+    pub fn run_once_in(&self, worktree: &Worktree, label: &str) -> Result<()> {
+        self.run_once_at(worktree.path(), label)
     }
 
-    pub fn run_once_at(&self, directory: &Path) -> Result<()> {
-        let run = self.run_in(directory)?;
+    pub fn run_once_at(&self, directory: &Path, label: &str) -> Result<()> {
+        let run = self.run_in(directory, label)?;
 
         ensure!(
             run.output.exit_status.success(),
-            "{:?} failed with {}.\n{}",
+            "{:?} failed with {}.{}",
             self.program,
             run.output.exit_status,
-            String::from_utf8_lossy(&run.stderr).trim_end()
+            display_output(label, &run)
         );
 
-        io::stdout()
-            .write_all(&run.stdout)
-            .context("Failed to write command stdout.")?;
-        io::stdout().flush().context("Failed to flush stdout.")?;
-        io::stderr()
-            .write_all(&run.stderr)
-            .context("Failed to write command stderr.")?;
-        io::stderr().flush().context("Failed to flush stderr.")?;
+        write_output(io::stdout(), label, "stdout", &run.stdout)?;
+        write_output(io::stderr(), label, "stderr", &run.stderr)?;
 
         Ok(())
     }
@@ -194,6 +210,32 @@ fn drain(mut stream: impl Read + Send + 'static) -> JoinHandle<io::Result<Vec<u8
     })
 }
 
+fn write_output(mut writer: impl Write, label: &str, stream: &str, output: &[u8]) -> Result<()> {
+    if output.is_empty() {
+        return Ok(());
+    }
+    writeln!(writer, "[{label} {stream}]")?;
+    writer.write_all(output)?;
+    if !output.ends_with(b"\n") {
+        writeln!(writer)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+fn display_output(label: &str, run: &Run) -> String {
+    let mut output = String::new();
+    for (stream, bytes) in [("stdout", &run.stdout), ("stderr", &run.stderr)] {
+        if !bytes.is_empty() {
+            output.push_str(&format!(
+                "\n[{label} {stream}]\n{}",
+                String::from_utf8_lossy(bytes).trim_end()
+            ));
+        }
+    }
+    output
+}
+
 pub(crate) struct Run {
     output: RunOutput,
     stdout: Vec<u8>,
@@ -205,19 +247,20 @@ pub struct BenchmarkLog<W> {
     run: usize,
     runs: usize,
     started: Instant,
-    interactive: bool,
-    cleared_width: usize,
+    progress: ProgressBar,
 }
 
 impl<W: Write> BenchmarkLog<W> {
     pub fn new(writer: W, runs: usize) -> Self {
+        let progress = ProgressBar::new(runs as u64).with_style(
+            ProgressStyle::with_template("{msg}").expect("The progress template is valid."),
+        );
         Self {
             writer,
             run: 0,
             runs,
             started: Instant::now(),
-            interactive: io::stderr().is_terminal(),
-            cleared_width: 0,
+            progress,
         }
     }
 
@@ -228,29 +271,29 @@ impl<W: Write> BenchmarkLog<W> {
         side: Side,
         worktree: &Worktree,
     ) -> Result<RunOutput> {
-        self.starting();
+        self.starting(side);
 
-        let run = benchmark.run_in(worktree.path())?;
+        let label = format!("{side} benchmark");
+        let run = benchmark.run_in(worktree.path(), &label)?;
 
         self.append(side, &run)?;
+        ensure!(
+            run.output.exit_status.success(),
+            "The {side} benchmark failed with {}.{}",
+            run.output.exit_status,
+            display_output(&label, &run)
+        );
 
         Ok(run.output)
     }
 
-    fn starting(&mut self) {
-        let progress = format!(
-            "Benchmarking run {}/{}{}",
+    fn starting(&self, side: Side) {
+        self.progress.set_message(format!(
+            "Benchmarking {side} run {}/{}{}",
             self.run + 1,
             self.runs,
             self.eta()
-        );
-
-        if self.interactive {
-            eprint!("\r{progress:<width$}", width = self.cleared_width);
-            self.cleared_width = self.cleared_width.max(progress.len());
-        } else {
-            eprintln!("{progress}");
-        }
+        ));
     }
 
     fn eta(&self) -> String {
@@ -270,6 +313,7 @@ impl<W: Write> BenchmarkLog<W> {
 
     fn append(&mut self, side: Side, run: &Run) -> Result<()> {
         self.run += 1;
+        self.progress.inc(1);
 
         let entry = json!({
             "run": self.run,
@@ -287,13 +331,15 @@ impl<W: Write> BenchmarkLog<W> {
 
         Ok(())
     }
+
+    pub fn progress(&self) -> ProgressBar {
+        self.progress.clone()
+    }
 }
 
 impl<W> Drop for BenchmarkLog<W> {
     fn drop(&mut self) {
-        if self.interactive && self.run > 0 {
-            eprint!("\r{}\r", " ".repeat(self.cleared_width));
-        }
+        self.progress.finish_and_clear();
     }
 }
 
@@ -325,7 +371,7 @@ mod tests {
 
         let error = slow
             .with_timeout(Some(Duration::from_millis(100)))
-            .run_in(directory.path())
+            .run_in(directory.path(), "test benchmark")
             .err()
             .context("The run should time out.")?;
 
@@ -340,7 +386,7 @@ mod tests {
 
         let run = command("git", &["--version"])
             .with_timeout(Some(Duration::from_secs(60)))
-            .run_in(directory.path())?;
+            .run_in(directory.path(), "test benchmark")?;
 
         assert!(run.output.exit_status.success());
         assert!(!run.stdout.is_empty());
@@ -371,7 +417,7 @@ mod tests {
 
         let error = parent
             .with_timeout(Some(Duration::from_millis(100)))
-            .run_in(directory.path())
+            .run_in(directory.path(), "test benchmark")
             .err()
             .context("The parent should time out.")?;
         assert!(error.to_string().contains("timed out"), "{error}");
