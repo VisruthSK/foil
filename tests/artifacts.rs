@@ -1,5 +1,5 @@
 use anyhow::Result;
-use b3::{Config, Revision, Shrinkage, write_config_json};
+use b3::{Config, LifecycleConfig, Revision, Shrinkage, write_config_json};
 use serde_json::json;
 use std::{
     env::{current_dir, set_current_dir},
@@ -48,8 +48,9 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
     let directory = tempdir()?;
     let path = directory.path().join("config.json");
     let command = ["cargo", "test --workspace"].map(OsString::from);
-    let setup = ["cargo", "build --release"].map(OsString::from);
-    let prepare = ["cargo", "clean --release"].map(OsString::from);
+    let startup = ["cargo", "fetch --locked"].map(OsString::from);
+    let startup_each_run = ["cargo", "clean --release"].map(OsString::from);
+    let teardown_each_run = ["git", "status --short"].map(OsString::from);
     let teardown = ["git", "clean --force"].map(OsString::from);
     let baseline = Revision::resolve("main".to_owned())?;
     let candidate = Revision::resolve("HEAD".to_owned())?;
@@ -61,10 +62,19 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
         shrinkage: Shrinkage::new(5.0)?,
         baseline: &baseline,
         candidate: &candidate,
-        setup: &setup,
-        prepare: &prepare,
+        suite_lifecycle: LifecycleConfig {
+            startup: &startup,
+            startup_each_run: &startup_each_run,
+            teardown_each_run: &teardown_each_run,
+            teardown: &teardown,
+        },
+        benchmark_lifecycle: LifecycleConfig {
+            startup: &startup,
+            startup_each_run: &startup_each_run,
+            teardown_each_run: &teardown_each_run,
+            teardown: &teardown,
+        },
         command: &command,
-        teardown: &teardown,
     };
 
     write_config_json(&path, &config)?;
@@ -79,10 +89,19 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
         "b3_version": env!("CARGO_PKG_VERSION"),
         "baseline": { "revision": "main", "hash": baseline.hash() },
         "candidate": { "revision": "HEAD", "hash": candidate.hash() },
-        "setup": ["cargo", "build --release"],
-        "prepare": ["cargo", "clean --release"],
+        "suite_lifecycle": {
+            "startup": ["cargo", "fetch --locked"],
+            "startup_each_run": ["cargo", "clean --release"],
+            "teardown_each_run": ["git", "status --short"],
+            "teardown": ["git", "clean --force"],
+        },
+        "benchmark_lifecycle": {
+            "startup": ["cargo", "fetch --locked"],
+            "startup_each_run": ["cargo", "clean --release"],
+            "teardown_each_run": ["git", "status --short"],
+            "teardown": ["git", "clean --force"],
+        },
         "command": ["cargo", "test --workspace"],
-        "teardown": ["git", "clean --force"],
     });
 
     assert_eq!(actual, expected);

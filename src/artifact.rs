@@ -17,9 +17,15 @@ pub struct Config<'a> {
     pub shrinkage: Shrinkage,
     pub baseline: &'a Revision,
     pub candidate: &'a Revision,
-    pub setup: &'a [OsString],
-    pub prepare: &'a [OsString],
+    pub suite_lifecycle: LifecycleConfig<'a>,
+    pub benchmark_lifecycle: LifecycleConfig<'a>,
     pub command: &'a [OsString],
+}
+
+pub struct LifecycleConfig<'a> {
+    pub startup: &'a [OsString],
+    pub startup_each_run: &'a [OsString],
+    pub teardown_each_run: &'a [OsString],
     pub teardown: &'a [OsString],
 }
 
@@ -49,10 +55,19 @@ pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
             "revision": config.candidate.name(),
             "hash": config.candidate.hash(),
         },
-        "setup": utf8("setup", config.setup)?,
-        "prepare": utf8("prepare", config.prepare)?,
+        "suite_lifecycle": {
+            "startup": utf8("suite startup", config.suite_lifecycle.startup)?,
+            "startup_each_run": utf8("suite startup-each-run", config.suite_lifecycle.startup_each_run)?,
+            "teardown_each_run": utf8("suite teardown-each-run", config.suite_lifecycle.teardown_each_run)?,
+            "teardown": utf8("suite teardown", config.suite_lifecycle.teardown)?,
+        },
+        "benchmark_lifecycle": {
+            "startup": utf8("benchmark startup", config.benchmark_lifecycle.startup)?,
+            "startup_each_run": utf8("benchmark startup-each-run", config.benchmark_lifecycle.startup_each_run)?,
+            "teardown_each_run": utf8("benchmark teardown-each-run", config.benchmark_lifecycle.teardown_each_run)?,
+            "teardown": utf8("benchmark teardown", config.benchmark_lifecycle.teardown)?,
+        },
         "command": utf8("benchmark", config.command)?,
-        "teardown": utf8("teardown", config.teardown)?,
     });
 
     let mut writer = BufWriter::new(File::create(path)?);

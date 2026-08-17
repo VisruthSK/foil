@@ -130,7 +130,11 @@ impl RunCommand {
     }
 
     pub fn run_once_in(&self, worktree: &Worktree) -> Result<()> {
-        let run = self.run_in(worktree.path())?;
+        self.run_once_at(worktree.path())
+    }
+
+    pub fn run_once_at(&self, directory: &Path) -> Result<()> {
+        let run = self.run_in(directory)?;
 
         ensure!(
             run.output.exit_status.success(),

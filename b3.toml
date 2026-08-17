@@ -3,6 +3,6 @@ output-dir = "benchmark/results"
 timeout = 1800
 
 [benchmarks.release-compile]
-setup = ["cargo", "fetch", "--locked"]
-prepare = ["cargo", "clean", "--release"]
+startup = ["cargo", "fetch", "--locked"]
+startup-each-run = ["cargo", "clean", "--release"]
 command = ["cargo", "build", "--release", "--locked", "--offline"]

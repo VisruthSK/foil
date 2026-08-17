@@ -370,9 +370,6 @@ fn a_benchmarks_own_options_cannot_be_passed_as_arguments() -> Result<()> {
     for (arguments, key) in [
         (&["--working-directory", "sub"][..], "working-directory"),
         (&["--env", "KEY=VALUE"][..], "env"),
-        (&["--setup", "make"][..], "setup"),
-        (&["--prepare", "make"][..], "prepare"),
-        (&["--teardown", "make"][..], "teardown"),
         (&["--", "git", "--version"][..], "command"),
     ] {
         let error = failure(
@@ -612,39 +609,46 @@ fn an_explicit_env_argument_overrides_the_configuration() -> Result<()> {
 }
 
 #[test]
-fn setup_runs_in_each_worktree_before_the_measured_runs() -> Result<()> {
+fn benchmark_startup_runs_in_each_worktree_before_the_measured_runs() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}setup = ['git', 'config', '--file', 'marker.txt', 'setup.ran', 'yes']\n\
-        command = ['git', 'config', '--file', 'marker.txt', 'setup.ran']\n"
+        "{PREAMBLE}[benchmarks.test]\n\
+        startup = ['git', 'config', '--file', 'marker.txt', 'startup.ran', 'yes']\n\
+        command = ['git', 'config', '--file', 'marker.txt', 'startup.ran']\n"
     ))?;
 
     let (succeeded, _, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
-    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
+    let log = fs::read_to_string(project.path().join("bench/test/benchmark.log"))?;
     assert_eq!(log.matches("yes").count(), 20, "{log}");
 
     Ok(())
 }
 
 #[test]
-fn a_failing_setup_stops_before_the_measured_runs() -> Result<()> {
+fn a_failing_benchmark_startup_stops_before_the_measured_runs() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}setup = ['git', 'cat-file', '-p', 'absent-object']\n\
+        "{PREAMBLE}[benchmarks.test]\n\
+        startup = ['git', 'cat-file', '-p', 'absent-object']\n\
+        teardown = ['git', 'tag', '--force', 'startup-cleaned-up']\n\
         command = ['git', '--version']\n"
     ))?;
 
     let error = failure(&project, &[])?;
 
-    assert!(error.contains("The baseline setup failed."), "{error}");
+    assert!(error.contains("The baseline startup failed."), "{error}");
     assert!(
         error.contains("Not a valid object name absent-object"),
         "{error}"
     );
 
-    let bench = project.path().join("bench");
+    let bench = project.path().join("bench/test");
     assert!(bench.join("config.json").is_file());
     assert!(!bench.join("benchmark.log").exists());
+    git(
+        &project,
+        &["rev-parse", "--verify", "refs/tags/startup-cleaned-up"],
+    )?;
 
     Ok(())
 }
@@ -652,7 +656,8 @@ fn a_failing_setup_stops_before_the_measured_runs() -> Result<()> {
 #[test]
 fn teardown_runs_after_the_measured_runs() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
+        "{PREAMBLE}[benchmarks.test]\n\
+        teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
         command = ['git', '--version']\n"
     ))?;
 
@@ -660,7 +665,7 @@ fn teardown_runs_after_the_measured_runs() -> Result<()> {
 
     assert!(error.contains("The baseline teardown failed."), "{error}");
 
-    let bench = project.path().join("bench");
+    let bench = project.path().join("bench/test");
     let log = fs::read_to_string(bench.join("benchmark.log"))?;
     assert_eq!(log.lines().count(), 20, "{log}");
 
@@ -705,6 +710,7 @@ fn candidate_teardown_runs_after_baseline_teardown_fails() -> Result<()> {
              output-dir = 'bench'\n\
              repetitions = 10\n\
              draws = 1000\n\
+             [benchmarks.test]\n\
              teardown = ['git', 'update-ref', 'refs/tags/teardown-state', '{baseline}', 'HEAD']\n\
              command = ['git', '--version']\n"
         ),
@@ -724,24 +730,29 @@ fn candidate_teardown_runs_after_baseline_teardown_fails() -> Result<()> {
 }
 
 #[test]
-fn successful_setup_and_teardown_output_is_visible() -> Result<()> {
+fn suite_and_benchmark_lifecycle_output_is_visible() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}setup = ['git', '--version']\n\
+        "{PREAMBLE}startup = ['git', '--version']\n\
+         teardown = ['git', '--version']\n\
+         [benchmarks.test]\n\
+         startup = ['git', '--version']\n\
          teardown = ['git', '--version']\n\
          command = ['git', 'rev-parse', '--is-inside-work-tree']\n"
     ))?;
 
     let (succeeded, stdout, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
-    assert_eq!(stdout.matches("git version").count(), 4, "{stdout}");
+    assert_eq!(stdout.matches("git version").count(), 6, "{stdout}");
 
     Ok(())
 }
 
 #[test]
-fn prepare_runs_before_every_measured_command() -> Result<()> {
+fn suite_and_benchmark_each_run_startups_compose() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}prepare = ['git', 'rev-parse', 'HEAD']\n\
+        "{PREAMBLE}startup-each-run = ['git', 'rev-parse', 'HEAD']\n\
+         [benchmarks.test]\n\
+         startup-each-run = ['git', 'rev-parse', 'HEAD']\n\
          command = ['git', '--version']\n"
     ))?;
 
@@ -753,9 +764,49 @@ fn prepare_runs_before_every_measured_command() -> Result<()> {
             .filter(|line| line.len() == 40
                 && line.chars().all(|character| character.is_ascii_hexdigit()))
             .count(),
-        20,
+        40,
         "{stdout}"
     );
+
+    Ok(())
+}
+
+#[test]
+fn each_run_teardowns_run_after_a_failed_benchmark() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}teardown-each-run = ['git', '--version']\n\
+         [benchmarks.test]\n\
+         teardown-each-run = ['git', 'rev-parse', 'HEAD']\n\
+         command = ['git', 'cat-file', '-p', 'absent-object']\n"
+    ))?;
+
+    let (succeeded, stdout, stderr) = run(&project, &[])?;
+    assert!(!succeeded, "b3 unexpectedly succeeded with {stdout}");
+    assert!(stderr.contains("benchmark failed"), "{stderr}");
+    assert_eq!(stdout.matches("git version").count(), 1, "{stdout}");
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.len() == 40
+                && line.chars().all(|character| character.is_ascii_hexdigit()))
+            .count(),
+        1,
+        "{stdout}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn removed_lifecycle_names_are_rejected() -> Result<()> {
+    for key in ["setup", "prepare"] {
+        let project = project(&[("b3.toml", &format!("{REQUIRED}{key} = ['git']\n"))])?;
+        let error = failure(&project, &[])?;
+        assert!(
+            error.contains(&format!("sets `{key}`, which is not an option")),
+            "{error}"
+        );
+    }
 
     Ok(())
 }
@@ -808,7 +859,8 @@ fn a_clean_working_tree_prints_no_warning() -> Result<()> {
 #[test]
 fn teardown_still_runs_when_a_benchmark_fails() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}teardown = ['git', 'tag', '--force', 'teardown-ran']\n\
+        "{PREAMBLE}[benchmarks.test]\n\
+        teardown = ['git', 'tag', '--force', 'teardown-ran']\n\
         command = ['git', 'cat-file', '-p', 'absent-object']\n"
     ))?;
 
@@ -826,7 +878,8 @@ fn teardown_still_runs_when_a_benchmark_fails() -> Result<()> {
 #[test]
 fn a_teardown_failure_is_reported_alongside_a_benchmark_failure() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
+        "{PREAMBLE}[benchmarks.test]\n\
+        teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
         command = ['git', 'cat-file', '-p', 'absent-object']\n"
     ))?;
 
@@ -855,15 +908,15 @@ fn a_benchmark_inherits_the_top_level_command() -> Result<()> {
 }
 
 #[test]
-fn a_benchmark_can_set_its_own_setup_and_teardown() -> Result<()> {
+fn suite_and_benchmark_lifecycles_remain_distinct() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}setup = ['git', 'config', '--file', 'marker.txt', 'setup.ran', 'top-level-setup']\n\
+        "{PREAMBLE}startup = ['git', '--version']\n\
         teardown = ['git', '--version']\n\
         \n\
         [benchmarks.parse]\n\
-        setup = ['git', 'config', '--file', 'marker.txt', 'setup.ran', 'benchmark-setup']\n\
+        startup = ['git', 'config', '--file', 'marker.txt', 'startup.ran', 'benchmark-startup']\n\
         teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
-        command = ['git', 'config', '--file', 'marker.txt', 'setup.ran']\n"
+        command = ['git', 'config', '--file', 'marker.txt', 'startup.ran']\n"
     ))?;
 
     let error = failure(&project, &[])?;
@@ -877,26 +930,29 @@ fn a_benchmark_can_set_its_own_setup_and_teardown() -> Result<()> {
             .join("parse")
             .join("benchmark.log"),
     )?;
-    assert_eq!(log.matches("benchmark-setup").count(), 20, "{log}");
-    assert!(!log.contains("top-level-setup"), "{log}");
+    assert_eq!(log.matches("benchmark-startup").count(), 20, "{log}");
 
     Ok(())
 }
 
 #[test]
-fn a_benchmark_clears_an_inherited_setup_and_teardown_with_an_empty_list() -> Result<()> {
+fn an_empty_benchmark_lifecycle_does_not_clear_the_suite_lifecycle() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}setup = ['git', 'cat-file', '-p', 'absent-object']\n\
-        teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
+        "{PREAMBLE}startup = ['git', 'cat-file', '-p', 'absent-object']\n\
+        teardown = ['git', 'tag', 'suite-cleaned-up']\n\
         \n\
         [benchmarks.standalone]\n\
-        setup = []\n\
+        startup = []\n\
         teardown = []\n\
         command = ['git', '--version']\n"
     ))?;
 
-    let (succeeded, _, stderr) = run(&project, &[])?;
-    ensure!(succeeded, "b3 failed with {stderr}");
+    let error = failure(&project, &[])?;
+    assert!(error.contains("The suite startup failed."), "{error}");
+    git(
+        &project,
+        &["rev-parse", "--verify", "refs/tags/suite-cleaned-up"],
+    )?;
 
     Ok(())
 }

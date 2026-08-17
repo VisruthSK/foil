@@ -22,20 +22,37 @@ const OUTPUT_DIR: &str = "output-dir";
 const OUTPUT_DIR_ID: &str = "output_dir";
 const ENV: &str = "env";
 const ENV_ID: &str = "envs";
-const SETUP: &str = "setup";
-const PREPARE: &str = "prepare";
+const STARTUP: &str = "startup";
+const STARTUP_EACH_RUN: &str = "startup-each-run";
+const TEARDOWN_EACH_RUN: &str = "teardown-each-run";
 const TEARDOWN: &str = "teardown";
 const COMMAND: &str = "command";
 const WORKING_DIRECTORY: &str = "working-directory";
 const WORKING_DIRECTORY_ID: &str = "working_directory";
-const PER_BENCHMARK: [(&str, &str); 6] = [
+const PER_BENCHMARK: [(&str, &str); 3] = [
     (COMMAND, COMMAND),
     (WORKING_DIRECTORY_ID, WORKING_DIRECTORY),
     (ENV_ID, ENV),
-    (SETUP, SETUP),
-    (PREPARE, PREPARE),
-    (TEARDOWN, TEARDOWN),
 ];
+
+#[derive(Args, Default)]
+pub(crate) struct Lifecycle {
+    /// Command run once before this scope, e.g. `--startup make`.
+    #[arg(long, value_name = "COMMAND", num_args = 1..)]
+    pub(crate) startup: Vec<OsString>,
+
+    /// Command run before every measured command, outside its timed interval.
+    #[arg(long, value_name = "COMMAND", num_args = 1..)]
+    pub(crate) startup_each_run: Vec<OsString>,
+
+    /// Command run after every measured command, outside its timed interval.
+    #[arg(long, value_name = "COMMAND", num_args = 1..)]
+    pub(crate) teardown_each_run: Vec<OsString>,
+
+    /// Command run once after this scope.
+    #[arg(long, value_name = "COMMAND", num_args = 1..)]
+    pub(crate) teardown: Vec<OsString>,
+}
 
 #[derive(Parser)]
 #[command(name = "b3")]
@@ -135,21 +152,8 @@ pub(crate) struct RunConfig {
     #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env)]
     pub(crate) envs: Vec<(String, String)>,
 
-    /// Command run once in each worktree before the first measured run, e.g. `--setup make`.
-    ///
-    /// Never measured. A command containing flags belongs in a configuration file, as a list.
-    #[arg(long, value_name = "COMMAND", num_args = 1..)]
-    pub(crate) setup: Vec<OsString>,
-
-    /// Command run before every measured command, outside the timed interval.
-    #[arg(long, value_name = "COMMAND", num_args = 1..)]
-    pub(crate) prepare: Vec<OsString>,
-
-    /// Command run once in each worktree after the last measured run.
-    ///
-    /// Never measured, and still runs when a benchmark run fails.
-    #[arg(long, value_name = "COMMAND", num_args = 1..)]
-    pub(crate) teardown: Vec<OsString>,
+    #[command(flatten)]
+    pub(crate) lifecycle: Lifecycle,
     /// Benchmark program and arguments.
     ///
     /// Place the command after `--`, for example: `b3 --output-dir benchmark/ --repetitions 10 -- Rscript benchmark.R`.
@@ -165,6 +169,7 @@ struct Configuration {
 
 pub(crate) struct Suite {
     pub(crate) config: ResolvedSuiteConfig,
+    pub(crate) lifecycle: Lifecycle,
     pub(crate) output_dir: PathBuf,
     pub(crate) runs: Vec<(Option<String>, RunConfig)>,
 }
@@ -177,6 +182,7 @@ pub(crate) struct ResolvedSuiteConfig {
 
 struct ResolvedCli {
     cli: Cli,
+    benchmark_lifecycle: Lifecycle,
     output_from_command_line: bool,
 }
 
@@ -232,9 +238,17 @@ impl Cli {
         let baseline = Revision::resolve(first.cli.suite.baseline.clone())?;
         let candidate = Revision::resolve(first.cli.suite.candidate.clone())?;
         let seed = first.cli.suite.seed.unwrap_or_else(rand::random);
+        let mut suite_lifecycle = Lifecycle::default();
         let runs = runs
             .into_iter()
-            .map(|(name, resolved)| (name, resolved.cli.run))
+            .enumerate()
+            .map(|(index, (name, mut resolved))| {
+                if index == 0 {
+                    suite_lifecycle = std::mem::take(&mut resolved.cli.run.lifecycle);
+                }
+                resolved.cli.run.lifecycle = resolved.benchmark_lifecycle;
+                (name, resolved.cli.run)
+            })
             .collect();
 
         Ok(Suite {
@@ -243,6 +257,7 @@ impl Cli {
                 candidate,
                 seed,
             },
+            lifecycle: suite_lifecycle,
             output_dir,
             runs,
         })
@@ -362,6 +377,7 @@ fn resolve(
     arguments: &[OsString],
 ) -> Result<ResolvedCli> {
     let mut values = config.top.clone();
+    let mut benchmark_lifecycle = Lifecycle::default();
     if let Some(name) = benchmark {
         let mut overrides = config
             .benchmarks
@@ -371,6 +387,7 @@ fn resolve(
             .with_context(|| {
                 format!("{} has no benchmark named `{name}`.", config.path.display())
             })?;
+        benchmark_lifecycle = take_lifecycle(&mut overrides)?;
         if let (Some(Value::Table(base)), Some(Value::Table(over))) =
             (values.get(ENV), overrides.get(ENV))
         {
@@ -397,7 +414,28 @@ fn resolve(
 
     Ok(ResolvedCli {
         cli,
+        benchmark_lifecycle,
         output_from_command_line,
+    })
+}
+
+fn take_lifecycle(table: &mut Table) -> Result<Lifecycle> {
+    fn command(table: &mut Table, key: &str) -> Result<Vec<OsString>> {
+        let Some(value) = table.remove(key) else {
+            return Ok(Vec::new());
+        };
+        let values = defaults(&value).with_context(|| format!("`{key}` is not a command list."))?;
+        Ok(values
+            .into_iter()
+            .map(|value| value.to_string().into())
+            .collect())
+    }
+
+    Ok(Lifecycle {
+        startup: command(table, STARTUP)?,
+        startup_each_run: command(table, STARTUP_EACH_RUN)?,
+        teardown_each_run: command(table, TEARDOWN_EACH_RUN)?,
+        teardown: command(table, TEARDOWN)?,
     })
 }
 
@@ -431,7 +469,10 @@ fn configure_value(command: Command, path: &Path, key: &str, value: &Value) -> R
     })?;
     if defaults.is_empty() {
         ensure!(
-            key == SETUP || key == TEARDOWN,
+            matches!(
+                key,
+                STARTUP | STARTUP_EACH_RUN | TEARDOWN_EACH_RUN | TEARDOWN
+            ),
             "{} sets `{key}` to an empty list.",
             path.display()
         );

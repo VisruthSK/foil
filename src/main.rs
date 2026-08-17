@@ -1,9 +1,9 @@
 mod config;
 
-use crate::config::{Cli, ResolvedSuiteConfig, RunConfig, Suite};
+use crate::config::{Cli, Lifecycle, ResolvedSuiteConfig, RunConfig, Suite};
 use b3::{
-    BenchmarkLog, Config, MeasurementsCsv, Pair, Posterior, Repetition, Repetitions, Revision,
-    RunCommand, RunOrder, RunOutput, Side, Summary, Time, Worktree,
+    BenchmarkLog, Config, LifecycleConfig, MeasurementsCsv, Pair, Posterior, Repetition,
+    Repetitions, Revision, RunCommand, RunOrder, RunOutput, Side, Summary, Time, Worktree,
     working_tree_has_modified_tracked_files, write_config_json, write_posterior_csv,
 };
 
@@ -24,6 +24,24 @@ struct Worktrees {
     _directory: TempDir,
 }
 
+struct LifecycleCommands {
+    startup: Option<RunCommand>,
+    startup_each_run: Option<RunCommand>,
+    teardown_each_run: Option<RunCommand>,
+    teardown: Option<RunCommand>,
+}
+
+impl LifecycleCommands {
+    fn new(lifecycle: &Lifecycle, build: impl Fn(&[OsString]) -> Option<RunCommand>) -> Self {
+        Self {
+            startup: build(&lifecycle.startup),
+            startup_each_run: build(&lifecycle.startup_each_run),
+            teardown_each_run: build(&lifecycle.teardown_each_run),
+            teardown: build(&lifecycle.teardown),
+        }
+    }
+}
+
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 fn interrupted() -> bool {
@@ -41,10 +59,36 @@ fn main() -> Result<()> {
 
     let Suite {
         config: suite,
+        lifecycle,
         output_dir: suite_output_dir,
         runs,
     } = Cli::suite()?;
 
+    let startup = build_command(&lifecycle.startup, None, &[]);
+    let teardown = build_command(&lifecycle.teardown, None, &[]);
+    scoped(
+        run_at(
+            startup.as_ref(),
+            Path::new("."),
+            "The suite startup failed.",
+        ),
+        || execute_suite(&suite, &lifecycle, &suite_output_dir, runs),
+        || {
+            run_at(
+                teardown.as_ref(),
+                Path::new("."),
+                "The suite teardown failed.",
+            )
+        },
+    )
+}
+
+fn execute_suite(
+    suite: &ResolvedSuiteConfig,
+    lifecycle: &Lifecycle,
+    suite_output_dir: &Path,
+    runs: Vec<(Option<String>, RunConfig)>,
+) -> Result<()> {
     if working_tree_has_modified_tracked_files() {
         eprintln!(
             "Warning: the working tree has modified tracked files, which are never benchmarked."
@@ -72,7 +116,14 @@ fn main() -> Result<()> {
             .transpose()?;
         let worktrees = isolated.as_ref().unwrap_or(&shared);
 
-        let summary = compare(&suite, config, &worktrees.pair, &output_dir, heading)?;
+        let summary = compare(
+            suite,
+            lifecycle,
+            config,
+            &worktrees.pair,
+            &output_dir,
+            heading,
+        )?;
 
         if let Some(name) = name {
             compact.push(format!("{name}: {}", summary.compact()));
@@ -112,6 +163,7 @@ fn create_worktrees(revisions: &Pair<Revision>) -> Result<Worktrees> {
 
 fn compare(
     suite: &ResolvedSuiteConfig,
+    suite_lifecycle: &Lifecycle,
     config: RunConfig,
     worktrees: &Pair<Worktree>,
     output_dir: &Path,
@@ -127,9 +179,7 @@ fn compare(
         intervals,
         working_directory,
         envs,
-        setup,
-        prepare,
-        teardown,
+        lifecycle,
         command,
     } = config;
 
@@ -141,16 +191,9 @@ fn compare(
     })?;
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(suite.seed);
 
-    let run_command = |command: &[OsString]| -> Option<RunCommand> {
-        let (program, arguments) = command.split_first()?;
-
-        Some(RunCommand::new(
-            program.clone(),
-            arguments.to_vec(),
-            working_directory.clone(),
-            envs.clone(),
-        ))
-    };
+    let run_command = |parts: &[OsString]| build_command(parts, working_directory.clone(), &envs);
+    let suite_commands = LifecycleCommands::new(suite_lifecycle, run_command);
+    let benchmark_commands = LifecycleCommands::new(&lifecycle, run_command);
     let benchmark = run_command(&command)
         .expect("Clap requires at least one command argument.")
         .with_timeout(timeout.map(|seconds| Duration::from_secs(seconds.get())));
@@ -168,31 +211,29 @@ fn compare(
             shrinkage,
             baseline: worktrees.baseline.revision(),
             candidate: worktrees.candidate.revision(),
-            setup: &setup,
-            prepare: &prepare,
+            suite_lifecycle: lifecycle_config(suite_lifecycle),
+            benchmark_lifecycle: lifecycle_config(&lifecycle),
             command: &command,
-            teardown: &teardown,
         },
     )
     .with_context(|| format!("Failed to write {}.", config_path.display()))?;
 
-    run_in_both(run_command(&setup), worktrees, "setup")?;
-    ensure!(!interrupted(), "Interrupted.");
-
-    let measured = measure_all(
-        &benchmark,
-        run_command(&prepare).as_ref(),
-        worktrees,
-        repetition_count,
-        output_dir,
-        &mut rng,
-    );
-    let torn_down = run_in_both(run_command(&teardown), worktrees, "teardown");
-    if let (Err(_), Err(error)) = (&measured, &torn_down) {
-        eprintln!("{error:#}");
-    }
-    let repetitions = measured?;
-    torn_down?;
+    let repetitions = scoped(
+        run_in_both(benchmark_commands.startup.as_ref(), worktrees, "startup"),
+        || {
+            ensure!(!interrupted(), "Interrupted.");
+            measure_all(
+                &benchmark,
+                &suite_commands,
+                &benchmark_commands,
+                worktrees,
+                repetition_count,
+                output_dir,
+                &mut rng,
+            )
+        },
+        || run_in_both(benchmark_commands.teardown.as_ref(), worktrees, "teardown"),
+    )?;
 
     let posterior =
         Posterior::<Time>::bootstrap_checked(&repetitions, draws, shrinkage, &mut rng, || {
@@ -225,7 +266,8 @@ fn compare(
 
 fn measure_all(
     benchmark: &RunCommand,
-    prepare: Option<&RunCommand>,
+    suite: &LifecycleCommands,
+    benchmark_lifecycle: &LifecycleCommands,
     worktrees: &Pair<Worktree>,
     repetition_count: usize,
     output_dir: &Path,
@@ -250,21 +292,14 @@ fn measure_all(
 
         // TODO: Better handling of failing runs to find systematic errors. Should record and write out?
         let mut measure = |side: Side| -> Result<RunOutput> {
-            if let Some(prepare) = prepare {
-                prepare
-                    .run_once_in(worktrees.get(side))
-                    .with_context(|| format!("The {side} preparation failed."))?;
-                ensure!(!interrupted(), "Interrupted.");
-            }
-            let output = log.measure(benchmark, side, worktrees.get(side))?;
-            ensure!(!interrupted(), "Interrupted.");
-            ensure!(
-                output.exit_status().success(),
-                "The {side} benchmark failed with {}.",
-                output.exit_status()
-            );
-
-            Ok(output)
+            measure_one(
+                benchmark,
+                suite,
+                benchmark_lifecycle,
+                side,
+                worktrees,
+                &mut log,
+            )
         };
         let first_output = measure(first)?;
         let second_output = measure(second)?;
@@ -283,7 +318,124 @@ fn measure_all(
     Repetitions::try_from(measured_repetitions)
 }
 
-fn run_in_both(command: Option<RunCommand>, worktrees: &Pair<Worktree>, phase: &str) -> Result<()> {
+fn measure_one<W: std::io::Write>(
+    benchmark: &RunCommand,
+    suite: &LifecycleCommands,
+    benchmark_lifecycle: &LifecycleCommands,
+    side: Side,
+    worktrees: &Pair<Worktree>,
+    log: &mut BenchmarkLog<W>,
+) -> Result<RunOutput> {
+    let worktree = worktrees.get(side);
+    scoped(
+        run_in(
+            suite.startup_each_run.as_ref(),
+            worktree,
+            side,
+            "suite startup-each-run",
+        ),
+        || {
+            scoped(
+                run_in(
+                    benchmark_lifecycle.startup_each_run.as_ref(),
+                    worktree,
+                    side,
+                    "benchmark startup-each-run",
+                ),
+                || {
+                    ensure!(!interrupted(), "Interrupted.");
+                    let output = log.measure(benchmark, side, worktree)?;
+                    ensure!(!interrupted(), "Interrupted.");
+                    ensure!(
+                        output.exit_status().success(),
+                        "The {side} benchmark failed with {}.",
+                        output.exit_status()
+                    );
+                    Ok(output)
+                },
+                || {
+                    run_in(
+                        benchmark_lifecycle.teardown_each_run.as_ref(),
+                        worktree,
+                        side,
+                        "benchmark teardown-each-run",
+                    )
+                },
+            )
+        },
+        || {
+            run_in(
+                suite.teardown_each_run.as_ref(),
+                worktree,
+                side,
+                "suite teardown-each-run",
+            )
+        },
+    )
+}
+
+fn build_command(
+    parts: &[OsString],
+    working_directory: Option<std::path::PathBuf>,
+    envs: &[(String, String)],
+) -> Option<RunCommand> {
+    let (program, arguments) = parts.split_first()?;
+    Some(RunCommand::new(
+        program.clone(),
+        arguments.to_vec(),
+        working_directory,
+        envs.to_vec(),
+    ))
+}
+
+fn lifecycle_config(lifecycle: &Lifecycle) -> LifecycleConfig<'_> {
+    LifecycleConfig {
+        startup: &lifecycle.startup,
+        startup_each_run: &lifecycle.startup_each_run,
+        teardown_each_run: &lifecycle.teardown_each_run,
+        teardown: &lifecycle.teardown,
+    }
+}
+
+fn run_in(
+    command: Option<&RunCommand>,
+    worktree: &Worktree,
+    side: Side,
+    phase: &str,
+) -> Result<()> {
+    command.map_or(Ok(()), |command| {
+        command
+            .run_once_in(worktree)
+            .with_context(|| format!("The {side} {phase} failed."))
+    })
+}
+
+fn run_at(command: Option<&RunCommand>, directory: &Path, context: &str) -> Result<()> {
+    command.map_or(Ok(()), |command| {
+        command.run_once_at(directory).context(context.to_owned())
+    })
+}
+
+fn combine<T>(primary: Result<T>, cleanup: Result<()>) -> Result<T> {
+    if let (Err(_), Err(error)) = (&primary, &cleanup) {
+        eprintln!("{error:#}");
+    }
+    primary.and_then(|value| cleanup.map(|()| value))
+}
+
+fn scoped<T>(
+    startup: Result<()>,
+    body: impl FnOnce() -> Result<T>,
+    teardown: impl FnOnce() -> Result<()>,
+) -> Result<T> {
+    combine(startup.and_then(|()| body()), teardown())
+}
+
+fn run_in_both(
+    command: Option<&RunCommand>,
+    worktrees: &Pair<Worktree>,
+    phase: &str,
+) -> Result<()> {
     let Some(command) = command else {
         return Ok(());
     };

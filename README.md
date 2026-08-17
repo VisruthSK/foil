@@ -30,19 +30,22 @@ output-dir = "benchmark/"
 
 With that file, the run above is `b3 -- cargo bench`. Arguments override the file, which overrides the built-in defaults. `b3 --help` always shows only the built-in CLI defaults. The command may also live in the file as a `command` list; one passed after `--` overrides it.
 
-`setup` and `teardown` are commands `b3` runs once in each worktree, before the first and after the last measured run, and never times. A `setup` is where a build belongs, so that compilation stays out of the measurements. Both share the benchmark's `working-directory` and `env`.
-
-`prepare` runs before every individual measured command, outside the timed interval. It is useful when each repetition needs fresh state, such as cleaning release artifacts before measuring compilation. It shares the same `working-directory` and `env`; successful lifecycle output is forwarded to the terminal.
+Lifecycle commands surround the suite, each benchmark, or every measured run. Top-level `startup` and `teardown` run once in the original checkout around the whole suite. The same keys in a benchmark run once in each revision worktree around that benchmark. `startup-each-run` and `teardown-each-run` run outside every timed interval; suite and benchmark commands compose, with teardown unwinding in reverse order.
 
 ```toml
-setup = ["cargo", "build", "--release"]
-prepare = ["cargo", "clean", "--release"]
+startup = ["docker", "compose", "up", "-d"]
+startup-each-run = ["reset-database"]
+teardown-each-run = ["collect-logs"]
+teardown = ["docker", "compose", "down"]
+
+[benchmarks.parse]
+startup = ["cargo", "build", "--release"]
 command = ["./target/release/parse", "corpus/"]
 ```
 
-Each runs once per revision, so a side effect reaching outside the worktree happens twice, once for the baseline and once for the candidate. A failing `setup` or `teardown` stops the run and reports what the command printed, and `teardown` still runs when a benchmark fails. On the command line these take a bare command, as in `--setup make`; one carrying flags of its own, like `cargo build --release`, belongs in the configuration file as a list.
+Benchmark lifecycle commands share its `working-directory` and `env`. Their output is forwarded to the terminal. Teardown is still attempted after startup, benchmark, timeout, or interruption failures; the original error remains primary and additional cleanup errors are also reported.
 
-A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override any option above, and anything it leaves unset, including `command`, is inherited from the top level. An empty list, `setup = []`, clears an inherited `setup`, `prepare`, or `teardown`. Its `env` table is merged with the top-level one instead, variable by variable, with the benchmark's values winning on conflicts:
+A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override ordinary options, and anything it leaves unset, including `command`, is inherited from the top level. Lifecycle commands are not inherited: suite and benchmark lifecycles remain distinct and compose. Its `env` table is merged with the top-level one, variable by variable, with the benchmark's values winning on conflicts:
 
 ```toml
 repetitions = 10
@@ -60,7 +63,7 @@ command = ["cargo", "run", "--release", "--", "render"]
 RAYON_NUM_THREADS = "1"
 ```
 
-`b3 --benchmark render` runs with 50 repetitions in `benchmarks/render`; `b3 --benchmark parse` runs with the top-level 10. An explicit argument still overrides a benchmark's setting, except for `command`, `working-directory`, `env`, `setup`, `prepare`, and `teardown`. Those define what a benchmark is, so one argument cannot sensibly stand in for all of the selected benchmarks, and passing one alongside a benchmark is an error.
+`b3 --benchmark render` runs with 50 repetitions in `benchmarks/render`; `b3 --benchmark parse` runs with the top-level 10. An explicit argument still overrides a benchmark's setting, except for `command`, `working-directory`, and `env`. Those define what a benchmark is, so one argument cannot sensibly stand in for all of the selected benchmarks, and passing one alongside a benchmark is an error. Lifecycle arguments apply to the suite.
 `working-directory` must be a relative path within the worktree; absolute paths and `..` are rejected.
 
 With no `--benchmark`, every benchmark in the table runs in declaration order, each in its own `--output-dir` subdirectory named after it. Pass `--benchmark render parse` to run only some of them in the order given. A configuration with no `[benchmarks]` table always runs a single, unnamed command, exactly as with no configuration file at all.
