@@ -330,6 +330,12 @@ fn measure_one<W: std::io::Write>(
 ) -> Result<RunOutput> {
     let worktree = worktrees.get(side);
     let progress = log.progress();
+    let run = log.next_run();
+    let phase = |name: &str| {
+        progress.set_prefix(format!("{side} {run}/{}", progress.length().unwrap_or(0)));
+        progress.set_message(name.to_owned());
+    };
+    phase("suite startup");
     scoped(
         progress.suspend(|| {
             run_in(
@@ -340,6 +346,7 @@ fn measure_one<W: std::io::Write>(
             )
         }),
         || {
+            phase("benchmark startup");
             scoped(
                 progress.suspend(|| {
                     run_in(
@@ -356,6 +363,7 @@ fn measure_one<W: std::io::Write>(
                     Ok(output)
                 },
                 || {
+                    phase("benchmark teardown");
                     progress.suspend(|| {
                         run_in(
                             benchmark_lifecycle.teardown_each_run.as_ref(),
@@ -368,6 +376,7 @@ fn measure_one<W: std::io::Write>(
             )
         },
         || {
+            phase("suite teardown");
             progress.suspend(|| {
                 run_in(
                     suite.teardown_each_run.as_ref(),

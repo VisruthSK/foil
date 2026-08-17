@@ -730,7 +730,7 @@ fn candidate_teardown_runs_after_baseline_teardown_fails() -> Result<()> {
 }
 
 #[test]
-fn suite_and_benchmark_lifecycle_output_is_visible() -> Result<()> {
+fn successful_lifecycle_output_is_suppressed() -> Result<()> {
     let project = repository(&format!(
         "{PREAMBLE}startup = ['git', '--version']\n\
          teardown = ['git', '--version']\n\
@@ -742,15 +742,8 @@ fn suite_and_benchmark_lifecycle_output_is_visible() -> Result<()> {
 
     let (succeeded, stdout, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
-    assert_eq!(stdout.matches("git version").count(), 6, "{stdout}");
-    for label in [
-        "[suite startup stdout]",
-        "[baseline benchmark startup stdout]",
-        "[candidate benchmark teardown stdout]",
-        "[suite teardown stdout]",
-    ] {
-        assert!(stdout.contains(label), "{label} is missing from {stdout}");
-    }
+    assert!(!stdout.contains("git version"), "{stdout}");
+    assert!(!stderr.contains("git version"), "{stderr}");
 
     Ok(())
 }
@@ -758,23 +751,17 @@ fn suite_and_benchmark_lifecycle_output_is_visible() -> Result<()> {
 #[test]
 fn suite_and_benchmark_each_run_startups_compose() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}startup-each-run = ['git', 'rev-parse', 'HEAD']\n\
+        "{PREAMBLE}startup-each-run = ['git', 'config', '--file', 'marker.txt', 'suite.ran', 'yes']\n\
          [benchmarks.test]\n\
-         startup-each-run = ['git', 'rev-parse', 'HEAD']\n\
-         command = ['git', '--version']\n"
+         startup-each-run = ['git', 'config', '--file', 'marker.txt', 'benchmark.ran', 'yes']\n\
+         command = ['git', 'config', '--file', 'marker.txt', '--get-regexp', 'ran']\n"
     ))?;
 
-    let (succeeded, stdout, stderr) = run(&project, &[])?;
+    let (succeeded, _stdout, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
-    assert_eq!(
-        stdout
-            .lines()
-            .filter(|line| line.len() == 40
-                && line.chars().all(|character| character.is_ascii_hexdigit()))
-            .count(),
-        40,
-        "{stdout}"
-    );
+    let log = fs::read_to_string(project.path().join("bench/test/benchmark.log"))?;
+    assert_eq!(log.matches("suite.ran yes").count(), 20, "{log}");
+    assert_eq!(log.matches("benchmark.ran yes").count(), 20, "{log}");
 
     Ok(())
 }
@@ -782,25 +769,21 @@ fn suite_and_benchmark_each_run_startups_compose() -> Result<()> {
 #[test]
 fn each_run_teardowns_run_after_a_failed_benchmark() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}teardown-each-run = ['git', '--version']\n\
+        "{PREAMBLE}teardown-each-run = ['git', 'tag', '--force', 'suite-each-run-torn-down']\n\
          [benchmarks.test]\n\
-         teardown-each-run = ['git', 'rev-parse', 'HEAD']\n\
+         teardown-each-run = ['git', 'tag', '--force', 'benchmark-each-run-torn-down']\n\
          command = ['git', 'cat-file', '-p', 'absent-object']\n"
     ))?;
 
     let (succeeded, stdout, stderr) = run(&project, &[])?;
     assert!(!succeeded, "b3 unexpectedly succeeded with {stdout}");
     assert!(stderr.contains("benchmark failed"), "{stderr}");
-    assert_eq!(stdout.matches("git version").count(), 1, "{stdout}");
-    assert_eq!(
-        stdout
-            .lines()
-            .filter(|line| line.len() == 40
-                && line.chars().all(|character| character.is_ascii_hexdigit()))
-            .count(),
-        1,
-        "{stdout}"
-    );
+    for tag in [
+        "refs/tags/suite-each-run-torn-down",
+        "refs/tags/benchmark-each-run-torn-down",
+    ] {
+        git(&project, &["rev-parse", "--verify", tag])?;
+    }
 
     Ok(())
 }

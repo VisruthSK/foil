@@ -166,9 +166,6 @@ impl RunCommand {
             display_output(label, &run)
         );
 
-        write_output(io::stdout(), label, "stdout", &run.stdout)?;
-        write_output(io::stderr(), label, "stderr", &run.stderr)?;
-
         Ok(())
     }
 }
@@ -210,19 +207,6 @@ fn drain(mut stream: impl Read + Send + 'static) -> JoinHandle<io::Result<Vec<u8
     })
 }
 
-fn write_output(mut writer: impl Write, label: &str, stream: &str, output: &[u8]) -> Result<()> {
-    if output.is_empty() {
-        return Ok(());
-    }
-    writeln!(writer, "[{label} {stream}]")?;
-    writer.write_all(output)?;
-    if !output.ends_with(b"\n") {
-        writeln!(writer)?;
-    }
-    writer.flush()?;
-    Ok(())
-}
-
 fn display_output(label: &str, run: &Run) -> String {
     let mut output = String::new();
     for (stream, bytes) in [("stdout", &run.stdout), ("stderr", &run.stderr)] {
@@ -253,7 +237,8 @@ pub struct BenchmarkLog<W> {
 impl<W: Write> BenchmarkLog<W> {
     pub fn new(writer: W, runs: usize) -> Self {
         let progress = ProgressBar::new(runs as u64).with_style(
-            ProgressStyle::with_template("{msg}").expect("The progress template is valid."),
+            ProgressStyle::with_template("{prefix:.cyan} {msg:.dim}")
+                .expect("The progress template is valid."),
         );
         Self {
             writer,
@@ -288,12 +273,7 @@ impl<W: Write> BenchmarkLog<W> {
     }
 
     fn starting(&self, side: Side) {
-        self.progress.set_message(format!(
-            "Benchmarking {side} run {}/{}{}",
-            self.run + 1,
-            self.runs,
-            self.eta()
-        ));
+        self.set_phase(side, self.run + 1, &format!("benchmark{}", self.eta()));
     }
 
     fn eta(&self) -> String {
@@ -334,6 +314,16 @@ impl<W: Write> BenchmarkLog<W> {
 
     pub fn progress(&self) -> ProgressBar {
         self.progress.clone()
+    }
+
+    pub fn next_run(&self) -> usize {
+        self.run + 1
+    }
+
+    fn set_phase(&self, side: Side, run: usize, phase: &str) {
+        self.progress
+            .set_prefix(format!("{side} {run}/{}", self.runs));
+        self.progress.set_message(phase.to_owned());
     }
 }
 

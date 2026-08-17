@@ -43,7 +43,7 @@ startup = ["cargo", "build", "--release"]
 command = ["./target/release/parse", "corpus/"]
 ```
 
-Benchmark lifecycle commands share its `working-directory` and `env`. Their output is forwarded to the terminal under labels such as `[baseline benchmark startup stdout]`. Teardown is still attempted after startup, benchmark, timeout, or interruption failures; the original error remains primary and additional cleanup errors are also reported.
+Benchmark lifecycle commands share its `working-directory` and `env`. Successful lifecycle output is suppressed; failures report both nonempty streams under explicit labels. Benchmark stdout and stderr are captured in `benchmark.log`. Teardown is still attempted after startup, benchmark, timeout, or interruption failures; the original error remains primary and additional cleanup errors are also reported.
 
 A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override ordinary options, and anything it leaves unset, including `command`, is inherited from the top level. Lifecycle commands are not inherited: suite and benchmark lifecycles remain distinct and compose. Its `env` table is merged with the top-level one, variable by variable, with the benchmark's values winning on conflicts:
 
