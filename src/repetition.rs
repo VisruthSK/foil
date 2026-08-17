@@ -2,7 +2,7 @@ use crate::run::RunOutput;
 
 use anyhow::{Result, ensure};
 use rand::{Rng, RngExt, seq::SliceRandom};
-use std::fmt;
+use std::{fmt, num::NonZeroUsize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -69,21 +69,24 @@ impl RunOrder {
         }
     }
 
-    // TODO: Swap to Latin square?
-    pub fn schedule(repetitions: usize, rng: &mut impl Rng) -> Vec<Self> {
-        let mut orders = [Self::BaselineFirst, Self::CandidateFirst].repeat(repetitions / 2);
+    pub fn schedule(repetitions: usize, block_size: NonZeroUsize, rng: &mut impl Rng) -> Vec<Self> {
+        let mut schedule = Vec::with_capacity(repetitions);
+        let mut baseline_first = 0;
 
-        if repetitions % 2 == 1 {
-            orders.push(if rng.random() {
-                Self::BaselineFirst
-            } else {
-                Self::CandidateFirst
-            });
+        while schedule.len() < repetitions {
+            let size = block_size.get().min(repetitions - schedule.len());
+            let mut baseline = size / 2;
+            if size % 2 == 1 && (baseline_first * 2 < schedule.len() || rng.random::<bool>()) {
+                baseline += 1;
+            }
+            let mut block = vec![Self::BaselineFirst; baseline];
+            block.resize(size, Self::CandidateFirst);
+            block.shuffle(rng);
+            baseline_first += baseline;
+            schedule.extend(block);
         }
 
-        orders.shuffle(rng);
-
-        orders
+        schedule
     }
 }
 

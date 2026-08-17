@@ -128,6 +128,10 @@ pub(crate) struct RunConfig {
     #[arg(short, long, required = true, value_parser = parse_repetitions)]
     pub(crate) repetitions: NonZeroUsize,
 
+    /// Pairs per randomized run-order block.
+    #[arg(long, default_value = "4")]
+    pub(crate) block_size: NonZeroUsize,
+
     /// Number of Bayesian bootstrap draws.
     #[arg(long, value_parser = parse_draws, default_value = "10000")]
     pub(crate) draws: NonZeroUsize,

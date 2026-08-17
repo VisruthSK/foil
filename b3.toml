@@ -1,4 +1,5 @@
 repetitions = 30
+block-size = 4
 output-dir = "benchmark/results"
 timeout = 1800
 

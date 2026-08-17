@@ -1,9 +1,10 @@
 mod config;
 
 use crate::config::{Cli, Lifecycle, ResolvedSuiteConfig, RunConfig, Suite};
+use b3::analysis::analyze_checked;
 use b3::{
-    BenchmarkLog, Config, LifecycleConfig, MeasurementsCsv, Pair, Posterior, Repetition,
-    Repetitions, Revision, RunCommand, RunOrder, RunOutput, Side, Summary, Time, Worktree,
+    BenchmarkLog, Config, LifecycleConfig, MeasurementsCsv, Pair, Repetition, Repetitions,
+    Revision, RunCommand, RunOrder, RunOutput, Side, Summary, Time, Worktree,
     working_tree_has_modified_tracked_files, write_config_json, write_posterior_csv,
 };
 
@@ -172,6 +173,7 @@ fn write_configs(
             &Config {
                 seed: suite.seed,
                 repetitions: config.repetitions.get(),
+                block_size: config.block_size.get(),
                 draws: config.draws.get(),
                 timeout_seconds: config.timeout.map(|seconds| seconds.get()),
                 shrinkage: config.shrinkage,
@@ -200,6 +202,7 @@ fn compare(
         shrinkage,
         output_dir: _,
         repetitions: repetition_count,
+        block_size,
         draws,
         timeout,
         intervals,
@@ -209,7 +212,7 @@ fn compare(
         command,
     } = config;
 
-    let mut rng = Xoshiro256PlusPlus::seed_from_u64(suite.seed);
+    let mut schedule_rng = Xoshiro256PlusPlus::seed_from_u64(suite.seed);
 
     let run_command = |parts: &[OsString]| build_command(parts, working_directory.clone(), &envs);
     let suite_commands = LifecycleCommands::new(suite_lifecycle, run_command);
@@ -219,6 +222,7 @@ fn compare(
         .with_timeout(timeout.map(|seconds| Duration::from_secs(seconds.get())));
 
     let repetition_count = repetition_count.get();
+    let schedule = RunOrder::schedule(repetition_count, block_size, &mut schedule_rng);
 
     let repetitions = scoped(
         run_in_both(benchmark_commands.startup.as_ref(), worktrees, "startup"),
@@ -229,26 +233,31 @@ fn compare(
                 &suite_commands,
                 &benchmark_commands,
                 worktrees,
-                repetition_count,
+                &schedule,
                 output_dir,
-                &mut rng,
             )
         },
         || run_in_both(benchmark_commands.teardown.as_ref(), worktrees, "teardown"),
     )?;
 
-    let posterior =
-        Posterior::<Time>::bootstrap_checked(&repetitions, draws, shrinkage, &mut rng, || {
+    let analysis = analyze_checked(
+        &repetitions,
+        suite.seed,
+        draws,
+        shrinkage,
+        &intervals,
+        || {
             ensure!(!interrupted(), "Interrupted.");
             Ok(())
-        })?;
+        },
+    )?;
     ensure!(!interrupted(), "Interrupted.");
 
     let posterior_path = output_dir.join("posterior.csv");
-    write_posterior_csv(&posterior_path, &posterior)
+    write_posterior_csv(&posterior_path, &analysis.posterior)
         .with_context(|| format!("Failed to write {}.", posterior_path.display()))?;
 
-    let summary = posterior.summarize(&intervals)?;
+    let summary = analysis.summary;
 
     let prefix = heading.map_or_else(String::new, |name| format!("{name}: "));
     let report = format!(
@@ -271,10 +280,10 @@ fn measure_all(
     suite: &LifecycleCommands,
     benchmark_lifecycle: &LifecycleCommands,
     worktrees: &Pair<Worktree>,
-    repetition_count: usize,
+    schedule: &[RunOrder],
     output_dir: &Path,
-    rng: &mut Xoshiro256PlusPlus,
 ) -> Result<Repetitions> {
+    let repetition_count = schedule.len();
     let mut measured_repetitions = Vec::with_capacity(repetition_count);
 
     let log_path = output_dir.join("benchmark.log");
@@ -288,7 +297,7 @@ fn measure_all(
     let mut measurements = MeasurementsCsv::create(&measurements_path)
         .with_context(|| format!("Failed to create {}.", measurements_path.display()))?;
 
-    for order in RunOrder::schedule(repetition_count, rng) {
+    for &order in schedule {
         ensure!(!interrupted(), "Interrupted.");
         let [first, second] = order.sides();
 

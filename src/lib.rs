@@ -1,3 +1,4 @@
+pub mod analysis;
 mod artifact;
 mod metric;
 mod posterior;
@@ -7,6 +8,7 @@ mod run;
 mod summary;
 mod worktree;
 
+pub use analysis::{Analysis, analyze_measurements};
 pub use artifact::{
     Config, LifecycleConfig, MeasurementsCsv, write_config_json, write_posterior_csv,
 };

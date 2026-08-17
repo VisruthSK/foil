@@ -60,8 +60,12 @@ fn sides_and_from_execution_order_agree() {
     }
 }
 
-fn schedule(repetitions: usize, seed: u64) -> Vec<RunOrder> {
-    RunOrder::schedule(repetitions, &mut Xoshiro256PlusPlus::seed_from_u64(seed))
+fn schedule(repetitions: usize, block_size: usize, seed: u64) -> Vec<RunOrder> {
+    RunOrder::schedule(
+        repetitions,
+        std::num::NonZeroUsize::new(block_size).unwrap(),
+        &mut Xoshiro256PlusPlus::seed_from_u64(seed),
+    )
 }
 
 fn baseline_firsts(orders: &[RunOrder]) -> usize {
@@ -74,7 +78,7 @@ fn baseline_firsts(orders: &[RunOrder]) -> usize {
 #[test]
 fn schedules_are_balanced() {
     for repetitions in [Repetitions::MINIMUM, Repetitions::MINIMUM + 1] {
-        let orders = schedule(repetitions, 0);
+        let orders = schedule(repetitions, 4, 0);
         let first = baseline_firsts(&orders);
 
         assert_eq!(orders.len(), repetitions);
@@ -87,9 +91,27 @@ fn schedules_are_balanced() {
 }
 
 #[test]
+fn full_blocks_are_balanced() {
+    let orders = schedule(14, 4, 0);
+
+    for block in orders[..12].chunks_exact(4) {
+        assert_eq!(baseline_firsts(block), 2, "{block:?}");
+    }
+}
+
+#[test]
+fn block_size_one_alternates_the_surplus() {
+    let orders = schedule(10, 1, 0);
+
+    for pair in orders.chunks_exact(2) {
+        assert_eq!(baseline_firsts(pair), 1, "{pair:?}");
+    }
+}
+
+#[test]
 fn the_odd_repetition_falls_on_either_side() {
     let counts: Vec<usize> = (0..16)
-        .map(|seed| baseline_firsts(&schedule(Repetitions::MINIMUM + 1, seed)))
+        .map(|seed| baseline_firsts(&schedule(Repetitions::MINIMUM + 1, 4, seed)))
         .collect();
 
     assert!(counts.contains(&5) && counts.contains(&6), "{counts:?}");

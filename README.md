@@ -24,11 +24,14 @@ The flags above can also be set in a TOML file, keyed by their long names. `b3` 
 baseline = "main"
 candidate = "HEAD"
 repetitions = 30
+block-size = 4
 interval = [0.5, 0.8, 0.98]
 output-dir = "benchmark/"
 ```
 
 With that file, the run above is `b3 -- cargo bench`. Arguments override the file, which overrides the built-in defaults. `b3 --help` always shows only the built-in CLI defaults. The command may also live in the file as a `command` list; one passed after `--` overrides it.
+
+Run order uses small-block randomization. The default `block-size = 4` gives each full block two baseline-first and two candidate-first pairs; `block-size = 1` is the minimum.
 
 Lifecycle commands surround the suite, each benchmark, or every measured run. Top-level `startup` and `teardown` run once in the original checkout around the whole suite. The same keys in a benchmark run once in each revision worktree around that benchmark. `startup-each-run` and `teardown-each-run` run outside every timed interval; suite and benchmark commands compose, with teardown unwinding in reverse order.
 
@@ -82,12 +85,18 @@ Each run writes to its output directory:
 - `posterior.csv`: Bayesian bootstrap draws.
 - `report.txt`: human-readable summary.
 
+Library callers can pass `measurements.csv` to `analyze_measurements`; the same seed, draw count, shrinkage, and intervals reproduce the CLI posterior exactly.
+
 Running more than one benchmark also prints a one-line-per-benchmark summary and writes it to `report_short.txt` in `--output-dir`:
 
 ```
 parse: 1.2s -> 554.0ms [-52.41%, -51.31%]
 render: 3.1s -> 3.0s [-4.02%, +1.15%]
 ```
+
+## Statistical validation
+
+The ignored release-mode [statistical validation suite](docs/statistical-validation.md) reports synthetic exact recovery, credible-interval coverage, shrinkage behavior, and model misspecification.
 
 ## License
 

@@ -1,5 +1,6 @@
 use anyhow::{Result, ensure};
-use std::{fs, process::Command};
+use b3::{Interval, Shrinkage, analyze_measurements, write_posterior_csv};
+use std::{fs, num::NonZeroUsize, process::Command};
 use tempfile::{TempDir, tempdir};
 
 const REQUIRED: &str = "output-dir = 'bench'\nrepetitions = 12\ncommand = ['benchmark']\n";
@@ -8,7 +9,8 @@ const PREAMBLE: &str = "baseline = 'HEAD'\n\
     candidate = 'HEAD'\n\
     output-dir = 'bench'\n\
     repetitions = 10\n\
-    draws = 1000\n";
+    draws = 1000\n\
+    seed = 0\n";
 
 const CONFIG: &str = "\
     baseline = 'baseline-branch'\n\
@@ -18,7 +20,7 @@ const CONFIG: &str = "\
     repetitions = 12\n\
     draws = 2000\n\
     interval = [0.5, 0.9]\n\
-    seed = 7\n\
+    seed = 0\n\
     command = ['Rscript', 'benchmark.R']\n";
 
 const BUILTIN_USAGE: &str = "--output-dir <DIR> --repetitions <REPETITIONS> -- <COMMAND>...";
@@ -91,7 +93,7 @@ fn a_complete_configuration_runs_without_any_arguments() -> Result<()> {
         candidate = 'HEAD'\n\
         repetitions = 10\n\
         draws = 1000\n\
-        seed = 1\n\
+        seed = 0\n\
         output-dir = 'benchmark'\n\
         command = ['git', '--version']\n",
     )?;
@@ -116,6 +118,35 @@ fn a_complete_configuration_runs_without_any_arguments() -> Result<()> {
 }
 
 #[test]
+fn saved_measurements_reproduce_the_full_analysis() -> Result<()> {
+    let project = repository(&format!("{PREAMBLE}command = ['git', '--version']\n"))?;
+    let (succeeded, _, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    let output = project.path().join("bench");
+    let intervals = [
+        Interval::new(0.5)?,
+        Interval::new(0.8)?,
+        Interval::new(0.98)?,
+    ];
+    let analysis = analyze_measurements(
+        &output.join("measurements.csv"),
+        0,
+        NonZeroUsize::new(1_000).unwrap(),
+        Shrinkage::NONE,
+        &intervals,
+    )?;
+    let reproduced = output.join("posterior-reproduced.csv");
+    write_posterior_csv(&reproduced, &analysis.posterior)?;
+
+    assert_eq!(
+        fs::read_to_string(reproduced)?,
+        fs::read_to_string(output.join("posterior.csv"))?
+    );
+    Ok(())
+}
+
+#[test]
 fn builtin_defaults_apply_without_a_configuration_file() -> Result<()> {
     let project = project(&[])?;
     let help = help(&project, &[])?;
@@ -124,6 +155,7 @@ fn builtin_defaults_apply_without_a_configuration_file() -> Result<()> {
         "[default: main]",
         "[default: HEAD]",
         "[default: 0]",
+        "[default: 4]",
         "[default: 10000]",
         "[default: 0.5 0.8 0.98]",
     ] {
@@ -960,6 +992,7 @@ const SUITE: &str = "baseline = 'HEAD'\n\
     output-dir = 'bench'\n\
     repetitions = 10\n\
     draws = 1000\n\
+    seed = 0\n\
     \n\
     [benchmarks.first]\n\
     command = ['git', '--version']\n\

@@ -12,6 +12,7 @@ use std::{
 pub struct Config<'a> {
     pub seed: u64,
     pub repetitions: usize,
+    pub block_size: usize,
     pub draws: usize,
     pub timeout_seconds: Option<u64>,
     pub shrinkage: Shrinkage,
@@ -43,6 +44,7 @@ pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
     let value = json!({
         "seed": config.seed,
         "repetitions": config.repetitions,
+        "block_size": config.block_size,
         "draws": config.draws,
         "timeout_seconds": config.timeout_seconds,
         "shrinkage": config.shrinkage.get(),

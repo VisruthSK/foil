@@ -55,8 +55,9 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
     let baseline = Revision::resolve("main".to_owned())?;
     let candidate = Revision::resolve("HEAD".to_owned())?;
     let config = Config {
-        seed: 42,
+        seed: 0,
         repetitions: 10,
+        block_size: 4,
         draws: 1000,
         timeout_seconds: Some(30),
         shrinkage: Shrinkage::new(5.0)?,
@@ -81,8 +82,9 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
 
     let actual: serde_json::Value = serde_json::from_str(&read_to_string(path)?)?;
     let expected = json!({
-        "seed": 42,
+        "seed": 0,
         "repetitions": 10,
+        "block_size": 4,
         "draws": 1000,
         "timeout_seconds": 30,
         "shrinkage": 5.0,

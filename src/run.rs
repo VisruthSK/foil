@@ -171,6 +171,14 @@ impl RunCommand {
 }
 
 impl RunOutput {
+    pub(crate) fn measurement(elapsed_time: Duration) -> Self {
+        Self {
+            exit_status: ExitStatus::default(),
+            elapsed_time,
+            peak_sampled_memory: None,
+        }
+    }
+
     /// Assembles an output directly, for fixtures. Real runs come from [`RunCommand::run_in`].
     #[cfg(test)]
     pub(crate) fn new(
