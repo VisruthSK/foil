@@ -224,6 +224,18 @@ struct Calibration {
 }
 
 impl Calibration {
+    fn coverage(&self, index: usize) -> f64 {
+        self.coverage[index] as f64 / self.datasets as f64
+    }
+
+    fn bias(&self) -> f64 {
+        self.bias / self.datasets as f64
+    }
+
+    fn width(&self, index: usize) -> f64 {
+        self.width[index] / self.datasets as f64
+    }
+
     fn report(&self, name: &str, shrinkage: Shrinkage) {
         let n = self.datasets as f64;
         let sign = (self.effect != 0.0).then(|| self.sign_correct as f64 / n);
@@ -231,7 +243,7 @@ impl Calibration {
             "{name}: datasets={}, shrinkage={}, bias={:+.6}, sign_accuracy={}",
             self.datasets,
             shrinkage.get(),
-            self.bias / n,
+            self.bias(),
             sign.map_or_else(|| "n/a".to_owned(), |value| format!("{value:.4}"))
         );
         for (index, level) in LEVELS.into_iter().enumerate() {
@@ -239,13 +251,27 @@ impl Calibration {
             eprintln!(
                 "  {:>2.0}% CrI: coverage={:.4}, binomial_4se=[{:.4}, {:.4}], mean_width={:.6}",
                 100.0 * level,
-                self.coverage[index] as f64 / n,
+                self.coverage(index),
                 (level - 4.0 * standard_error).max(0.0),
                 (level + 4.0 * standard_error).min(1.0),
-                self.width[index] / n
+                self.width(index)
             );
         }
     }
+}
+
+fn log_log_slope(points: &[(f64, f64)]) -> f64 {
+    let mean_x = points.iter().map(|(x, _)| x.ln()).sum::<f64>() / points.len() as f64;
+    let mean_y = points.iter().map(|(_, y)| y.ln()).sum::<f64>() / points.len() as f64;
+    let covariance = points
+        .iter()
+        .map(|(x, y)| (x.ln() - mean_x) * (y.ln() - mean_y))
+        .sum::<f64>();
+    let variance = points
+        .iter()
+        .map(|(x, _)| (x.ln() - mean_x).powi(2))
+        .sum::<f64>();
+    covariance / variance
 }
 
 fn calibrate(
@@ -393,6 +419,60 @@ fn confirmatory_coverage() -> Result<()> {
     for scenario in confirmatory_scenarios() {
         let result = calibrate(&scenario, datasets, draws, Shrinkage::NONE)?;
         result.report(scenario.name, Shrinkage::NONE);
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "release-only Bayesian-bootstrap coverage convergence"]
+fn coverage_convergence() -> Result<()> {
+    let (datasets, draws) = release_settings(DEFAULT_OUTER_DATASETS)?;
+    let model = Model {
+        effect: 0.025,
+        midpoint_drift: 0.03,
+        differential_drift: -0.009,
+        midpoint_order: 0.08,
+        differential_order: 0.05,
+        ..Model::default()
+    };
+    let mut results = Vec::new();
+
+    eprintln!("n,level,coverage,signed_error,absolute_error,bias,mean_width");
+    for n in [10, 20, 30, 50, 75, 100, 150, 200] {
+        let scenario = Scenario {
+            name: "coverage convergence",
+            n,
+            model,
+        };
+        let result = calibrate(&scenario, datasets, draws, Shrinkage::NONE)?;
+        for (index, level) in LEVELS.into_iter().enumerate() {
+            let error = result.coverage(index) - level;
+            eprintln!(
+                "{n},{level:.2},{:.4},{error:+.4},{:.4},{:+.6},{:.6}",
+                result.coverage(index),
+                error.abs(),
+                result.bias(),
+                result.width(index)
+            );
+        }
+        results.push((n, result));
+    }
+
+    for (index, level) in LEVELS.into_iter().enumerate() {
+        let floor = 0.5 / datasets as f64;
+        let points: Vec<_> = results
+            .iter()
+            .map(|(n, result)| (*n as f64, (result.coverage(index) - level).abs().max(floor)))
+            .collect();
+        let slope = log_log_slope(&points);
+        ensure!(
+            slope.is_finite(),
+            "Coverage convergence slope is not finite."
+        );
+        eprintln!(
+            "{:.0}% CrI log-log absolute-error slope: {slope:+.4}",
+            100.0 * level
+        );
     }
     Ok(())
 }

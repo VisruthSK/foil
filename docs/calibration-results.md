@@ -13,3 +13,9 @@ These confirmatory results use seed 0, 10,000 independently generated datasets p
 | n=30, small effect, substantial difference noise | +0.000201 | 0.7782 | 0.4557 / 0.039909 | 0.7511 / 0.076076 | 0.9552 / 0.139352 |
 
 The nominal four-standard-error coverage ranges are `[0.4800, 0.5200]`, `[0.7840, 0.8160]`, and `[0.9744, 0.9856]` for the 50%, 80%, and 98% intervals. The results are descriptive validation of the nonparametric posterior; no parametric correction is applied.
+
+## Coverage convergence
+
+The fixed-DGP convergence family varies only the number of repetitions. Its full [CSV results](calibration-convergence.csv) come from another 1.6 billion Bayesian-bootstrap draws. Regressing log absolute coverage error on log `n` gives slopes of `-1.0434`, `-0.9405`, and `-1.3035` for the 50%, 80%, and 98% CrIs. Over `n = 10` through `200`, the observed error therefore behaves roughly like `n^-1`, with noisier tail behavior for the 98% interval.
+
+At `n = 30`, coverage remains `0.4557`, `0.7511`, and `0.9552` despite bias of only `+0.000089`. At `n = 200`, coverage reaches `0.5028`, `0.7925`, and `0.9789`. This separates an essentially unbiased adjusted-effect estimator from uncertainty intervals that converge more gradually.
