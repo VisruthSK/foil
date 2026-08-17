@@ -1,5 +1,5 @@
 use anyhow::Result;
-use b3::{Config, Interval, LifecycleConfig, Revision, Shrinkage, write_config_json};
+use foil::{Config, Interval, LifecycleConfig, Revision, Shrinkage, write_config_json};
 use serde_json::json;
 use std::{
     env::{current_dir, set_current_dir},
@@ -32,8 +32,8 @@ fn init_repo(path: &Path) -> Result<()> {
     };
 
     git(&["init", "--quiet", "--initial-branch=main"])?;
-    git(&["config", "user.email", "b3@example.com"])?;
-    git(&["config", "user.name", "b3"])?;
+    git(&["config", "user.email", "foil@example.com"])?;
+    git(&["config", "user.name", "foil"])?;
     git(&["commit", "--quiet", "--allow-empty", "-m", "root"])
 }
 
@@ -98,7 +98,7 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
         "intervals": [0.5, 0.98],
         "working_directory": "benchmarks",
         "env": [["RAYON_NUM_THREADS", "1"]],
-        "b3_version": env!("CARGO_PKG_VERSION"),
+        "foil_version": env!("CARGO_PKG_VERSION"),
         "baseline": { "revision": "main", "hash": baseline.hash() },
         "candidate": { "revision": "HEAD", "hash": candidate.hash() },
         "suite_lifecycle": {

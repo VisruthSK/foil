@@ -2,7 +2,7 @@
 
 The posterior has two complementary synthetic checks. Ordinary tests generate noise-free data exactly from the fitted midpoint and candidate-minus-baseline regressions. They verify that adjusted intercepts are invariant to arbitrary positive Bayesian-bootstrap weights and that unshrunk posterior draws recover the known values to floating-point tolerance.
 
-**B3 uses the uncorrected Bayesian bootstrap; its intervals are materially anti-conservative at small sample sizes and approach nominal coverage gradually with increasing repetitions.** The adjusted-effect estimator is nearly unbiased in the model-correct simulations, but that does not imply calibrated uncertainty: at `n = 30`, all three interval levels still undercover materially.
+**`foil` uses the uncorrected Bayesian bootstrap; its intervals are materially anti-conservative at small sample sizes and approach nominal coverage gradually with increasing repetitions.** The adjusted-effect estimator is nearly unbiased in the model-correct simulations, but that does not imply calibrated uncertainty: at `n = 30`, all three interval levels still undercover materially.
 
 The ignored calibration tests repeatedly generate independent datasets, run the production posterior, and summarize its production 50%, 80%, and 98% central credible intervals. All generator and posterior RNG streams are separate `Xoshiro256PlusPlus` instances initialized from seed 0, so failures reproduce exactly.
 
@@ -26,7 +26,7 @@ They report bias, coverage, mean interval width, and sign accuracy. Misspecifica
 For a quick deterministic smoke run, override the simulation sizes:
 
 ```sh
-B3_CALIBRATION_DATASETS=200 B3_CALIBRATION_DRAWS=2000 cargo test --release posterior::calibration::confirmatory_coverage -- --ignored --nocapture
+FOIL_CALIBRATION_DATASETS=200 FOIL_CALIBRATION_DRAWS=2000 cargo test --release posterior::calibration::confirmatory_coverage -- --ignored --nocapture
 ```
 
 Small smoke runs are useful for exercising the harness, not for judging calibration. The reported coverage uncertainty is governed mainly by the number of outer datasets; posterior draws should remain numerous enough that quantile Monte Carlo error is smaller than that uncertainty.

@@ -338,8 +338,8 @@ fn release_settings(default_datasets: usize) -> Result<(usize, usize)> {
         "Calibration is release-only; run `cargo test --release calibration -- --ignored --nocapture`."
     );
     Ok((
-        setting("B3_CALIBRATION_DATASETS", default_datasets)?,
-        setting("B3_CALIBRATION_DRAWS", DEFAULT_POSTERIOR_DRAWS)?,
+        setting("FOIL_CALIBRATION_DATASETS", default_datasets)?,
+        setting("FOIL_CALIBRATION_DRAWS", DEFAULT_POSTERIOR_DRAWS)?,
     ))
 }
 

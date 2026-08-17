@@ -1,4 +1,4 @@
-use b3::{Metric, Pair, PeakMemory, Repetitions, RunOrder, Shrinkage, Side, Time, Unit};
+use foil::{Metric, Pair, PeakMemory, Repetitions, RunOrder, Shrinkage, Side, Time, Unit};
 use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
 
 #[test]

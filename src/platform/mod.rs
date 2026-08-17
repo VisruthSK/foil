@@ -229,7 +229,7 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    const MARKER: &str = "B3_PROCESS_TEST_MARKER";
+    const MARKER: &str = "FOIL_PROCESS_TEST_MARKER";
 
     fn spec(test: &str, env: Vec<(OsString, OsString)>) -> Result<CommandSpec> {
         Ok(CommandSpec::new(

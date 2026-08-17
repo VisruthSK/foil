@@ -1,14 +1,21 @@
 [package]
-name = "b3"
+name = "foil-bench"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Bayesian Branch Benchmarking: compares runtime and memory between two git revisions."
+description = "Compare runtime between two Git revisions with paired Bayesian inference."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/VisruthSK/b3"
+repository = "https://github.com/VisruthSK/foil"
 readme = "README.md"
 keywords = ["benchmark", "performance", "statistics", "bayesian", "git"]
 categories = ["command-line-utilities", "development-tools::profiling"]
+
+[lib]
+name = "foil"
+
+[[bin]]
+name = "foil"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"

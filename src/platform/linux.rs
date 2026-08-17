@@ -163,7 +163,7 @@ impl Prepared {
                 let _ = remove_when_empty(&cgroup);
                 return Err(io::Error::new(
                     error.kind(),
-                    format!("pidfd_open failed; b3 requires Linux 5.14 or newer: {error}"),
+                    format!("pidfd_open failed; foil requires Linux 5.14 or newer: {error}"),
                 ));
             }
         };
@@ -228,7 +228,7 @@ fn create_cgroup() -> io::Result<PathBuf> {
     let root = cgroup_root()?;
     for _ in 0..16 {
         let id = CGROUP_ID.fetch_add(1, Ordering::Relaxed);
-        let path = root.join(format!("b3-{}-{id}", std::process::id()));
+        let path = root.join(format!("foil-{}-{id}", std::process::id()));
         match fs::create_dir(&path) {
             Ok(()) => return Ok(path),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -236,7 +236,7 @@ fn create_cgroup() -> io::Result<PathBuf> {
                 return Err(io::Error::new(
                     error.kind(),
                     format!(
-                        "Failed to create a workload cgroup under {}. Run b3 inside a writable delegated cgroup v2 subtree: {error}",
+                        "Failed to create a workload cgroup under {}. Run foil inside a writable delegated cgroup v2 subtree: {error}",
                         root.display()
                     ),
                 ));
@@ -253,7 +253,7 @@ fn cgroup_root() -> io::Result<&'static PathBuf> {
     if let Some(root) = CGROUP_ROOT.get() {
         return Ok(root);
     }
-    let root = match env::var_os("B3_CGROUP_ROOT") {
+    let root = match env::var_os("FOIL_CGROUP_ROOT") {
         Some(root) => PathBuf::from(root),
         None => current_cgroup()?,
     };

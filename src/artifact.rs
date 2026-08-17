@@ -56,7 +56,7 @@ pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
         "intervals": config.intervals.iter().map(|interval| interval.percent() / 100.0).collect::<Vec<_>>(),
         "working_directory": config.working_directory,
         "env": config.env,
-        "b3_version": env!("CARGO_PKG_VERSION"),
+        "foil_version": env!("CARGO_PKG_VERSION"),
         "baseline": {
             "revision": config.baseline.name(),
             "hash": config.baseline.hash(),

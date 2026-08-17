@@ -112,11 +112,11 @@ jobs:
       - name: Test default features
         run: |
           parent="/sys/fs/cgroup$(awk -F: '$1 == "0" { print $3 }' /proc/self/cgroup)"
-          cgroup="$parent/b3-ci"
+          cgroup="$parent/foil-ci"
           sudo mkdir "$cgroup"
           sudo chown -R "$(id -u):$(id -g)" "$cgroup"
           echo $$ | sudo tee "$cgroup/cgroup.procs" >/dev/null
-          B3_CGROUP_ROOT="$cgroup" cargo test --locked --workspace
+          FOIL_CGROUP_ROOT="$cgroup" cargo test --locked --workspace
 
   test:
     name: Test all features (${{ matrix.os }})
@@ -142,11 +142,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           parent="/sys/fs/cgroup$(awk -F: '$1 == "0" { print $3 }' /proc/self/cgroup)"
-          cgroup="$parent/b3-ci"
+          cgroup="$parent/foil-ci"
           sudo mkdir "$cgroup"
           sudo chown -R "$(id -u):$(id -g)" "$cgroup"
           echo $$ | sudo tee "$cgroup/cgroup.procs" >/dev/null
-          B3_CGROUP_ROOT="$cgroup" cargo test --locked --workspace --all-targets --all-features
+          FOIL_CGROUP_ROOT="$cgroup" cargo test --locked --workspace --all-targets --all-features
 
       - if: runner.os != 'Linux'
         run: >
