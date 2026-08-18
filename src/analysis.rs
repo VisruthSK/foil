@@ -4,7 +4,13 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
-use std::{fs, num::NonZeroUsize, path::Path, time::Duration};
+use std::{
+    fs::File,
+    io::{BufRead, BufReader},
+    num::NonZeroUsize,
+    path::Path,
+    time::Duration,
+};
 
 /// A sampled posterior and its requested credible-interval summary.
 pub struct Analysis {
@@ -34,7 +40,7 @@ pub(crate) fn analyze(
 }
 
 /// Analyzes validated repetitions, checking for cancellation between draws.
-pub fn analyze_checked(
+pub(crate) fn analyze_checked(
     repetitions: &Repetitions,
     seed: u64,
     draws: NonZeroUsize,
@@ -54,11 +60,13 @@ pub fn analyze_checked(
 }
 
 fn read_measurements(path: &Path) -> Result<Repetitions> {
-    let text =
-        fs::read_to_string(path).with_context(|| format!("Failed to read {}.", path.display()))?;
-    let mut lines = text.lines();
+    let mut lines = BufReader::new(
+        File::open(path).with_context(|| format!("Failed to read {}.", path.display()))?,
+    )
+    .lines();
     ensure!(
-        lines.next() == Some("repetition,order,baseline_seconds,candidate_seconds"),
+        lines.next().transpose()?.as_deref()
+            == Some("repetition,order,baseline_seconds,candidate_seconds"),
         "{} has an invalid measurements header.",
         path.display()
     );
@@ -66,13 +74,22 @@ fn read_measurements(path: &Path) -> Result<Repetitions> {
     lines
         .enumerate()
         .map(|(index, line)| {
-            let fields: Vec<_> = line.split(',').collect();
-            ensure!(fields.len() == 4, "Invalid measurements row {}.", index + 1);
+            let line_number = index + 2;
+            let line = line.with_context(|| format!("Failed to read line {line_number}."))?;
+            let mut fields = line.split(',');
+            let repetition = fields.next().unwrap_or_default();
+            let order = fields.next().unwrap_or_default();
+            let baseline = fields.next().unwrap_or_default();
+            let candidate = fields.next().unwrap_or_default();
             ensure!(
-                fields[0].parse::<usize>()? == index + 1,
+                fields.next().is_none() && !candidate.is_empty(),
+                "Invalid measurements line {line_number}."
+            );
+            ensure!(
+                repetition.parse::<usize>()? == index + 1,
                 "Measurements repetitions must be sequential."
             );
-            let order = match fields[1] {
+            let order = match order {
                 "baseline_first" => RunOrder::BaselineFirst,
                 "candidate_first" => RunOrder::CandidateFirst,
                 order => anyhow::bail!("Unknown run order `{order}`."),
@@ -83,12 +100,15 @@ fn read_measurements(path: &Path) -> Result<Repetitions> {
                     seconds.is_finite() && seconds >= 0.0,
                     "Measurement must be finite and nonnegative."
                 );
-                Ok(RunOutput::measurement(Duration::from_secs_f64(seconds)))
+                Ok(RunOutput::measurement(
+                    Duration::try_from_secs_f64(seconds)
+                        .context("Measurement is too large to represent.")?,
+                ))
             };
             Ok(Repetition {
                 outputs: Pair {
-                    baseline: elapsed(fields[2])?,
-                    candidate: elapsed(fields[3])?,
+                    baseline: elapsed(baseline)?,
+                    candidate: elapsed(candidate)?,
                 },
                 order,
             })
@@ -101,6 +121,7 @@ fn read_measurements(path: &Path) -> Result<Repetitions> {
 mod tests {
     use super::*;
     use crate::MeasurementsCsv;
+    use std::fs;
     use tempfile::tempdir;
 
     fn repetitions() -> Result<Repetitions> {
@@ -142,6 +163,25 @@ mod tests {
 
         assert_eq!(from_csv.posterior.draws(), from_memory.posterior.draws());
         assert_eq!(from_csv.summary, from_memory.summary);
+        Ok(())
+    }
+
+    #[test]
+    fn an_unrepresentable_duration_is_an_error() -> Result<()> {
+        let directory = tempdir()?;
+        let path = directory.path().join("measurements.csv");
+        let mut csv = String::from("repetition,order,baseline_seconds,candidate_seconds\n");
+        for repetition in 1..=10 {
+            let order = if repetition % 2 == 0 {
+                "baseline_first"
+            } else {
+                "candidate_first"
+            };
+            csv.push_str(&format!("{repetition},{order},1e300,1\n"));
+        }
+        fs::write(&path, csv)?;
+
+        assert!(read_measurements(&path).is_err());
         Ok(())
     }
 }

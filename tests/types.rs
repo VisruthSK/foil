@@ -100,11 +100,19 @@ fn full_blocks_are_balanced() {
 }
 
 #[test]
-fn block_size_one_alternates_the_surplus() {
-    let orders = schedule(10, 1, 0);
-
-    for pair in orders.chunks_exact(2) {
-        assert_eq!(baseline_firsts(pair), 1, "{pair:?}");
+fn odd_blocks_balance_their_surplus_before_shuffling() {
+    for block_size in [1, 3, 5] {
+        for seed in 0..64 {
+            let orders = schedule(60, block_size, seed);
+            assert_eq!(
+                baseline_firsts(&orders),
+                orders.len() / 2,
+                "block_size={block_size}, seed={seed}"
+            );
+            assert!(orders.chunks(block_size).all(|block| {
+                baseline_firsts(block).abs_diff(block.len() - baseline_firsts(block)) <= 1
+            }));
+        }
     }
 }
 

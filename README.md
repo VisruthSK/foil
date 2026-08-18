@@ -98,6 +98,8 @@ render: 3.1s -> 3.0s [-4.02%, +1.15%]
 
 The ignored release-mode [statistical validation suite](docs/statistical-validation.md) reports synthetic exact recovery, credible-interval coverage, shrinkage behavior, and model misspecification.
 
+Simulation shows that the reported intervals materially under-cover at small repetition counts, including the default 30.
+
 The ignored release-mode [runner overhead diagnostic](docs/overhead.md) measures process-management overhead separately from inference quality.
 
 ## License

@@ -1,4 +1,4 @@
-use crate::{Metric, Pair, Posterior, Repetition, Revision, RunOrder, Shrinkage};
+use crate::{Interval, Metric, Pair, Posterior, Repetition, Revision, RunOrder, Shrinkage};
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -15,7 +15,11 @@ pub struct Config<'a> {
     pub block_size: usize,
     pub draws: usize,
     pub timeout_seconds: Option<u64>,
+    pub isolate: bool,
     pub shrinkage: Shrinkage,
+    pub intervals: &'a [Interval],
+    pub working_directory: Option<&'a Path>,
+    pub env: &'a [(String, String)],
     pub baseline: &'a Revision,
     pub candidate: &'a Revision,
     pub suite_lifecycle: LifecycleConfig<'a>,
@@ -47,7 +51,11 @@ pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
         "block_size": config.block_size,
         "draws": config.draws,
         "timeout_seconds": config.timeout_seconds,
+        "isolate": config.isolate,
         "shrinkage": config.shrinkage.get(),
+        "intervals": config.intervals.iter().map(|interval| interval.percent() / 100.0).collect::<Vec<_>>(),
+        "working_directory": config.working_directory,
+        "env": config.env,
         "b3_version": env!("CARGO_PKG_VERSION"),
         "baseline": {
             "revision": config.baseline.name(),

@@ -853,6 +853,45 @@ fn a_failing_benchmark_still_leaves_a_measurements_file() -> Result<()> {
 }
 
 #[test]
+fn a_timed_out_benchmark_is_logged() -> Result<()> {
+    let command = if cfg!(windows) {
+        "['ping', '-n', '31', '127.0.0.1']"
+    } else {
+        "['sleep', '30']"
+    };
+    let project = repository(&format!("{PREAMBLE}timeout = 1\ncommand = {command}\n"))?;
+
+    let error = failure(&project, &[])?;
+    assert!(error.contains("timed out"), "{error}");
+
+    let log = fs::read_to_string(project.path().join("bench/benchmark.log"))?;
+    let entry: serde_json::Value = serde_json::from_str(
+        log.lines()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("The timed-out run was not logged."))?,
+    )?;
+    assert_eq!(entry["timed_out"], true, "{entry}");
+
+    Ok(())
+}
+
+#[test]
+fn redirected_stderr_reports_each_benchmark_run() -> Result<()> {
+    let project = repository(&format!("{PREAMBLE}command = ['git', '--version']\n"))?;
+
+    let (succeeded, _, stderr) = run(&project, &[])?;
+
+    ensure!(succeeded, "b3 failed with {stderr}");
+    let progress: Vec<_> = stderr
+        .lines()
+        .filter(|line| line.ends_with(" benchmark"))
+        .collect();
+    assert_eq!(progress.len(), 20, "{stderr}");
+    assert!(progress[0].contains(" 1/20 benchmark"), "{stderr}");
+    Ok(())
+}
+
+#[test]
 fn modified_tracked_files_print_a_warning() -> Result<()> {
     let project = repository(&format!("{PREAMBLE}command = ['git', '--version']\n"))?;
     fs::write(project.path().join("tracked.txt"), "before")?;

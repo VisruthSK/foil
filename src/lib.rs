@@ -1,5 +1,7 @@
-pub mod analysis;
+mod analysis;
+mod app;
 mod artifact;
+mod config;
 mod metric;
 mod posterior;
 mod repetition;
@@ -15,6 +17,13 @@ pub use artifact::{
 pub use metric::{Metric, PeakMemory, Time, Unit};
 pub use posterior::{Draw, Posterior, Shrinkage};
 pub use repetition::{Pair, Repetition, Repetitions, RunOrder, Side};
-pub use run::{BenchmarkLog, Bytes, RunCommand, RunOutput};
+pub(crate) use run::{BenchmarkLog, RunCommand};
+pub use run::{Bytes, RunOutput};
 pub use summary::{Change, ChangeBounds, Interval, Range, Summary};
-pub use worktree::{Revision, Worktree, working_tree_has_modified_tracked_files};
+pub(crate) use worktree::working_tree_has_modified_tracked_files;
+pub use worktree::{Revision, Worktree};
+
+/// Runs the command-line application.
+pub fn run() -> anyhow::Result<()> {
+    app::run()
+}

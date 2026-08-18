@@ -1,4 +1,4 @@
-use b3::{Interval, Repetitions, Revision, Shrinkage};
+use crate::{Interval, Repetitions, Revision, Shrinkage};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{

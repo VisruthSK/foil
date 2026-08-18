@@ -70,19 +70,29 @@ impl RunOrder {
     }
 
     pub fn schedule(repetitions: usize, block_size: NonZeroUsize, rng: &mut impl Rng) -> Vec<Self> {
+        let block_size = block_size.get();
+        let full_blocks = repetitions / block_size;
+        let remainder = repetitions % block_size;
+        let odd_blocks = full_blocks * (block_size % 2) + remainder % 2;
+        let mut surpluses = [Self::BaselineFirst, Self::CandidateFirst].repeat(odd_blocks / 2);
+        if odd_blocks % 2 == 1 {
+            surpluses.push(if rng.random() {
+                Self::BaselineFirst
+            } else {
+                Self::CandidateFirst
+            });
+        }
+        surpluses.shuffle(rng);
+        let mut surpluses = surpluses.into_iter();
         let mut schedule = Vec::with_capacity(repetitions);
-        let mut baseline_first = 0;
 
         while schedule.len() < repetitions {
-            let size = block_size.get().min(repetitions - schedule.len());
-            let mut baseline = size / 2;
-            if size % 2 == 1 && (baseline_first * 2 < schedule.len() || rng.random::<bool>()) {
-                baseline += 1;
+            let size = block_size.min(repetitions - schedule.len());
+            let mut block = [Self::BaselineFirst, Self::CandidateFirst].repeat(size / 2);
+            if size % 2 == 1 {
+                block.push(surpluses.next().expect("Every odd block has a surplus."));
             }
-            let mut block = vec![Self::BaselineFirst; baseline];
-            block.resize(size, Self::CandidateFirst);
             block.shuffle(rng);
-            baseline_first += baseline;
             schedule.extend(block);
         }
 

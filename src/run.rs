@@ -7,15 +7,15 @@ use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::json;
 use std::{
     ffi::OsString,
-    io::{self, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
-    thread::{self, JoinHandle},
+    sync::mpsc::{self, Receiver, RecvTimeoutError},
+    thread,
     time::{Duration, Instant},
 };
-use wait_timeout::ChildExt;
 
-pub struct RunCommand {
+pub(crate) struct RunCommand {
     program: OsString,
     args: Vec<OsString>,
     working_directory: Option<PathBuf>,
@@ -39,7 +39,17 @@ impl ProcessTree {
     }
 
     fn wait_timeout(&mut self, timeout: Duration) -> io::Result<Option<ExitStatus>> {
-        self.child().wait_timeout(timeout)
+        let start = Instant::now();
+        loop {
+            if let Some(status) = self.0.try_wait()? {
+                return Ok(Some(status));
+            }
+            let remaining = timeout.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            thread::sleep(remaining.min(Duration::from_millis(1)));
+        }
     }
 
     fn kill(&mut self) -> io::Result<()> {
@@ -70,7 +80,7 @@ pub struct RunOutput {
 }
 
 impl RunCommand {
-    pub fn new(
+    pub(crate) fn new(
         program: OsString,
         args: Vec<OsString>,
         working_directory: Option<PathBuf>,
@@ -86,12 +96,12 @@ impl RunCommand {
     }
 
     #[must_use]
-    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+    pub(crate) fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
         self
     }
 
-    pub(crate) fn run_in(&self, worktree: &Path, label: &str) -> Result<Run> {
+    pub(crate) fn run_in(&self, worktree: &Path) -> Result<Run> {
         let working_dir = match &self.working_directory {
             Some(directory) => worktree.join(directory),
             None => worktree.to_path_buf(),
@@ -106,31 +116,51 @@ impl RunCommand {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = ProcessTree::spawn(&mut command)
-            .with_context(|| format!("Failed to run {:?}.", self.program))?;
-        let stdout = drain(child.child().stdout.take().expect("Stdout is piped."));
-        let stderr = drain(child.child().stderr.take().expect("Stderr is piped."));
-
-        let failed_waiting = || format!("Failed to wait for {:?}.", self.program);
-        let mut timed_out = None;
-        let exit_status = match self.timeout {
-            None => child.wait().with_context(failed_waiting)?,
-            Some(limit) => match child.wait_timeout(limit).with_context(failed_waiting)? {
-                Some(status) => status,
-                None => {
-                    child.kill().with_context(|| {
-                        format!("Failed to kill {:?} and its children.", self.program)
-                    })?;
-                    timed_out = Some(limit);
-                    child.wait().with_context(failed_waiting)?
-                }
-            },
+        let (exit_status, stdout, stderr, timed_out) = match self.timeout {
+            None => {
+                let output = command
+                    .output()
+                    .with_context(|| format!("Failed to run {:?}.", self.program))?;
+                (output.status, output.stdout, output.stderr, None)
+            }
+            Some(limit) => {
+                let mut child = ProcessTree::spawn(&mut command)
+                    .with_context(|| format!("Failed to run {:?}.", self.program))?;
+                let stdout = drain(child.child().stdout.take().expect("Stdout is piped."));
+                let stderr = drain(child.child().stderr.take().expect("Stderr is piped."));
+                let failed_waiting = || format!("Failed to wait for {:?}.", self.program);
+                let (exit_status, mut timed_out) =
+                    match child.wait_timeout(limit).with_context(failed_waiting)? {
+                        Some(status) => (status, None),
+                        None => {
+                            child.kill().with_context(|| {
+                                format!("Failed to kill {:?} and its children.", self.program)
+                            })?;
+                            (child.wait().with_context(failed_waiting)?, Some(limit))
+                        }
+                    };
+                let stdout = collect(
+                    stdout,
+                    &mut child,
+                    start,
+                    limit,
+                    &mut timed_out,
+                    &self.program,
+                )?;
+                let stderr = collect(
+                    stderr,
+                    &mut child,
+                    start,
+                    limit,
+                    &mut timed_out,
+                    &self.program,
+                )?;
+                (exit_status, stdout, stderr, timed_out)
+            }
         };
         let elapsed_time = start.elapsed();
-        let stdout = stdout.join().expect("The stdout reader does not panic.")?;
-        let stderr = stderr.join().expect("The stderr reader does not panic.")?;
 
-        let run = Run {
+        Ok(Run {
             output: RunOutput {
                 exit_status,
                 elapsed_time,
@@ -138,32 +168,33 @@ impl RunCommand {
             },
             stdout,
             stderr,
-        };
-
-        if let Some(limit) = timed_out {
-            bail!(
-                "{:?} timed out after {limit:?}.{}",
-                self.program,
-                display_output(label, &run)
-            );
-        }
-
-        Ok(run)
+            timed_out,
+        })
     }
 
-    pub fn run_once_in(&self, worktree: &Worktree, label: &str) -> Result<()> {
+    pub(crate) fn run_once_in(&self, worktree: &Worktree, label: &str) -> Result<()> {
         self.run_once_at(worktree.path(), label)
     }
 
-    pub fn run_once_at(&self, directory: &Path, label: &str) -> Result<()> {
-        let run = self.run_in(directory, label)?;
+    pub(crate) fn run_once_at(&self, directory: &Path, label: &str) -> Result<()> {
+        let run = self.run_in(directory)?;
+        self.ensure_succeeded(&run, label)
+    }
 
+    fn ensure_succeeded(&self, run: &Run, label: &str) -> Result<()> {
+        if let Some(limit) = run.timed_out {
+            bail!(
+                "{:?} timed out after {limit:?}.{}",
+                self.program,
+                display_output(label, run)
+            );
+        }
         ensure!(
             run.output.exit_status.success(),
             "{:?} failed with {}.{}",
             self.program,
             run.output.exit_status,
-            display_output(label, &run)
+            display_output(label, run)
         );
 
         Ok(())
@@ -206,13 +237,45 @@ impl RunOutput {
     }
 }
 
-fn drain(mut stream: impl Read + Send + 'static) -> JoinHandle<io::Result<Vec<u8>>> {
+fn drain(mut stream: impl Read + Send + 'static) -> Receiver<io::Result<Vec<u8>>> {
+    let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let mut bytes = Vec::new();
-        stream.read_to_end(&mut bytes)?;
+        let result = stream.read_to_end(&mut bytes).map(|_| bytes);
+        let _ = sender.send(result);
+    });
+    receiver
+}
 
-        Ok(bytes)
-    })
+fn collect(
+    receiver: Receiver<io::Result<Vec<u8>>>,
+    child: &mut ProcessTree,
+    start: Instant,
+    limit: Duration,
+    timed_out: &mut Option<Duration>,
+    program: &OsString,
+) -> Result<Vec<u8>> {
+    if timed_out.is_none() {
+        match receiver.recv_timeout(limit.saturating_sub(start.elapsed())) {
+            Ok(result) => return Ok(result?),
+            Err(RecvTimeoutError::Disconnected) => panic!("The output reader does not panic."),
+            Err(RecvTimeoutError::Timeout) => {
+                match child.kill() {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::InvalidInput => {}
+                    Err(error) => {
+                        return Err(error)
+                            .context(format!("Failed to kill {program:?} and its children."));
+                    }
+                }
+                *timed_out = Some(limit);
+            }
+        }
+    }
+
+    Ok(receiver
+        .recv()
+        .expect("The output reader does not panic.")?)
 }
 
 fn display_output(label: &str, run: &Run) -> String {
@@ -232,33 +295,41 @@ pub(crate) struct Run {
     output: RunOutput,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    timed_out: Option<Duration>,
 }
 
-pub struct BenchmarkLog<W> {
+pub(crate) struct BenchmarkLog<W> {
     writer: W,
     run: usize,
     runs: usize,
     started: Instant,
     progress: ProgressBar,
+    interactive: bool,
 }
 
 impl<W: Write> BenchmarkLog<W> {
-    pub fn new(writer: W, runs: usize) -> Self {
-        let progress = ProgressBar::new(runs as u64).with_style(
-            ProgressStyle::with_template("{prefix:.cyan} {msg:.dim}")
-                .expect("The progress template is valid."),
-        );
+    pub(crate) fn new(writer: W, runs: usize) -> Self {
+        let interactive = io::stderr().is_terminal();
+        let progress = if interactive {
+            ProgressBar::new(runs as u64).with_style(
+                ProgressStyle::with_template("{prefix:.cyan} {msg:.dim}")
+                    .expect("The progress template is valid."),
+            )
+        } else {
+            ProgressBar::hidden()
+        };
         Self {
             writer,
             run: 0,
             runs,
             started: Instant::now(),
             progress,
+            interactive,
         }
     }
 
     /// Runs the benchmark in one side's worktree and records what it printed.
-    pub fn measure(
+    pub(crate) fn measure(
         &mut self,
         benchmark: &RunCommand,
         side: Side,
@@ -267,21 +338,22 @@ impl<W: Write> BenchmarkLog<W> {
         self.starting(side);
 
         let label = format!("{side} benchmark");
-        let run = benchmark.run_in(worktree.path(), &label)?;
+        let run = benchmark.run_in(worktree.path())?;
 
         self.append(side, &run)?;
-        ensure!(
-            run.output.exit_status.success(),
-            "The {side} benchmark failed with {}.{}",
-            run.output.exit_status,
-            display_output(&label, &run)
-        );
+        benchmark
+            .ensure_succeeded(&run, &label)
+            .with_context(|| format!("The {side} benchmark failed."))?;
 
         Ok(run.output)
     }
 
     fn starting(&self, side: Side) {
-        self.set_phase(side, self.run + 1, &format!("benchmark{}", self.eta()));
+        if self.interactive {
+            self.set_phase(side, self.run + 1, &format!("benchmark{}", self.eta()));
+        } else {
+            eprintln!("{side} {}/{} benchmark", self.run + 1, self.runs);
+        }
     }
 
     fn eta(&self) -> String {
@@ -311,6 +383,7 @@ impl<W: Write> BenchmarkLog<W> {
             "peak_memory_bytes": run.output.peak_sampled_memory.map(Bytes::get),
             "stdout": String::from_utf8_lossy(&run.stdout),
             "stderr": String::from_utf8_lossy(&run.stderr),
+            "timed_out": run.timed_out.is_some(),
         });
         serde_json::to_writer(&mut self.writer, &entry)?;
         writeln!(self.writer)?;
@@ -320,11 +393,11 @@ impl<W: Write> BenchmarkLog<W> {
         Ok(())
     }
 
-    pub fn progress(&self) -> ProgressBar {
+    pub(crate) fn progress(&self) -> ProgressBar {
         self.progress.clone()
     }
 
-    pub fn next_run(&self) -> usize {
+    pub(crate) fn next_run(&self) -> usize {
         self.run + 1
     }
 
@@ -369,7 +442,7 @@ mod tests {
 
         let error = slow
             .with_timeout(Some(Duration::from_millis(100)))
-            .run_in(directory.path(), "test benchmark")
+            .run_once_at(directory.path(), "test benchmark")
             .err()
             .context("The run should time out.")?;
 
@@ -384,7 +457,7 @@ mod tests {
 
         let run = command("git", &["--version"])
             .with_timeout(Some(Duration::from_secs(60)))
-            .run_in(directory.path(), "test benchmark")?;
+            .run_in(directory.path())?;
 
         assert!(run.output.exit_status.success());
         assert!(!run.stdout.is_empty());
@@ -415,7 +488,7 @@ mod tests {
 
         let error = parent
             .with_timeout(Some(Duration::from_millis(100)))
-            .run_in(directory.path(), "test benchmark")
+            .run_once_at(directory.path(), "test benchmark")
             .err()
             .context("The parent should time out.")?;
         assert!(error.to_string().contains("timed out"), "{error}");
@@ -425,6 +498,40 @@ mod tests {
             !marker.exists(),
             "The descendant survived its parent's timeout."
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn a_timeout_includes_descendants_after_the_parent_exits() -> Result<()> {
+        let directory = tempdir()?;
+        let marker = directory.path().join("orphan-finished");
+        let parent = RunCommand::new(
+            env::current_exe()?.into_os_string(),
+            [
+                "--exact",
+                "run::tests::timeout_orphan_parent",
+                "--ignored",
+                "--nocapture",
+            ]
+            .map(OsString::from)
+            .to_vec(),
+            None,
+            vec![(
+                TIMEOUT_MARKER.to_owned(),
+                marker.to_string_lossy().into_owned(),
+            )],
+        );
+
+        let error = parent
+            .with_timeout(Some(Duration::from_millis(100)))
+            .run_once_at(directory.path(), "test benchmark")
+            .err()
+            .context("The process group should time out.")?;
+        assert!(error.to_string().contains("timed out"), "{error}");
+
+        thread::sleep(Duration::from_secs(1));
+        assert!(!marker.exists(), "The orphan survived the timeout.");
 
         Ok(())
     }
@@ -446,6 +553,25 @@ mod tests {
             .status()
             .expect("The descendant starts.");
         assert!(status.success(), "The descendant failed with {status}.");
+    }
+
+    #[test]
+    #[ignore]
+    #[allow(clippy::zombie_processes)]
+    fn timeout_orphan_parent() {
+        Command::new(env::current_exe().expect("The test executable exists."))
+            .args([
+                "--exact",
+                "run::tests::timeout_descendant",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(
+                TIMEOUT_MARKER,
+                env::var_os(TIMEOUT_MARKER).expect("The marker path is configured."),
+            )
+            .spawn()
+            .expect("The descendant starts.");
     }
 
     #[test]
@@ -478,6 +604,7 @@ mod tests {
             output: output(),
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
+            timed_out: None,
         }
     }
 
@@ -509,6 +636,7 @@ mod tests {
                     "peak_memory_bytes": null,
                     "stdout": "first\n",
                     "stderr": "",
+                    "timed_out": false,
                 }),
                 json!({
                     "run": 2,
@@ -518,6 +646,7 @@ mod tests {
                     "peak_memory_bytes": null,
                     "stdout": "second",
                     "stderr": "warning",
+                    "timed_out": false,
                 }),
             ]
         );
