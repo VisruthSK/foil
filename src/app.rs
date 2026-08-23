@@ -1,5 +1,6 @@
 use crate::analysis::analyze_checked;
 use crate::config::{Cli, Lifecycle, ResolvedSuiteConfig, RunConfig, Suite};
+use crate::platform::{CommandSpec, Interrupt};
 use crate::{
     BenchmarkLog, Config, LifecycleConfig, MeasurementsCsv, Pair, Repetition, Repetitions,
     Revision, RunCommand, RunOrder, RunOutput, Side, Summary, Time, Worktree,
@@ -11,9 +12,10 @@ use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
 use std::{
     ffi::OsString,
     fs,
+    io::BufWriter,
     path::Path,
     process,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicU8, Ordering},
     time::Duration,
 };
 use tempfile::{TempDir, tempdir};
@@ -41,20 +43,28 @@ impl LifecycleCommands {
     }
 }
 
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+static INTERRUPTS: AtomicU8 = AtomicU8::new(0);
 
 fn interrupted() -> bool {
-    INTERRUPTED.load(Ordering::Relaxed)
+    INTERRUPTS.load(Ordering::Relaxed) != 0
+}
+
+fn repeated_interrupt() -> bool {
+    INTERRUPTS.fetch_add(1, Ordering::Relaxed) != 0
+}
+
+fn handle_interrupt(interrupt: &Interrupt) {
+    if repeated_interrupt() {
+        process::exit(130);
+    }
+    interrupt.signal();
 }
 
 pub(crate) fn run() -> Result<()> {
-    ctrlc::set_handler(|| {
-        if INTERRUPTED.swap(true, Ordering::Relaxed) {
-            process::exit(130);
-        }
-        eprintln!("\nInterrupted; cleaning up. Press Ctrl+C again to exit immediately.");
-    })
-    .context("Failed to set the Ctrl+C handler.")?;
+    let interrupt = Interrupt::new().context("Failed to create the interrupt handle.")?;
+    let signal = interrupt.clone();
+    ctrlc::set_handler(move || handle_interrupt(&signal))
+        .context("Failed to set the Ctrl+C handler.")?;
 
     let Suite {
         config: suite,
@@ -69,7 +79,7 @@ pub(crate) fn run() -> Result<()> {
     let teardown = build_command(&lifecycle.teardown, None, &[]);
     scoped(
         run_at(startup.as_ref(), Path::new("."), "suite startup"),
-        || execute_suite(&suite, &lifecycle, &suite_output_dir, runs),
+        || execute_suite(&suite, &lifecycle, &suite_output_dir, runs, &interrupt),
         || run_at(teardown.as_ref(), Path::new("."), "suite teardown"),
     )
 }
@@ -79,6 +89,7 @@ fn execute_suite(
     lifecycle: &Lifecycle,
     suite_output_dir: &Path,
     runs: Vec<(Option<String>, RunConfig)>,
+    interrupt: &Interrupt,
 ) -> Result<()> {
     if working_tree_has_modified_tracked_files()? {
         eprintln!(
@@ -111,6 +122,7 @@ fn execute_suite(
             &worktrees.pair,
             &output_dir,
             heading,
+            interrupt,
         )?;
 
         if let Some(name) = name {
@@ -198,6 +210,7 @@ fn compare(
     worktrees: &Pair<Worktree>,
     output_dir: &Path,
     heading: Option<&str>,
+    interrupt: &Interrupt,
 ) -> Result<Summary<Time>> {
     let RunConfig {
         isolate: _,
@@ -219,9 +232,11 @@ fn compare(
     let run_command = |parts: &[OsString]| build_command(parts, working_directory.clone(), &envs);
     let suite_commands = LifecycleCommands::new(suite_lifecycle, run_command);
     let benchmark_commands = LifecycleCommands::new(&lifecycle, run_command);
-    let benchmark = run_command(&command)
-        .expect("Clap requires at least one command argument.")
-        .with_timeout(timeout.map(|seconds| Duration::from_secs(seconds.get())));
+    let benchmark = Pair {
+        baseline: command_spec(&command, &worktrees.baseline, &working_directory, &envs),
+        candidate: command_spec(&command, &worktrees.candidate, &working_directory, &envs),
+    };
+    let timeout = timeout.map(|seconds| Duration::from_secs(seconds.get()));
 
     let repetition_count = repetition_count.get();
     let schedule = RunOrder::schedule(repetition_count, block_size, &mut schedule_rng);
@@ -237,6 +252,8 @@ fn compare(
                 worktrees,
                 &schedule,
                 output_dir,
+                interrupt,
+                timeout,
             )
         },
         || run_in_both(benchmark_commands.teardown.as_ref(), worktrees, "teardown"),
@@ -277,21 +294,26 @@ fn compare(
     Ok(summary)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn measure_all(
-    benchmark: &RunCommand,
+    benchmark: &Pair<CommandSpec>,
     suite: &LifecycleCommands,
     benchmark_lifecycle: &LifecycleCommands,
     worktrees: &Pair<Worktree>,
     schedule: &[RunOrder],
     output_dir: &Path,
+    interrupt: &Interrupt,
+    timeout: Option<Duration>,
 ) -> Result<Repetitions> {
     let repetition_count = schedule.len();
     let mut measured_repetitions = Vec::with_capacity(repetition_count);
 
     let log_path = output_dir.join("benchmark.log");
     let mut log = BenchmarkLog::new(
-        fs::File::create(&log_path)
-            .with_context(|| format!("Failed to create {}.", log_path.display()))?,
+        BufWriter::new(
+            fs::File::create(&log_path)
+                .with_context(|| format!("Failed to create {}.", log_path.display()))?,
+        ),
         repetition_count * 2,
     );
 
@@ -303,7 +325,6 @@ fn measure_all(
         ensure!(!interrupted(), "Interrupted.");
         let [first, second] = order.sides();
 
-        // TODO: Better handling of failing runs to find systematic errors. Should record and write out?
         let mut measure = |side: Side| -> Result<RunOutput> {
             measure_one(
                 benchmark,
@@ -312,6 +333,8 @@ fn measure_all(
                 side,
                 worktrees,
                 &mut log,
+                interrupt,
+                timeout,
             )
         };
         let first_output = measure(first)?;
@@ -331,64 +354,59 @@ fn measure_all(
     Repetitions::try_from(measured_repetitions)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn measure_one<W: std::io::Write>(
-    benchmark: &RunCommand,
+    benchmark: &Pair<CommandSpec>,
     suite: &LifecycleCommands,
     benchmark_lifecycle: &LifecycleCommands,
     side: Side,
     worktrees: &Pair<Worktree>,
     log: &mut BenchmarkLog<W>,
+    interrupt: &Interrupt,
+    timeout: Option<Duration>,
 ) -> Result<RunOutput> {
     let worktree = worktrees.get(side);
-    let progress = log.progress();
-    let run = log.next_run();
-    let phase = |name: &str| {
-        progress.set_prefix(format!("{side} {run}/{}", progress.length().unwrap_or(0)));
-        progress.set_message(name.to_owned());
-    };
-    phase("suite startup");
-    scoped(
-        run_in(
-            suite.startup_each_run.as_ref(),
+    log.phase(side, "suite startup");
+    let suite_start = run_in(
+        suite.startup_each_run.as_ref(),
+        worktree,
+        side,
+        "suite startup-each-run",
+    );
+    let body = suite_start.and_then(|()| {
+        log.phase(side, "benchmark startup");
+        let benchmark_start = run_in(
+            benchmark_lifecycle.startup_each_run.as_ref(),
             worktree,
             side,
-            "suite startup-each-run",
-        ),
-        || {
-            phase("benchmark startup");
-            scoped(
-                run_in(
-                    benchmark_lifecycle.startup_each_run.as_ref(),
-                    worktree,
-                    side,
-                    "benchmark startup-each-run",
-                ),
-                || {
-                    ensure!(!interrupted(), "Interrupted.");
-                    let output = log.measure(benchmark, side, worktree)?;
-                    ensure!(!interrupted(), "Interrupted.");
-                    Ok(output)
-                },
-                || {
-                    phase("benchmark teardown");
-                    run_in(
-                        benchmark_lifecycle.teardown_each_run.as_ref(),
-                        worktree,
-                        side,
-                        "benchmark teardown-each-run",
-                    )
-                },
-            )
-        },
-        || {
-            phase("suite teardown");
+            "benchmark startup-each-run",
+        );
+        let measured = benchmark_start.and_then(|()| {
+            ensure!(!interrupted(), "Interrupted.");
+            let output = log.measure(benchmark.get(side), interrupt, timeout, side)?;
+            ensure!(!interrupted(), "Interrupted.");
+            Ok(output)
+        });
+        log.phase(side, "benchmark teardown");
+        combine(
+            measured,
             run_in(
-                suite.teardown_each_run.as_ref(),
+                benchmark_lifecycle.teardown_each_run.as_ref(),
                 worktree,
                 side,
-                "suite teardown-each-run",
-            )
-        },
+                "benchmark teardown-each-run",
+            ),
+        )
+    });
+    log.phase(side, "suite teardown");
+    combine(
+        body,
+        run_in(
+            suite.teardown_each_run.as_ref(),
+            worktree,
+            side,
+            "suite teardown-each-run",
+        ),
     )
 }
 
@@ -404,6 +422,29 @@ fn build_command(
         working_directory,
         envs.to_vec(),
     ))
+}
+
+fn command_spec(
+    parts: &[OsString],
+    worktree: &Worktree,
+    working_directory: &Option<std::path::PathBuf>,
+    env: &[(String, String)],
+) -> CommandSpec {
+    let (program, args) = parts
+        .split_first()
+        .expect("Clap requires at least one command argument.");
+    let cwd = working_directory.as_ref().map_or_else(
+        || worktree.path().to_owned(),
+        |path| worktree.path().join(path),
+    );
+    CommandSpec::new(
+        program.clone(),
+        args.to_vec(),
+        cwd,
+        env.iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect(),
+    )
 }
 
 fn lifecycle_config(lifecycle: &Lifecycle) -> LifecycleConfig<'_> {
@@ -476,4 +517,28 @@ fn run_in_both(
     }
 
     first_error.map_or(Ok(()), Err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_second_interrupt_exits_with_status_130() -> Result<()> {
+        let status = process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "app::tests::second_interrupt_child", "--ignored"])
+            .status()?;
+        assert_eq!(status.code(), Some(130));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn second_interrupt_child() -> Result<()> {
+        INTERRUPTS.store(0, Ordering::Relaxed);
+        let interrupt = Interrupt::new()?;
+        handle_interrupt(&interrupt);
+        handle_interrupt(&interrupt);
+        unreachable!("the second interrupt exits")
+    }
 }

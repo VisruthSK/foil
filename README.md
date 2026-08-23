@@ -16,6 +16,8 @@ Run `b3 --help` for the full set of options.
 
 Each revision runs in its own clean worktree, so local changes are never part of a measurement; `b3` warns when tracked files have been modified.
 
+On Linux, `b3` requires pidfd support (Linux 5.3 or newer) and a writable delegated cgroup v2. Run `b3` from inside the delegated subtree; `B3_CGROUP_ROOT` only selects an existing delegation.
+
 ## Configuration
 
 The flags above can also be set in a TOML file, keyed by their long names. `b3` reads `b3.toml` from the working directory when present, or the file given by `--config`.
@@ -46,7 +48,7 @@ startup = ["cargo", "build", "--release"]
 command = ["./target/release/parse", "corpus/"]
 ```
 
-Benchmark lifecycle commands share its `working-directory` and `env`. Successful lifecycle output is suppressed; failures report both nonempty streams under explicit labels. Benchmark stdout and stderr are captured in `benchmark.log`. Teardown is still attempted after startup, benchmark, timeout, or interruption failures; the original error remains primary and additional cleanup errors are also reported.
+Benchmark lifecycle commands share the benchmark's `working-directory` and `env`. Successful lifecycle output is suppressed; failures report both nonempty streams under explicit labels. `b3` discards stdout and stderr from measured commands. If output is part of the workload, redirect it explicitly in the benchmark command. Teardown is still attempted after startup, benchmark, timeout, or interruption failures; the original error remains primary and additional cleanup errors are also reported.
 
 A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override ordinary options, and anything it leaves unset, including `command`, is inherited from the top level. Lifecycle commands are not inherited: suite and benchmark lifecycles remain distinct and compose. Its `env` table is merged with the top-level one, variable by variable, with the benchmark's values winning on conflicts:
 
@@ -99,8 +101,6 @@ render: 3.1s -> 3.0s [-4.02%, +1.15%]
 The ignored release-mode [statistical validation suite](docs/statistical-validation.md) reports synthetic exact recovery, credible-interval coverage, shrinkage behavior, and model misspecification.
 
 Simulation shows that the reported intervals materially under-cover at small repetition counts, including the default 30.
-
-The ignored release-mode [runner overhead diagnostic](docs/overhead.md) measures process-management overhead separately from inference quality.
 
 ## License
 

@@ -500,7 +500,7 @@ fn a_benchmark_can_set_its_working_directory() -> Result<()> {
     let project = repository(&format!(
         "{PREAMBLE}\n\
         [benchmarks.parse]\n\
-        command = ['git', 'rev-parse', '--show-prefix']\n\
+        command = ['git', 'ls-files', '--error-unmatch', '.gitkeep']\n\
         working-directory = 'sub'\n"
     ))?;
     fs::create_dir(project.path().join("sub"))?;
@@ -511,15 +511,6 @@ fn a_benchmark_can_set_its_working_directory() -> Result<()> {
     let (succeeded, _, stderr) = run(&project, &["--benchmark", "parse"])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
-    let log = fs::read_to_string(
-        project
-            .path()
-            .join("bench")
-            .join("parse")
-            .join("benchmark.log"),
-    )?;
-    assert!(log.contains("sub/"), "{log}");
-
     Ok(())
 }
 
@@ -528,7 +519,7 @@ fn a_benchmark_can_set_environment_variables() -> Result<()> {
     let project = repository(&format!(
         "{PREAMBLE}\n\
         [benchmarks.parse]\n\
-        command = ['git', 'config', 'user.name']\n\
+        command = ['git', 'config', '--get-regexp', '^user.name$', '^benchmark-env$']\n\
         \n\
         [benchmarks.parse.env]\n\
         GIT_CONFIG_COUNT = '1'\n\
@@ -538,15 +529,6 @@ fn a_benchmark_can_set_environment_variables() -> Result<()> {
 
     let (succeeded, _, stderr) = run(&project, &["--benchmark", "parse"])?;
     ensure!(succeeded, "b3 failed with {stderr}");
-
-    let log = fs::read_to_string(
-        project
-            .path()
-            .join("bench")
-            .join("parse")
-            .join("benchmark.log"),
-    )?;
-    assert!(log.contains("benchmark-env"), "{log}");
 
     Ok(())
 }
@@ -562,7 +544,7 @@ fn a_benchmarks_env_merges_with_the_top_level_env() -> Result<()> {
         GIT_CONFIG_VALUE_0 = 'top-level-env'\n\
         \n\
         [benchmarks.parse]\n\
-        command = ['git', 'config', 'user.name']\n\
+        command = ['git', 'config', '--get-regexp', '^user.name$', '^benchmark-env$']\n\
         \n\
         [benchmarks.parse.env]\n\
         GIT_CONFIG_VALUE_0 = 'benchmark-env'\n"
@@ -571,16 +553,6 @@ fn a_benchmarks_env_merges_with_the_top_level_env() -> Result<()> {
     let (succeeded, _, stderr) = run(&project, &["--benchmark", "parse"])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
-    let log = fs::read_to_string(
-        project
-            .path()
-            .join("bench")
-            .join("parse")
-            .join("benchmark.log"),
-    )?;
-    assert!(log.contains("benchmark-env"), "{log}");
-    assert!(!log.contains("top-level-env"), "{log}");
-
     Ok(())
 }
 
@@ -588,7 +560,7 @@ fn a_benchmarks_env_merges_with_the_top_level_env() -> Result<()> {
 fn working_directory_and_env_are_ordinary_options() -> Result<()> {
     let project = repository(&format!(
         "{PREAMBLE}working-directory = 'sub'\n\
-        command = ['git', 'config', 'user.name']\n\
+        command = ['git', 'config', '--get-regexp', '^user.name$', '^top-level-env$']\n\
         \n\
         [env]\n\
         GIT_CONFIG_COUNT = '1'\n\
@@ -603,16 +575,13 @@ fn working_directory_and_env_are_ordinary_options() -> Result<()> {
     let (succeeded, _, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
-    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
-    assert!(log.contains("top-level-env"), "{log}");
-
     Ok(())
 }
 
 #[test]
 fn an_explicit_env_argument_overrides_the_configuration() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}command = ['git', 'config', 'user.name']\n\
+        "{PREAMBLE}command = ['git', 'config', '--get-regexp', '^user.name$', '^argument-env$']\n\
         \n\
         [env]\n\
         GIT_CONFIG_COUNT = '1'\n\
@@ -633,10 +602,6 @@ fn an_explicit_env_argument_overrides_the_configuration() -> Result<()> {
     )?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
-    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
-    assert!(log.contains("argument-env"), "{log}");
-    assert!(!log.contains("configured-env"), "{log}");
-
     Ok(())
 }
 
@@ -645,14 +610,11 @@ fn benchmark_startup_runs_in_each_worktree_before_the_measured_runs() -> Result<
     let project = repository(&format!(
         "{PREAMBLE}[benchmarks.test]\n\
         startup = ['git', 'config', '--file', 'marker.txt', 'startup.ran', 'yes']\n\
-        command = ['git', 'config', '--file', 'marker.txt', 'startup.ran']\n"
+        command = ['git', 'config', '--file', 'marker.txt', '--get-regexp', '^startup.ran$', '^yes$']\n"
     ))?;
 
     let (succeeded, _, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
-
-    let log = fs::read_to_string(project.path().join("bench/test/benchmark.log"))?;
-    assert_eq!(log.matches("yes").count(), 20, "{log}");
 
     Ok(())
 }
@@ -785,16 +747,12 @@ fn suite_and_benchmark_each_run_startups_compose() -> Result<()> {
     let project = repository(&format!(
         "{PREAMBLE}startup-each-run = ['git', 'config', '--file', 'marker.txt', 'suite.ran', 'yes']\n\
          [benchmarks.test]\n\
-         startup-each-run = ['git', 'config', '--file', 'marker.txt', 'benchmark.ran', 'yes']\n\
-         command = ['git', 'config', '--file', 'marker.txt', '--get-regexp', 'ran']\n"
+         startup-each-run = ['git', 'config', '--file', 'marker.txt', '--rename-section', 'suite', 'benchmark']\n\
+         command = ['git', 'config', '--file', 'marker.txt', '--get-regexp', '^benchmark.ran$', '^yes$']\n"
     ))?;
 
     let (succeeded, _stdout, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
-    let log = fs::read_to_string(project.path().join("bench/test/benchmark.log"))?;
-    assert_eq!(log.matches("suite.ran yes").count(), 20, "{log}");
-    assert_eq!(log.matches("benchmark.ran yes").count(), 20, "{log}");
-
     Ok(())
 }
 
@@ -843,7 +801,6 @@ fn a_failing_benchmark_still_leaves_a_measurements_file() -> Result<()> {
     let error = failure(&project, &[])?;
 
     assert!(error.contains("benchmark failed"), "{error}");
-    assert!(error.contains("benchmark stderr]"), "{error}");
     assert_eq!(
         fs::read_to_string(project.path().join("bench").join("measurements.csv"))?,
         "repetition,order,baseline_seconds,candidate_seconds\n"
@@ -979,21 +936,12 @@ fn suite_and_benchmark_lifecycles_remain_distinct() -> Result<()> {
         [benchmarks.parse]\n\
         startup = ['git', 'config', '--file', 'marker.txt', 'startup.ran', 'benchmark-startup']\n\
         teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
-        command = ['git', 'config', '--file', 'marker.txt', 'startup.ran']\n"
+        command = ['git', 'config', '--file', 'marker.txt', '--get-regexp', '^startup.ran$', '^benchmark-startup$']\n"
     ))?;
 
     let error = failure(&project, &[])?;
 
     assert!(error.contains("The baseline teardown failed."), "{error}");
-
-    let log = fs::read_to_string(
-        project
-            .path()
-            .join("bench")
-            .join("parse")
-            .join("benchmark.log"),
-    )?;
-    assert_eq!(log.matches("benchmark-startup").count(), 20, "{log}");
 
     Ok(())
 }
@@ -1253,23 +1201,6 @@ fn every_benchmark_uses_the_suite_seed() -> Result<()> {
     Ok(())
 }
 
-fn logged_worktree(project: &TempDir, benchmark: &str) -> Result<String> {
-    let text = fs::read_to_string(
-        project
-            .path()
-            .join("bench")
-            .join(benchmark)
-            .join("benchmark.log"),
-    )?;
-    let entry: serde_json::Value =
-        serde_json::from_str(text.lines().next().expect("a benchmark log has entries"))?;
-    Ok(entry["stdout"]
-        .as_str()
-        .expect("stdout is a string")
-        .trim()
-        .to_owned())
-}
-
 #[test]
 fn worktrees_are_shared_unless_isolation_is_requested() -> Result<()> {
     const WORKTREES: &str = "baseline = 'HEAD'\n\
@@ -1278,25 +1209,17 @@ fn worktrees_are_shared_unless_isolation_is_requested() -> Result<()> {
         repetitions = 10\n\
         draws = 1000\n\
         [benchmarks.first]\n\
-        command = ['git', 'rev-parse', '--show-toplevel']\n\
+        command = ['git', 'config', '--file', 'shared.marker', 'first.ran', 'yes']\n\
         [benchmarks.second]\n\
-        command = ['git', 'rev-parse', '--show-toplevel']\n";
+        command = ['git', 'config', '--file', 'shared.marker', '--get-regexp', '^first.ran$', '^yes$']\n";
 
     let shared = repository(WORKTREES)?;
     let (succeeded, _, stderr) = run(&shared, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
-    assert_eq!(
-        logged_worktree(&shared, "first")?,
-        logged_worktree(&shared, "second")?
-    );
 
     let isolated = repository(WORKTREES)?;
-    let (succeeded, _, stderr) = run(&isolated, &["--isolate"])?;
-    ensure!(succeeded, "b3 failed with {stderr}");
-    assert_ne!(
-        logged_worktree(&isolated, "first")?,
-        logged_worktree(&isolated, "second")?
-    );
+    let error = failure(&isolated, &["--isolate"])?;
+    assert!(error.contains("benchmark failed"), "{error}");
 
     let selective = repository(
         "baseline = 'HEAD'\n\
@@ -1306,22 +1229,20 @@ fn worktrees_are_shared_unless_isolation_is_requested() -> Result<()> {
         draws = 1000\n\
         [benchmarks.isolated]\n\
         isolate = true\n\
-        command = ['git', 'rev-parse', '--show-toplevel']\n\
+        command = ['git', 'update-index', '--force-remove', 'sentinel']\n\
         [benchmarks.shared_one]\n\
-        command = ['git', 'rev-parse', '--show-toplevel']\n\
+        startup = ['git', 'config', '--file', 'shared.marker', 'shared.ran', 'yes']\n\
+        command = ['git', 'ls-files', '--error-unmatch', 'sentinel']\n\
         [benchmarks.shared_two]\n\
-        command = ['git', 'rev-parse', '--show-toplevel']\n",
+        command = ['git', 'config', '--file', 'shared.marker', '--get-regexp', '^shared.ran$', '^yes$']\n",
+    )?;
+    fs::write(selective.path().join("sentinel"), "tracked")?;
+    git(&selective, &["add", "sentinel"])?;
+    git(
+        &selective,
+        &["commit", "--quiet", "--message", "add sentinel"],
     )?;
     let (succeeded, _, stderr) = run(&selective, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
-    assert_ne!(
-        logged_worktree(&selective, "isolated")?,
-        logged_worktree(&selective, "shared_one")?
-    );
-    assert_eq!(
-        logged_worktree(&selective, "shared_one")?,
-        logged_worktree(&selective, "shared_two")?
-    );
-
     Ok(())
 }

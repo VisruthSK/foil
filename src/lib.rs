@@ -3,6 +3,7 @@ mod app;
 mod artifact;
 mod config;
 mod metric;
+mod platform;
 mod posterior;
 mod repetition;
 mod report;
