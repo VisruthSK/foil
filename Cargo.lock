@@ -229,6 +229,7 @@ dependencies = [
  "indicatif",
  "libc",
  "rand",
+ "rand_core",
  "rand_distr",
  "serde",
  "serde_json",

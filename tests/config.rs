@@ -1,5 +1,5 @@
 use anyhow::{Result, ensure};
-use foil::{Interval, Shrinkage, analyze_measurements, write_posterior_csv};
+use foil::{Interval, Metric, Shrinkage, analyze_measurements};
 use std::{fs, num::NonZeroUsize, process::Command};
 use tempfile::{TempDir, tempdir};
 
@@ -124,6 +124,13 @@ fn a_complete_configuration_runs_without_any_arguments() -> Result<()> {
         assert!(path.is_file(), "{} is missing.", path.display());
     }
 
+    let config: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+        project.path().join("benchmark/config.json"),
+    )?)?;
+    assert_eq!(config["seed"], 0);
+    assert_eq!(config["foil_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(config["command"], serde_json::json!(["git", "--version"]));
+
     Ok(())
 }
 
@@ -134,6 +141,12 @@ fn saved_measurements_reproduce_the_full_analysis() -> Result<()> {
     ensure!(succeeded, "foil failed with {stderr}");
 
     let output = project.path().join("bench");
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output.join("config.json"))?)?;
+    assert_eq!(config["foil_version"], env!("CARGO_PKG_VERSION"));
+    let seed = config["seed"]
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("The recorded seed is not an integer."))?;
     let intervals = [
         Interval::new(0.5)?,
         Interval::new(0.8)?,
@@ -141,18 +154,29 @@ fn saved_measurements_reproduce_the_full_analysis() -> Result<()> {
     ];
     let analysis = analyze_measurements(
         &output.join("measurements.csv"),
-        0,
+        seed,
         NonZeroUsize::new(1_000).unwrap(),
         Shrinkage::NONE,
         &intervals,
     )?;
-    let reproduced = output.join("posterior-reproduced.csv");
-    write_posterior_csv(&reproduced, &analysis.posterior)?;
+    let expected: Vec<(f64, f64)> = fs::read_to_string(output.join("posterior.csv"))?
+        .lines()
+        .skip(1)
+        .map(|line| {
+            let (baseline, candidate) = line
+                .split_once(',')
+                .ok_or_else(|| anyhow::anyhow!("Invalid posterior row."))?;
+            Ok((baseline.parse()?, candidate.parse()?))
+        })
+        .collect::<Result<_>>()?;
+    let actual: Vec<_> = analysis
+        .posterior
+        .draws()
+        .iter()
+        .map(|draw| (draw.baseline.base(), draw.candidate.base()))
+        .collect();
 
-    assert_eq!(
-        fs::read_to_string(reproduced)?,
-        fs::read_to_string(output.join("posterior.csv"))?
-    );
+    assert_eq!(actual, expected);
     Ok(())
 }
 
@@ -218,6 +242,23 @@ fn arguments_override_the_configuration() -> Result<()> {
         "{error}"
     );
 
+    Ok(())
+}
+
+#[test]
+fn an_unnamed_command_override_keeps_configured_options() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}command = ['git', 'cat-file', '-p', 'absent-object']\n"
+    ))?;
+
+    let (succeeded, _, stderr) = run(&project, &["--", "git", "--version"])?;
+    ensure!(succeeded, "foil failed with {stderr}");
+
+    let config: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+        project.path().join("bench/config.json"),
+    )?)?;
+    assert_eq!(config["command"], serde_json::json!(["git", "--version"]));
+    assert_eq!(config["repetitions"], 10);
     Ok(())
 }
 
@@ -653,6 +694,67 @@ fn a_failing_benchmark_startup_stops_before_the_measured_runs() -> Result<()> {
         &project,
         &["rev-parse", "--verify", "refs/tags/startup-cleaned-up"],
     )?;
+
+    Ok(())
+}
+
+#[test]
+fn stale_outputs_are_removed_for_every_selected_benchmark() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}[benchmarks.first]\n\
+        startup = ['git', 'cat-file', '-p', 'absent-object']\n\
+        command = ['git', '--version']\n\
+        [benchmarks.second]\n\
+        command = ['git', '--version']\n"
+    ))?;
+    let bench = project.path().join("bench");
+    for name in ["first", "second"] {
+        let output = bench.join(name);
+        fs::create_dir_all(&output)?;
+        for artifact in [
+            "config.json",
+            "benchmark.log",
+            "measurements.csv",
+            "posterior.csv",
+            "report.txt",
+        ] {
+            fs::write(output.join(artifact), "stale")?;
+        }
+    }
+    fs::write(bench.join("report_short.txt"), "stale")?;
+
+    let error = failure(&project, &[])?;
+    assert!(error.contains("The baseline startup failed."), "{error}");
+
+    for name in ["first", "second"] {
+        let output = bench.join(name);
+        assert_ne!(fs::read_to_string(output.join("config.json"))?, "stale");
+        for artifact in [
+            "benchmark.log",
+            "measurements.csv",
+            "posterior.csv",
+            "report.txt",
+        ] {
+            assert!(
+                !output.join(artifact).exists(),
+                "{name}/{artifact} survived"
+            );
+        }
+    }
+    assert!(!bench.join("report_short.txt").exists());
+
+    Ok(())
+}
+
+#[test]
+fn a_generated_output_that_cannot_be_removed_is_fatal() -> Result<()> {
+    let project = repository(&format!("{PREAMBLE}command = ['git', '--version']\n"))?;
+    fs::create_dir_all(project.path().join("bench/posterior.csv"))?;
+    fs::write(project.path().join("bench/report.txt"), "stale")?;
+
+    let error = failure(&project, &[])?;
+    assert!(error.contains("Failed to remove"), "{error}");
+    assert!(!project.path().join("bench/report.txt").exists());
 
     Ok(())
 }

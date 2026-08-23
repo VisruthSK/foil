@@ -4,19 +4,19 @@ use std::{
     process::Command,
 };
 
-pub struct Worktree {
+pub(crate) struct Worktree {
     path: PathBuf,
     revision: Revision,
 }
 
 #[derive(Clone)]
-pub struct Revision {
+pub(crate) struct Revision {
     name: String,
     hash: String,
 }
 
 impl Revision {
-    pub fn resolve(name: String) -> Result<Self> {
+    pub(crate) fn resolve(name: String) -> Result<Self> {
         let commit = format!("{name}^{{commit}}");
         anyhow::ensure!(!name.is_empty(), "Git revision must not be empty.");
         let output = Command::new("git")
@@ -36,11 +36,11 @@ impl Revision {
         Ok(Self { name, hash })
     }
 
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
-    pub fn hash(&self) -> &str {
+    pub(crate) fn hash(&self) -> &str {
         &self.hash
     }
 }
@@ -55,7 +55,7 @@ pub(crate) fn working_tree_has_modified_tracked_files() -> Result<bool> {
 }
 
 impl Worktree {
-    pub fn create(path: PathBuf, revision: Revision) -> Result<Self> {
+    pub(crate) fn create(path: PathBuf, revision: Revision) -> Result<Self> {
         let status = Command::new("git")
             .args(["worktree", "add", "--quiet", "--detach"])
             .arg(&path)
@@ -77,7 +77,7 @@ impl Worktree {
         &self.path
     }
 
-    pub fn revision(&self) -> &Revision {
+    pub(crate) fn revision(&self) -> &Revision {
         &self.revision
     }
 }

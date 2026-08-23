@@ -8,11 +8,12 @@ use crate::{
 };
 
 use anyhow::{Context, Result, ensure};
-use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
+use rand::rngs::Xoshiro256PlusPlus;
+use rand_core::SeedableRng;
 use std::{
     ffi::OsString,
     fs,
-    io::BufWriter,
+    io::{BufWriter, ErrorKind},
     path::Path,
     process,
     sync::atomic::{AtomicU8, Ordering},
@@ -73,6 +74,7 @@ pub(crate) fn run() -> Result<()> {
         runs,
     } = Cli::suite()?;
 
+    clear_outputs(&suite_output_dir, &runs)?;
     write_configs(&suite, &lifecycle, &runs)?;
 
     let startup = build_command(&lifecycle.startup, None, &[]);
@@ -168,6 +170,34 @@ fn output_directory(name: Option<&str>, config: &RunConfig) -> std::path::PathBu
     )
 }
 
+fn clear_outputs(suite_output_dir: &Path, runs: &[(Option<String>, RunConfig)]) -> Result<()> {
+    let mut result = Ok(());
+    for (name, config) in runs {
+        let output_dir = output_directory(name.as_deref(), config);
+        for artifact in [
+            "config.json",
+            "benchmark.log",
+            "measurements.csv",
+            "posterior.csv",
+            "report.txt",
+        ] {
+            result = combine(result, remove_generated(&output_dir.join(artifact)));
+        }
+    }
+    combine(
+        result,
+        remove_generated(&suite_output_dir.join("report_short.txt")),
+    )
+}
+
+fn remove_generated(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("Failed to remove {}.", path.display())),
+    }
+}
+
 fn write_configs(
     suite: &ResolvedSuiteConfig,
     suite_lifecycle: &Lifecycle,
@@ -227,7 +257,7 @@ fn compare(
         command,
     } = config;
 
-    let mut schedule_rng = Xoshiro256PlusPlus::seed_from_u64(suite.seed);
+    let mut schedule_rng = Xoshiro256PlusPlus::seed_from_u64(crate::seed::schedule(suite.seed));
 
     let run_command = |parts: &[OsString]| build_command(parts, working_directory.clone(), &envs);
     let suite_commands = LifecycleCommands::new(suite_lifecycle, run_command);

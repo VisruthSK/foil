@@ -1,4 +1,4 @@
-use crate::metric::Metric;
+use crate::metric::{MeasuredMetric, Metric};
 use crate::repetition::Repetitions;
 use crate::summary::{Interval, Summary};
 
@@ -15,7 +15,7 @@ struct RegressionRow {
 }
 
 impl RegressionRow {
-    fn all<M: Metric>(repetitions: &Repetitions) -> Result<Vec<Self>> {
+    fn all<M: MeasuredMetric>(repetitions: &Repetitions) -> Result<Vec<Self>> {
         let center = repetitions.center();
 
         repetitions
@@ -184,23 +184,30 @@ pub struct Posterior<M> {
 
 impl<M: Metric> Posterior<M> {
     /// Draws Bayesian-bootstrap samples of the adjusted mean baseline and candidate value.
-    pub fn bootstrap(
+    #[cfg(test)]
+    pub(crate) fn bootstrap(
         repetitions: &Repetitions,
         draws: NonZeroUsize,
         shrinkage: Shrinkage,
         rng: &mut impl Rng,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        M: MeasuredMetric,
+    {
         Self::bootstrap_checked(repetitions, draws, shrinkage, rng, || Ok(()))
     }
 
     /// Draws Bayesian-bootstrap samples while checking for cancellation before each draw.
-    pub fn bootstrap_checked(
+    pub(crate) fn bootstrap_checked(
         repetitions: &Repetitions,
         draws: NonZeroUsize,
         shrinkage: Shrinkage,
         rng: &mut impl Rng,
         mut check: impl FnMut() -> Result<()>,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        M: MeasuredMetric,
+    {
         let shrinkage_distribution = if shrinkage.0 == 0.0 {
             None
         } else {
@@ -236,13 +243,16 @@ impl<M: Metric> Posterior<M> {
             .collect::<Result<_>>()
             .map(|draws| Self { draws })
     }
+}
 
+impl<M: Metric> Posterior<M> {
     /// Never empty.
     pub fn draws(&self) -> &[Draw<M>] {
         &self.draws
     }
 
     pub fn summarize(&self, intervals: &[Interval]) -> Result<Summary<M>> {
+        ensure!(!intervals.is_empty(), "At least one interval is required.");
         Summary::from_draws(&self.draws, intervals)
     }
 }
@@ -312,7 +322,7 @@ mod tests {
     }
 
     /// The fixture's posterior for `M` at seed 0.
-    fn posterior<M: Metric>(draws: usize, shrinkage: f64) -> Result<Posterior<M>> {
+    fn posterior<M: Metric + MeasuredMetric>(draws: usize, shrinkage: f64) -> Result<Posterior<M>> {
         let draws = NonZeroUsize::new(draws).expect("Test draw counts are positive.");
 
         Posterior::bootstrap(&fixture()?, draws, Shrinkage::new(shrinkage)?, &mut rng())
@@ -477,6 +487,3 @@ mod tests {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod calibration;

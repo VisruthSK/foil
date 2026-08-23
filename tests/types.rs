@@ -1,5 +1,4 @@
-use foil::{Metric, Pair, PeakMemory, Repetitions, RunOrder, Shrinkage, Side, Time, Unit};
-use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
+use foil::{Metric, PeakMemory, Shrinkage, Time, Unit};
 
 #[test]
 fn time_steps_down_through_si_prefixes() {
@@ -42,87 +41,6 @@ fn a_fall_scales_like_a_rise() {
     let fall = Time::display_unit(Time::from_base(-2e-3));
 
     assert_eq!(fall, Time::display_unit(Time::from_base(2e-3)));
-}
-
-#[test]
-fn sides_and_from_execution_order_agree() {
-    let labelled = Pair {
-        baseline: Side::Baseline,
-        candidate: Side::Candidate,
-    };
-
-    for order in [RunOrder::BaselineFirst, RunOrder::CandidateFirst] {
-        assert_eq!(
-            Pair::from_execution_order(order.sides(), order),
-            labelled,
-            "{order:?}."
-        );
-    }
-}
-
-fn schedule(repetitions: usize, block_size: usize, seed: u64) -> Vec<RunOrder> {
-    RunOrder::schedule(
-        repetitions,
-        std::num::NonZeroUsize::new(block_size).unwrap(),
-        &mut Xoshiro256PlusPlus::seed_from_u64(seed),
-    )
-}
-
-fn baseline_firsts(orders: &[RunOrder]) -> usize {
-    orders
-        .iter()
-        .filter(|&&order| order == RunOrder::BaselineFirst)
-        .count()
-}
-
-#[test]
-fn schedules_are_balanced() {
-    for repetitions in [Repetitions::MINIMUM, Repetitions::MINIMUM + 1] {
-        let orders = schedule(repetitions, 4, 0);
-        let first = baseline_firsts(&orders);
-
-        assert_eq!(orders.len(), repetitions);
-        assert!(
-            first.abs_diff(repetitions - first) <= 1,
-            "{repetitions} repetitions split {first}/{}.",
-            repetitions - first
-        );
-    }
-}
-
-#[test]
-fn full_blocks_are_balanced() {
-    let orders = schedule(14, 4, 0);
-
-    for block in orders[..12].chunks_exact(4) {
-        assert_eq!(baseline_firsts(block), 2, "{block:?}");
-    }
-}
-
-#[test]
-fn odd_blocks_balance_their_surplus_before_shuffling() {
-    for block_size in [1, 3, 5] {
-        for seed in 0..64 {
-            let orders = schedule(60, block_size, seed);
-            assert_eq!(
-                baseline_firsts(&orders),
-                orders.len() / 2,
-                "block_size={block_size}, seed={seed}"
-            );
-            assert!(orders.chunks(block_size).all(|block| {
-                baseline_firsts(block).abs_diff(block.len() - baseline_firsts(block)) <= 1
-            }));
-        }
-    }
-}
-
-#[test]
-fn the_odd_repetition_falls_on_either_side() {
-    let counts: Vec<usize> = (0..16)
-        .map(|seed| baseline_firsts(&schedule(Repetitions::MINIMUM + 1, 4, seed)))
-        .collect();
-
-    assert!(counts.contains(&5) && counts.contains(&6), "{counts:?}");
 }
 
 #[test]

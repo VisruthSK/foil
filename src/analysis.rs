@@ -3,7 +3,8 @@ use crate::{
     Interval, Pair, Posterior, Repetition, Repetitions, RunOrder, Shrinkage, Summary, Time,
 };
 use anyhow::{Context, Result, ensure};
-use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
+use rand::rngs::Xoshiro256PlusPlus;
+use rand_core::SeedableRng;
 use std::{
     fs::File,
     io::{BufRead, BufReader},
@@ -48,11 +49,12 @@ pub(crate) fn analyze_checked(
     intervals: &[Interval],
     check: impl FnMut() -> Result<()>,
 ) -> Result<Analysis> {
+    ensure!(!intervals.is_empty(), "At least one interval is required.");
     let posterior = Posterior::bootstrap_checked(
         repetitions,
         draws,
         shrinkage,
-        &mut Xoshiro256PlusPlus::seed_from_u64(seed),
+        &mut Xoshiro256PlusPlus::seed_from_u64(crate::seed::posterior(seed)),
         check,
     )?;
     let summary = posterior.summarize(intervals)?;
@@ -182,6 +184,22 @@ mod tests {
         fs::write(&path, csv)?;
 
         assert!(read_measurements(&path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_interval_set_is_rejected() -> Result<()> {
+        let error = analyze(
+            &repetitions()?,
+            0,
+            NonZeroUsize::new(1_000).unwrap(),
+            Shrinkage::NONE,
+            &[],
+        )
+        .err()
+        .context("An empty interval set should fail.")?;
+
+        assert!(error.to_string().contains("interval"), "{error}");
         Ok(())
     }
 }

@@ -9,29 +9,29 @@ use std::{
     path::Path,
 };
 
-pub struct Config<'a> {
-    pub seed: u64,
-    pub repetitions: usize,
-    pub block_size: usize,
-    pub draws: usize,
-    pub timeout_seconds: Option<u64>,
-    pub isolate: bool,
-    pub shrinkage: Shrinkage,
-    pub intervals: &'a [Interval],
-    pub working_directory: Option<&'a Path>,
-    pub env: &'a [(String, String)],
-    pub baseline: &'a Revision,
-    pub candidate: &'a Revision,
-    pub suite_lifecycle: LifecycleConfig<'a>,
-    pub benchmark_lifecycle: LifecycleConfig<'a>,
-    pub command: &'a [OsString],
+pub(crate) struct Config<'a> {
+    pub(crate) seed: u64,
+    pub(crate) repetitions: usize,
+    pub(crate) block_size: usize,
+    pub(crate) draws: usize,
+    pub(crate) timeout_seconds: Option<u64>,
+    pub(crate) isolate: bool,
+    pub(crate) shrinkage: Shrinkage,
+    pub(crate) intervals: &'a [Interval],
+    pub(crate) working_directory: Option<&'a Path>,
+    pub(crate) env: &'a [(String, String)],
+    pub(crate) baseline: &'a Revision,
+    pub(crate) candidate: &'a Revision,
+    pub(crate) suite_lifecycle: LifecycleConfig<'a>,
+    pub(crate) benchmark_lifecycle: LifecycleConfig<'a>,
+    pub(crate) command: &'a [OsString],
 }
 
-pub struct LifecycleConfig<'a> {
-    pub startup: &'a [OsString],
-    pub startup_each_run: &'a [OsString],
-    pub teardown_each_run: &'a [OsString],
-    pub teardown: &'a [OsString],
+pub(crate) struct LifecycleConfig<'a> {
+    pub(crate) startup: &'a [OsString],
+    pub(crate) startup_each_run: &'a [OsString],
+    pub(crate) teardown_each_run: &'a [OsString],
+    pub(crate) teardown: &'a [OsString],
 }
 
 fn utf8<'a>(name: &str, command: &'a [OsString]) -> Result<Vec<&'a str>> {
@@ -44,7 +44,7 @@ fn utf8<'a>(name: &str, command: &'a [OsString]) -> Result<Vec<&'a str>> {
         .collect()
 }
 
-pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
+pub(crate) fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
     let value = json!({
         "seed": config.seed,
         "repetitions": config.repetitions,
@@ -88,13 +88,13 @@ pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
     Ok(())
 }
 
-pub struct MeasurementsCsv {
+pub(crate) struct MeasurementsCsv {
     writer: BufWriter<File>,
     rows: usize,
 }
 
 impl MeasurementsCsv {
-    pub fn create(path: &Path) -> Result<Self> {
+    pub(crate) fn create(path: &Path) -> Result<Self> {
         let mut writer = BufWriter::new(File::create(path)?);
 
         writeln!(
@@ -106,7 +106,7 @@ impl MeasurementsCsv {
         Ok(Self { writer, rows: 0 })
     }
 
-    pub fn append(&mut self, repetition: &Repetition) -> Result<()> {
+    pub(crate) fn append(&mut self, repetition: &Repetition) -> Result<()> {
         let Pair {
             baseline,
             candidate,
@@ -132,7 +132,7 @@ impl MeasurementsCsv {
     }
 }
 
-pub fn write_posterior_csv<M: Metric>(path: &Path, posterior: &Posterior<M>) -> Result<()> {
+pub(crate) fn write_posterior_csv<M: Metric>(path: &Path, posterior: &Posterior<M>) -> Result<()> {
     let mut writer = BufWriter::new(File::create(path)?);
     let unit = M::BASE_UNIT;
 

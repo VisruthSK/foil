@@ -73,9 +73,9 @@ RAYON_NUM_THREADS = "1"
 
 With no `--benchmark`, every benchmark in the table runs in declaration order, each in its own `--output-dir` subdirectory named after it. Pass `--benchmark render parse` to run only some of them in the order given. A configuration with no `[benchmarks]` table always runs a single, unnamed command, exactly as with no configuration file at all.
 
-One seed is drawn for the suite when `seed` is omitted, recorded in every benchmark's `config.json`, and used for every benchmark's run schedule and bootstrap. Benchmarks share the same baseline and candidate worktrees by default. Set `isolate = true` on a benchmark that needs a fresh pair, or pass `--isolate` to isolate every selected benchmark.
+One seed is drawn for the suite when `seed` is omitted and recorded in every benchmark's `config.json`. Fixed domain constants derive separate schedule and posterior streams from it. Benchmarks share the same baseline and candidate worktrees by default. Set `isolate = true` on a benchmark that needs a fresh pair, or pass `--isolate` to isolate every selected benchmark.
 
-The intended workflow is a `foil.toml` with named benchmarks, run with a plain `foil`; the trailing `-- <COMMAND>...` is for one-off runs that skip configuration entirely.
+The intended workflow is a `foil.toml` with named benchmarks, run with a plain `foil`. For an unnamed run, a trailing `-- <COMMAND>...` replaces the configured top-level command while keeping the other configured options. Named benchmarks keep their configured commands.
 
 ## Output
 
@@ -95,12 +95,6 @@ Running more than one benchmark also prints a one-line-per-benchmark summary and
 parse: 1.2s -> 554.0ms [-52.41%, -51.31%]
 render: 3.1s -> 3.0s [-4.02%, +1.15%]
 ```
-
-## Statistical validation
-
-The ignored release-mode [statistical validation suite](docs/statistical-validation.md) reports synthetic exact recovery, credible-interval coverage, shrinkage behavior, and model misspecification.
-
-Simulation shows that the reported intervals materially under-cover at small repetition counts, including the default 30.
 
 ## License
 
