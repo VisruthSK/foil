@@ -1,6 +1,6 @@
 #[cfg(not(windows))]
 use std::process::{Command, Stdio};
-use std::{ffi::OsString, path::PathBuf, process::ExitStatus};
+use std::{ffi::OsString, io, path::PathBuf, process::ExitStatus};
 
 pub(crate) enum Wait {
     Exited(ExitStatus),
@@ -18,6 +18,8 @@ pub(crate) struct CommandSpec {
     pub(crate) env: Vec<(OsString, OsString)>,
 
     #[cfg(windows)]
+    pub(crate) application: Vec<u16>,
+    #[cfg(windows)]
     pub(crate) command_line: Vec<u16>,
     #[cfg(windows)]
     pub(crate) environment: Vec<u16>,
@@ -31,26 +33,28 @@ impl CommandSpec {
         args: Vec<OsString>,
         cwd: PathBuf,
         env: Vec<(OsString, OsString)>,
-    ) -> Self {
+    ) -> io::Result<Self> {
         #[cfg(windows)]
         {
+            let application = windows_application(&program, &env)?;
             let command_line = windows_command_line(&program, &args);
             let environment = windows_environment(&env);
             let cwd_wide = wide(cwd.as_os_str());
-            Self {
+            Ok(Self {
                 program,
+                application,
                 command_line,
                 environment,
                 cwd_wide,
-            }
+            })
         }
         #[cfg(not(windows))]
-        Self {
+        Ok(Self {
             program,
             args,
             cwd,
             env,
-        }
+        })
     }
 
     #[cfg(not(windows))]
@@ -85,6 +89,72 @@ pub(crate) use windows::{Interrupt, Workload};
 fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     value.encode_wide().chain(Some(0)).collect()
+}
+
+#[cfg(windows)]
+fn windows_application(
+    program: &std::ffi::OsStr,
+    overrides: &[(OsString, OsString)],
+) -> io::Result<Vec<u16>> {
+    use std::path::Path;
+    if program.is_empty() || Path::new(program).file_name().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "program path has no file name",
+        ));
+    }
+    let path = Path::new(program);
+    if path.components().count() > 1 {
+        return Ok(wide(with_exe(path).as_os_str()));
+    }
+    let child_path = overrides
+        .iter()
+        .rev()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| value.as_os_str());
+    let mut directories = Vec::new();
+    if let Some(path) = child_path {
+        directories.extend(std::env::split_paths(path).filter(|path| !path.as_os_str().is_empty()));
+    }
+    if let Ok(mut path) = std::env::current_exe() {
+        path.pop();
+        directories.push(path);
+    }
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        directories.push(PathBuf::from(&root).join("System32"));
+        directories.push(root.into());
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        directories
+            .extend(std::env::split_paths(&path).filter(|path| !path.as_os_str().is_empty()));
+    }
+    directories
+        .into_iter()
+        .map(|directory| directory.join(program))
+        .find_map(|path| searched_executable(&path))
+        .map(|path| wide(path.as_os_str()))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "program not found"))
+}
+
+#[cfg(windows)]
+fn searched_executable(path: &std::path::Path) -> Option<PathBuf> {
+    let mut path = path.to_owned();
+    if path.extension().is_none() {
+        path.set_extension("exe");
+    }
+    path.is_file().then_some(path)
+}
+
+#[cfg(windows)]
+fn with_exe(path: &std::path::Path) -> PathBuf {
+    if path.extension().is_none() {
+        let mut executable = path.to_owned();
+        executable.set_extension("exe");
+        if executable.is_file() {
+            return executable;
+        }
+    }
+    path.to_owned()
 }
 
 #[cfg(windows)]
@@ -170,7 +240,7 @@ mod tests {
                 .collect(),
             env::current_dir()?,
             env,
-        ))
+        )?)
     }
 
     fn spawn(spec: &CommandSpec) -> Result<Workload> {
@@ -315,6 +385,31 @@ mod tests {
         interrupt.signal();
         ensure!(matches!(
             workload.wait(&interrupt, Some(Duration::ZERO))?,
+            Wait::Exited(status) if status.success()
+        ));
+        workload.terminate()?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_resolves_the_executable_from_the_child_path() -> Result<()> {
+        let directory = tempdir()?;
+        let executable = directory.path().join("path-only-tool.exe");
+        fs::copy(env::current_exe()?, &executable)?;
+        let command = CommandSpec::new(
+            "path-only-tool".into(),
+            ["--exact", "platform::tests::noop_child", "--ignored"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+            env::current_dir()?,
+            vec![("PATH".into(), directory.path().as_os_str().to_owned())],
+        )?;
+        let interrupt = Interrupt::new()?;
+        let mut workload = spawn(&command)?;
+        ensure!(matches!(
+            workload.wait(&interrupt, Some(Duration::from_secs(2)))?,
             Wait::Exited(status) if status.success()
         ));
         workload.terminate()?;

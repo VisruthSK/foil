@@ -163,7 +163,7 @@ impl Prepared {
                 let _ = remove_when_empty(&cgroup);
                 return Err(io::Error::new(
                     error.kind(),
-                    format!("pidfd_open failed; b3 requires Linux 5.3 or newer: {error}"),
+                    format!("pidfd_open failed; b3 requires Linux 5.14 or newer: {error}"),
                 ));
             }
         };

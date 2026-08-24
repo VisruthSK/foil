@@ -150,7 +150,7 @@ impl Prepared {
         let mut info: PROCESS_INFORMATION = unsafe { zeroed() };
         bool_result(unsafe {
             CreateProcessW(
-                ptr::null(),
+                spec.application.as_ptr(),
                 command_line.as_mut_ptr(),
                 ptr::null(),
                 ptr::null(),

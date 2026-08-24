@@ -16,7 +16,7 @@ Run `b3 --help` for the full set of options.
 
 Each revision runs in its own clean worktree, so local changes are never part of a measurement; `b3` warns when tracked files have been modified.
 
-On Linux, `b3` requires pidfd support (Linux 5.3 or newer) and a writable delegated cgroup v2. Run `b3` from inside the delegated subtree; `B3_CGROUP_ROOT` only selects an existing delegation.
+On Linux, `b3` requires Linux 5.14 or newer and a writable delegated cgroup v2. Run `b3` from inside the delegated subtree; `B3_CGROUP_ROOT` only selects an existing delegation.
 
 ## Configuration
 

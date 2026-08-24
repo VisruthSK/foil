@@ -233,8 +233,8 @@ fn compare(
     let suite_commands = LifecycleCommands::new(suite_lifecycle, run_command);
     let benchmark_commands = LifecycleCommands::new(&lifecycle, run_command);
     let benchmark = Pair {
-        baseline: command_spec(&command, &worktrees.baseline, &working_directory, &envs),
-        candidate: command_spec(&command, &worktrees.candidate, &working_directory, &envs),
+        baseline: command_spec(&command, &worktrees.baseline, &working_directory, &envs)?,
+        candidate: command_spec(&command, &worktrees.candidate, &working_directory, &envs)?,
     };
     let timeout = timeout.map(|seconds| Duration::from_secs(seconds.get()));
 
@@ -429,7 +429,7 @@ fn command_spec(
     worktree: &Worktree,
     working_directory: &Option<std::path::PathBuf>,
     env: &[(String, String)],
-) -> CommandSpec {
+) -> Result<CommandSpec> {
     let (program, args) = parts
         .split_first()
         .expect("Clap requires at least one command argument.");
@@ -437,14 +437,14 @@ fn command_spec(
         || worktree.path().to_owned(),
         |path| worktree.path().join(path),
     );
-    CommandSpec::new(
+    Ok(CommandSpec::new(
         program.clone(),
         args.to_vec(),
         cwd,
         env.iter()
             .map(|(key, value)| (key.into(), value.into()))
             .collect(),
-    )
+    )?)
 }
 
 fn lifecycle_config(lifecycle: &Lifecycle) -> LifecycleConfig<'_> {
