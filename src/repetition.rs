@@ -2,7 +2,7 @@ use crate::run::RunOutput;
 
 use anyhow::{Result, ensure};
 use rand::{Rng, RngExt, seq::SliceRandom};
-use std::fmt;
+use std::{fmt, num::NonZeroUsize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -69,21 +69,34 @@ impl RunOrder {
         }
     }
 
-    // TODO: Swap to Latin square?
-    pub fn schedule(repetitions: usize, rng: &mut impl Rng) -> Vec<Self> {
-        let mut orders = [Self::BaselineFirst, Self::CandidateFirst].repeat(repetitions / 2);
-
-        if repetitions % 2 == 1 {
-            orders.push(if rng.random() {
+    pub fn schedule(repetitions: usize, block_size: NonZeroUsize, rng: &mut impl Rng) -> Vec<Self> {
+        let block_size = block_size.get();
+        let full_blocks = repetitions / block_size;
+        let remainder = repetitions % block_size;
+        let odd_blocks = full_blocks * (block_size % 2) + remainder % 2;
+        let mut surpluses = [Self::BaselineFirst, Self::CandidateFirst].repeat(odd_blocks / 2);
+        if odd_blocks % 2 == 1 {
+            surpluses.push(if rng.random() {
                 Self::BaselineFirst
             } else {
                 Self::CandidateFirst
             });
         }
+        surpluses.shuffle(rng);
+        let mut surpluses = surpluses.into_iter();
+        let mut schedule = Vec::with_capacity(repetitions);
 
-        orders.shuffle(rng);
+        while schedule.len() < repetitions {
+            let size = block_size.min(repetitions - schedule.len());
+            let mut block = [Self::BaselineFirst, Self::CandidateFirst].repeat(size / 2);
+            if size % 2 == 1 {
+                block.push(surpluses.next().expect("Every odd block has a surplus."));
+            }
+            block.shuffle(rng);
+            schedule.extend(block);
+        }
 
-        orders
+        schedule
     }
 }
 

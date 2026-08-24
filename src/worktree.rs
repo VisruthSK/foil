@@ -45,6 +45,15 @@ impl Revision {
     }
 }
 
+pub(crate) fn working_tree_has_modified_tracked_files() -> Result<bool> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .output()
+        .context("Failed to inspect the working tree.")?;
+    anyhow::ensure!(output.status.success(), "Git status failed.");
+    Ok(!output.stdout.is_empty())
+}
+
 impl Worktree {
     pub fn create(path: PathBuf, revision: Revision) -> Result<Self> {
         let status = Command::new("git")

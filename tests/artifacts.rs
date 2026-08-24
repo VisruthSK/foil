@@ -1,5 +1,5 @@
 use anyhow::Result;
-use b3::{Config, Revision, Shrinkage, write_config_json};
+use b3::{Config, Interval, LifecycleConfig, Revision, Shrinkage, write_config_json};
 use serde_json::json;
 use std::{
     env::{current_dir, set_current_dir},
@@ -48,36 +48,72 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
     let directory = tempdir()?;
     let path = directory.path().join("config.json");
     let command = ["cargo", "test --workspace"].map(OsString::from);
-    let setup = ["cargo", "build --release"].map(OsString::from);
+    let startup = ["cargo", "fetch --locked"].map(OsString::from);
+    let startup_each_run = ["cargo", "clean --release"].map(OsString::from);
+    let teardown_each_run = ["git", "status --short"].map(OsString::from);
     let teardown = ["git", "clean --force"].map(OsString::from);
+    let intervals = [Interval::new(0.5)?, Interval::new(0.98)?];
+    let env = [("RAYON_NUM_THREADS".to_owned(), "1".to_owned())];
     let baseline = Revision::resolve("main".to_owned())?;
     let candidate = Revision::resolve("HEAD".to_owned())?;
     let config = Config {
-        seed: 42,
+        seed: 0,
         repetitions: 10,
+        block_size: 4,
         draws: 1000,
+        timeout_seconds: Some(30),
+        isolate: true,
         shrinkage: Shrinkage::new(5.0)?,
+        intervals: &intervals,
+        working_directory: Some(Path::new("benchmarks")),
+        env: &env,
         baseline: &baseline,
         candidate: &candidate,
-        setup: &setup,
+        suite_lifecycle: LifecycleConfig {
+            startup: &startup,
+            startup_each_run: &startup_each_run,
+            teardown_each_run: &teardown_each_run,
+            teardown: &teardown,
+        },
+        benchmark_lifecycle: LifecycleConfig {
+            startup: &startup,
+            startup_each_run: &startup_each_run,
+            teardown_each_run: &teardown_each_run,
+            teardown: &teardown,
+        },
         command: &command,
-        teardown: &teardown,
     };
 
     write_config_json(&path, &config)?;
 
     let actual: serde_json::Value = serde_json::from_str(&read_to_string(path)?)?;
     let expected = json!({
-        "seed": 42,
+        "seed": 0,
         "repetitions": 10,
+        "block_size": 4,
         "draws": 1000,
+        "timeout_seconds": 30,
+        "isolate": true,
         "shrinkage": 5.0,
+        "intervals": [0.5, 0.98],
+        "working_directory": "benchmarks",
+        "env": [["RAYON_NUM_THREADS", "1"]],
         "b3_version": env!("CARGO_PKG_VERSION"),
         "baseline": { "revision": "main", "hash": baseline.hash() },
         "candidate": { "revision": "HEAD", "hash": candidate.hash() },
-        "setup": ["cargo", "build --release"],
+        "suite_lifecycle": {
+            "startup": ["cargo", "fetch --locked"],
+            "startup_each_run": ["cargo", "clean --release"],
+            "teardown_each_run": ["git", "status --short"],
+            "teardown": ["git", "clean --force"],
+        },
+        "benchmark_lifecycle": {
+            "startup": ["cargo", "fetch --locked"],
+            "startup_each_run": ["cargo", "clean --release"],
+            "teardown_each_run": ["git", "status --short"],
+            "teardown": ["git", "clean --force"],
+        },
         "command": ["cargo", "test --workspace"],
-        "teardown": ["git", "clean --force"],
     });
 
     assert_eq!(actual, expected);

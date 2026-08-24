@@ -60,8 +60,12 @@ fn sides_and_from_execution_order_agree() {
     }
 }
 
-fn schedule(repetitions: usize, seed: u64) -> Vec<RunOrder> {
-    RunOrder::schedule(repetitions, &mut Xoshiro256PlusPlus::seed_from_u64(seed))
+fn schedule(repetitions: usize, block_size: usize, seed: u64) -> Vec<RunOrder> {
+    RunOrder::schedule(
+        repetitions,
+        std::num::NonZeroUsize::new(block_size).unwrap(),
+        &mut Xoshiro256PlusPlus::seed_from_u64(seed),
+    )
 }
 
 fn baseline_firsts(orders: &[RunOrder]) -> usize {
@@ -74,7 +78,7 @@ fn baseline_firsts(orders: &[RunOrder]) -> usize {
 #[test]
 fn schedules_are_balanced() {
     for repetitions in [Repetitions::MINIMUM, Repetitions::MINIMUM + 1] {
-        let orders = schedule(repetitions, 0);
+        let orders = schedule(repetitions, 4, 0);
         let first = baseline_firsts(&orders);
 
         assert_eq!(orders.len(), repetitions);
@@ -87,9 +91,35 @@ fn schedules_are_balanced() {
 }
 
 #[test]
+fn full_blocks_are_balanced() {
+    let orders = schedule(14, 4, 0);
+
+    for block in orders[..12].chunks_exact(4) {
+        assert_eq!(baseline_firsts(block), 2, "{block:?}");
+    }
+}
+
+#[test]
+fn odd_blocks_balance_their_surplus_before_shuffling() {
+    for block_size in [1, 3, 5] {
+        for seed in 0..64 {
+            let orders = schedule(60, block_size, seed);
+            assert_eq!(
+                baseline_firsts(&orders),
+                orders.len() / 2,
+                "block_size={block_size}, seed={seed}"
+            );
+            assert!(orders.chunks(block_size).all(|block| {
+                baseline_firsts(block).abs_diff(block.len() - baseline_firsts(block)) <= 1
+            }));
+        }
+    }
+}
+
+#[test]
 fn the_odd_repetition_falls_on_either_side() {
     let counts: Vec<usize> = (0..16)
-        .map(|seed| baseline_firsts(&schedule(Repetitions::MINIMUM + 1, seed)))
+        .map(|seed| baseline_firsts(&schedule(Repetitions::MINIMUM + 1, 4, seed)))
         .collect();
 
     assert!(counts.contains(&5) && counts.contains(&6), "{counts:?}");
