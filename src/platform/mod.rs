@@ -253,17 +253,19 @@ mod tests {
     #[test]
     fn short_processes_are_not_quantized_to_a_poll_interval() -> Result<()> {
         let interrupt = Interrupt::new()?;
-        let mut fastest = Duration::MAX;
+        let mut waits = Vec::with_capacity(5);
         for _ in 0..5 {
             let mut workload = spawn(&spec("platform::tests::brief_child", Vec::new())?)?;
             let started = Instant::now();
             ensure!(matches!(workload.wait(&interrupt, None)?, Wait::Exited(_)));
-            fastest = fastest.min(started.elapsed());
+            waits.push(started.elapsed());
             workload.terminate()?;
         }
+        waits.sort_unstable();
+        let median = waits[waits.len() / 2];
         ensure!(
-            fastest < Duration::from_millis(45),
-            "fastest wait was {fastest:?}"
+            median < Duration::from_millis(45),
+            "median wait was {median:?}"
         );
         Ok(())
     }
@@ -464,7 +466,7 @@ mod tests {
     #[test]
     #[ignore]
     fn brief_child() {
-        thread::sleep(Duration::from_millis(25));
+        thread::sleep(Duration::from_millis(10));
     }
 
     #[test]
