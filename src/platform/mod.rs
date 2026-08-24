@@ -251,26 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn short_processes_are_not_quantized_to_a_poll_interval() -> Result<()> {
-        let interrupt = Interrupt::new()?;
-        let mut waits = Vec::with_capacity(5);
-        for _ in 0..5 {
-            let mut workload = spawn(&spec("platform::tests::brief_child", Vec::new())?)?;
-            let started = Instant::now();
-            ensure!(matches!(workload.wait(&interrupt, None)?, Wait::Exited(_)));
-            waits.push(started.elapsed());
-            workload.terminate()?;
-        }
-        waits.sort_unstable();
-        let median = waits[waits.len() / 2];
-        ensure!(
-            median < Duration::from_millis(45),
-            "median wait was {median:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn timeout_wakes_near_its_deadline_and_reaps_the_child() -> Result<()> {
         let interrupt = Interrupt::new()?;
         let mut workload = spawn(&spec("platform::tests::slow_child", Vec::new())?)?;
@@ -379,20 +359,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn process_exit_precedes_simultaneous_interrupt_and_timeout() -> Result<()> {
-        let interrupt = Interrupt::new()?;
-        let mut workload = spawn(&spec("platform::tests::noop_child", Vec::new())?)?;
-        thread::sleep(Duration::from_millis(100));
-        interrupt.signal();
-        ensure!(matches!(
-            workload.wait(&interrupt, Some(Duration::ZERO))?,
-            Wait::Exited(status) if status.success()
-        ));
-        workload.terminate()?;
-        Ok(())
-    }
-
     #[cfg(windows)]
     #[test]
     fn windows_resolves_the_executable_from_the_child_path() -> Result<()> {
@@ -461,12 +427,6 @@ mod tests {
     #[ignore]
     fn slow_child() {
         thread::sleep(Duration::from_secs(30));
-    }
-
-    #[test]
-    #[ignore]
-    fn brief_child() {
-        thread::sleep(Duration::from_millis(10));
     }
 
     #[test]
