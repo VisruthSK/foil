@@ -19,7 +19,6 @@ pub(crate) struct Config<'a> {
     pub(crate) shrinkage: Shrinkage,
     pub(crate) intervals: &'a [Interval],
     pub(crate) working_directory: Option<&'a Path>,
-    pub(crate) env: &'a [(String, String)],
     pub(crate) baseline: &'a Revision,
     pub(crate) candidate: &'a Revision,
     pub(crate) suite_lifecycle: LifecycleConfig<'a>,
@@ -55,7 +54,6 @@ pub(crate) fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> 
         "shrinkage": config.shrinkage.get(),
         "intervals": config.intervals.iter().map(|interval| interval.percent() / 100.0).collect::<Vec<_>>(),
         "working_directory": config.working_directory,
-        "env": config.env,
         "foil_version": env!("CARGO_PKG_VERSION"),
         "baseline": {
             "revision": config.baseline.name(),

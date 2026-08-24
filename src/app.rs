@@ -220,7 +220,6 @@ fn write_configs(
                 shrinkage: config.shrinkage,
                 intervals: &config.intervals,
                 working_directory: config.working_directory.as_deref(),
-                env: &config.envs,
                 baseline: &suite.baseline,
                 candidate: &suite.candidate,
                 suite_lifecycle: lifecycle_config(suite_lifecycle),
