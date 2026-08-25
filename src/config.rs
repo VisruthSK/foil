@@ -16,7 +16,7 @@ use std::{
 use toml::{Table, Value};
 
 const MIN_DRAWS: usize = 1_000;
-const DEFAULT_CONFIG: &str = "b3.toml";
+const DEFAULT_CONFIG: &str = "foil.toml";
 const BENCHMARKS: &str = "benchmarks";
 const OUTPUT_DIR: &str = "output-dir";
 const OUTPUT_DIR_ID: &str = "output_dir";
@@ -55,9 +55,9 @@ pub(crate) struct Lifecycle {
 }
 
 #[derive(Parser)]
-#[command(name = "b3")]
+#[command(name = "foil")]
 #[command(version)]
-#[command(about = "Bayesian Branch Benchmarking", long_about = None)]
+#[command(about = "Paired Git revision benchmarking", long_about = None)]
 pub(crate) struct Cli {
     #[command(flatten)]
     suite: SuiteConfig,
@@ -73,7 +73,7 @@ pub(crate) struct Cli {
 struct Selectors {
     /// TOML file whose keys are the long names of the options above, or `command`.
     ///
-    /// Defaults to `b3.toml`, which is read when present.
+    /// Defaults to `foil.toml`, which is read when present.
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
 
@@ -160,7 +160,7 @@ pub(crate) struct RunConfig {
     pub(crate) lifecycle: Lifecycle,
     /// Benchmark program and arguments.
     ///
-    /// Place the command after `--`, for example: `b3 --output-dir benchmark/ --repetitions 10 -- Rscript benchmark.R`.
+    /// Place the command after `--`, for example: `foil --output-dir benchmark/ --repetitions 10 -- Rscript benchmark.R`.
     #[arg(last = true, required = true, num_args = 1..)]
     pub(crate) command: Vec<OsString>,
 }
