@@ -28,7 +28,7 @@ impl RegressionRow {
                 Ok(Self {
                     midpoint: 0.5 * (baseline + candidate),
                     difference: candidate - baseline,
-                    run: position as f64 - center,
+                    run: (position as f64 - center) / center,
                     order: repetition.order.effect_code(),
                 })
             })
@@ -36,11 +36,11 @@ impl RegressionRow {
     }
 }
 
-/// Weight-summed products of the predictors: centered run position and order
+/// Weight-summed products of the predictors: scaled run position and order
 /// contrast. Together with the intercept column these form the Gram matrix
 /// $X^\top W X$ shared by both regressions.
 ///
-/// Throughout, $w_i$ is the bootstrap weight of repetition $i$, $r_i$ its centered run
+/// Throughout, $w_i$ is the bootstrap weight of repetition $i$, $r_i$ its scaled run
 /// position, $o_i$ its order contrast, and $y_i$ its response.
 #[derive(Default)]
 struct WeightedDesign {
@@ -351,7 +351,7 @@ mod tests {
             (1.295794106123628,  1.3142782690813486),
             (1.2901681962200746, 1.3153286953279186),
             (1.2948331312861074, 1.3383861101432366),
-            (1.2943604503099142, 1.3140897265174492),
+            (1.2943604503099144, 1.3140897265174494),
             (1.287205483379233,  1.295401275903725),
             (1.2873420629313597, 1.2950401423013826),
             (1.2917392395536966, 1.3134285293933505),
@@ -374,7 +374,7 @@ mod tests {
             (1.2963354841261892, 1.3072501069680238),
             (1.2888327854737045, 1.2935494197590378),
             (1.2974459759699728, 1.311355238500543),
-            (1.2885189566400441, 1.2988151609969736),
+            (1.2885189566400443, 1.2988151609969738),
         ];
 
         assert_eq!(golden(5.0)?, EXPECTED);
