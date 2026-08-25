@@ -4,18 +4,22 @@ use std::{
     fs::{File, OpenOptions},
     io::{self, Read, Seek, Write},
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
+        fd::{AsRawFd, BorrowedFd, OwnedFd},
         unix::process::CommandExt,
     },
     path::PathBuf,
     process::Child,
-    ptr,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
+
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::io::{Errno, write};
+use rustix::pipe::{PipeFlags, pipe_with};
+use rustix::process::{Pid, PidfdFlags, pidfd_open};
 
 static CGROUP_ID: AtomicU64 = AtomicU64::new(0);
 static CGROUP_ROOT: OnceLock<PathBuf> = OnceLock::new();
@@ -28,16 +32,15 @@ pub(crate) struct Interrupt {
 
 impl Interrupt {
     pub(crate) fn new() -> io::Result<Self> {
-        let mut fds = [0; 2];
-        cvt(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) })?;
+        let (read, write) = pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK)?;
         Ok(Self {
-            read: Arc::new(unsafe { OwnedFd::from_raw_fd(fds[0]) }),
-            write: Arc::new(unsafe { OwnedFd::from_raw_fd(fds[1]) }),
+            read: Arc::new(read),
+            write: Arc::new(write),
         })
     }
 
     pub(crate) fn signal(&self) {
-        unsafe { libc::write(self.write.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
+        let _ = write(&*self.write, &[1u8]);
     }
 }
 
@@ -77,44 +80,25 @@ impl Workload {
         timeout: Option<Duration>,
     ) -> io::Result<Wait> {
         let mut fds = [
-            libc::pollfd {
-                fd: self.pidfd.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: interrupt.read.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
+            PollFd::new(&self.pidfd, PollFlags::IN),
+            PollFd::new(&*interrupt.read, PollFlags::IN),
         ];
         let started = Instant::now();
         loop {
-            let timeout =
-                timeout.map(|timeout| timespec(timeout.saturating_sub(started.elapsed())));
-            let result = unsafe {
-                libc::ppoll(
-                    fds.as_mut_ptr(),
-                    fds.len() as libc::nfds_t,
-                    timeout.as_ref().map_or(ptr::null(), |value| value),
-                    ptr::null(),
-                )
-            };
-            if result == -1 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::Interrupted {
-                    continue;
+            let remaining = timeout.map(|limit| limit.saturating_sub(started.elapsed()));
+            let ts = remaining.map(|r| Timespec::try_from(r).expect("duration fits in Timespec"));
+            match poll(&mut fds, ts.as_ref()) {
+                Ok(0) => return Ok(Wait::TimedOut),
+                Ok(_) => {
+                    if fds[0].revents().contains(PollFlags::IN) {
+                        return self.child.wait().map(Wait::Exited);
+                    }
+                    if fds[1].revents().contains(PollFlags::IN) {
+                        return Ok(Wait::Interrupted);
+                    }
                 }
-                return Err(error);
-            }
-            if fds[0].revents != 0 {
-                return self.child.wait().map(Wait::Exited);
-            }
-            if fds[1].revents != 0 {
-                return Ok(Wait::Interrupted);
-            }
-            if result == 0 {
-                return Ok(Wait::TimedOut);
+                Err(Errno::INTR) => continue,
+                Err(error) => return Err(error.into()),
             }
         }
     }
@@ -139,11 +123,12 @@ impl Prepared {
         let mut command = spec.command();
         unsafe {
             command.pre_exec(move || {
-                let result = libc::write(procs_fd, b"0".as_ptr().cast(), 1);
-                if result == 1 {
-                    Ok(())
-                } else {
-                    Err(io::Error::last_os_error())
+                // SAFETY: procs_fd is a valid open file descriptor for the lifetime of this closure.
+                let fd = BorrowedFd::borrow_raw(procs_fd);
+                match write(fd, b"0") {
+                    Ok(1) => Ok(()),
+                    Ok(_) => Err(io::Error::other("write to cgroup.procs did not write all bytes")),
+                    Err(error) => Err(error.into()),
                 }
             });
         }
@@ -154,10 +139,11 @@ impl Prepared {
                 return Err(error);
             }
         };
-        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) } as i32;
-        let pidfd = match fd(raw) {
+        let pid = Pid::from_child(&child);
+        let pidfd = match pidfd_open(pid, PidfdFlags::empty()) {
             Ok(pidfd) => pidfd,
             Err(error) => {
+                let error = io::Error::from(error);
                 let _ = kill_cgroup(&cgroup);
                 let _ = child.wait();
                 let _ = remove_when_empty(&cgroup);
@@ -209,17 +195,11 @@ fn remove_when_empty(cgroup: &std::path::Path) -> io::Result<()> {
         if state.lines().any(|line| line == "populated 0") {
             return fs::remove_dir(cgroup);
         }
-        let mut event = libc::pollfd {
-            fd: events.as_raw_fd(),
-            events: libc::POLLPRI | libc::POLLERR,
-            revents: 0,
-        };
-        let result = unsafe { libc::poll(&mut event, 1, -1) };
-        if result == -1 {
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
-            }
+        let mut fds = [PollFd::new(&events, PollFlags::PRI | PollFlags::ERR)];
+        match poll(&mut fds, None) {
+            Ok(_) => {}
+            Err(Errno::INTR) => continue,
+            Err(error) => return Err(error.into()),
         }
     }
 }
@@ -268,23 +248,4 @@ fn current_cgroup() -> io::Result<PathBuf> {
         .find_map(|line| line.strip_prefix("0::"))
         .ok_or_else(|| io::Error::other("cgroup v2 is unavailable"))?;
     Ok(PathBuf::from("/sys/fs/cgroup").join(path.trim_start_matches('/')))
-}
-
-fn timespec(duration: Duration) -> libc::timespec {
-    libc::timespec {
-        tv_sec: duration.as_secs().min(i64::MAX as u64) as i64,
-        tv_nsec: duration.subsec_nanos().into(),
-    }
-}
-
-fn fd(raw: i32) -> io::Result<OwnedFd> {
-    cvt(raw).map(|raw| unsafe { OwnedFd::from_raw_fd(raw) })
-}
-
-fn cvt(result: i32) -> io::Result<i32> {
-    if result == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(result)
-    }
 }
