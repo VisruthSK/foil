@@ -115,10 +115,11 @@ impl<M: Metric> Summary<M> {
 /// so `len() - 1` cannot underflow and every index is in range. NaN is rejected rather
 /// than sorted, because it would sit at one end under `total_cmp` while failing every
 /// comparison [`Self::fraction_below`] partitions on.
-struct Quantiles(Vec<f64>);
+pub(crate) struct Quantiles(Vec<f64>);
 
 impl Quantiles {
-    fn new(mut values: Vec<f64>) -> Result<Self> {
+    pub(crate) fn new(mut values: Vec<f64>) -> Result<Self> {
+        ensure!(!values.is_empty(), "Posterior is empty.");
         ensure!(
             !values.iter().any(|value| value.is_nan()),
             "Posterior contains NaN."
@@ -129,8 +130,17 @@ impl Quantiles {
         Ok(Self(values))
     }
 
-    fn at(&self, probability: f64) -> f64 {
-        self.0[((self.0.len() - 1) as f64 * probability).round() as usize]
+    pub(crate) fn at(&self, probability: f64) -> f64 {
+        debug_assert!((0.0..=1.0).contains(&probability));
+        let values = &self.0;
+        let h = (values.len() - 1) as f64 * probability;
+        let lo = h.floor() as usize;
+        let hi = h.ceil() as usize;
+        if lo == hi {
+            return values[lo];
+        }
+        let t = h - lo as f64;
+        values[lo] + t * (values[hi] - values[lo])
     }
 
     fn median(&self) -> f64 {

@@ -113,10 +113,10 @@ impl<M: Metric> fmt::Display for Summary<M> {
 mod tests {
     use super::*;
     use crate::metric::{MeasuredMetric, PeakMemory, Time};
-    use crate::posterior::{Posterior, Shrinkage};
+    use crate::posterior::{Draw, Posterior, Shrinkage};
     use crate::repetition::{Pair, Repetition, Repetitions, RunOrder};
     use crate::run::{Bytes, RunOutput};
-    use crate::summary::Interval;
+    use crate::summary::{Interval, Quantiles, Summary};
     use anyhow::Result;
     use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
     use std::num::NonZeroUsize;
@@ -239,6 +239,115 @@ mod tests {
         let summary = tiny_change_on_large_totals::<PeakMemory>(500).summarize(&half)?;
 
         assert_eq!(summary.compact(), "0.0B -> 0.0B [+0.0B, +0.0B]");
+
+        Ok(())
+    }
+
+    fn fixed_draws() -> Vec<Draw<Time>> {
+        [
+            (10.0, 10.03),
+            (10.0, 10.02),
+            (10.0, 10.05),
+            (10.0, 9.99),
+            (10.0, 10.07),
+            (10.0, 10.06),
+            (10.0, 10.09),
+            (10.0, 10.08),
+            (10.0, 10.11),
+            (10.0, 10.10),
+        ]
+        .into_iter()
+        .map(|(baseline, candidate)| Draw {
+            baseline: Time::from_base(baseline),
+            candidate: Time::from_base(candidate),
+        })
+        .collect()
+    }
+
+    fn fixed_summary(intervals: &[Interval]) -> Result<Summary<Time>> {
+        Summary::from_draws(&fixed_draws(), intervals)
+    }
+
+    #[test]
+    fn fixed_posterior_report_matches_expected() -> Result<()> {
+        let summary = fixed_summary(&default_intervals())?;
+
+        assert_eq!(summary.baseline, Time::from_base(10.0));
+        assert!((summary.candidate.base() - 10.065).abs() < 1e-9);
+        assert!((summary.change.absolute_median.base() - 0.065).abs() < 1e-9);
+        assert!((summary.change.relative_median.unwrap() - 0.65).abs() < 1e-9);
+        assert!((summary.probability_candidate_lower - 0.1).abs() < 1e-12);
+
+        let cri_50 = &summary.change.intervals[0];
+        assert_eq!(cri_50.interval.percent(), 50.0);
+        assert!((cri_50.absolute.lower.base() - 0.035).abs() < 1e-9);
+        assert!((cri_50.absolute.upper.base() - 0.0875).abs() < 1e-9);
+        assert!((cri_50.relative.unwrap().lower - 0.35).abs() < 1e-9);
+        assert!((cri_50.relative.unwrap().upper - 0.875).abs() < 1e-9);
+
+        let cri_80 = &summary.change.intervals[1];
+        assert_eq!(cri_80.interval.percent(), 80.0);
+        assert!((cri_80.absolute.lower.base() - 0.017).abs() < 1e-9);
+        assert!((cri_80.absolute.upper.base() - 0.101).abs() < 1e-9);
+        assert!((cri_80.relative.unwrap().lower - 0.17).abs() < 1e-9);
+        assert!((cri_80.relative.unwrap().upper - 1.01).abs() < 1e-9);
+
+        let cri_98 = &summary.change.intervals[2];
+        assert_eq!(cri_98.interval.percent(), 98.0);
+        assert!((cri_98.absolute.lower.base() - (-0.0073)).abs() < 1e-9);
+        assert!((cri_98.absolute.upper.base() - 0.1091).abs() < 1e-9);
+        assert!((cri_98.relative.unwrap().lower - (-0.073)).abs() < 1e-9);
+        assert!((cri_98.relative.unwrap().upper - 1.091).abs() < 1e-9);
+
+        const EXPECTED: &str = concat!(
+            "Baseline:  10.0s\n",
+            "Candidate: 10.1s\n",
+            "\n",
+            "Change: +65.0ms (+0.65%)\n",
+            "  50% CrI: [+35.0ms, +87.5ms] (+0.35%, +0.87%)\n",
+            "  80% CrI: [+17.0ms, +101.0ms] (+0.17%, +1.01%)\n",
+            "  98% CrI: [-7.3ms, +109.1ms] (-0.07%, +1.09%)\n",
+            "\n",
+            "P(candidate faster): 10.0%\n",
+        );
+
+        assert_eq!(summary.to_string(), EXPECTED);
+
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_posterior_compact_matches_expected() -> Result<()> {
+        let summary = fixed_summary(&default_intervals())?;
+
+        assert_eq!(summary.compact(), "10.0s -> 10.1s [-0.07%, +1.09%]");
+
+        Ok(())
+    }
+
+    #[test]
+    fn quantile_at_zero_returns_the_minimum() -> Result<()> {
+        let values = vec![3.0, 1.0, 2.0];
+        let q = Quantiles::new(values)?;
+
+        assert_eq!(q.at(0.0), 1.0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn quantile_at_one_returns_the_maximum() -> Result<()> {
+        let values = vec![3.0, 1.0, 2.0];
+        let q = Quantiles::new(values)?;
+
+        assert_eq!(q.at(1.0), 3.0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn quantile_rejects_empty_input() -> Result<()> {
+        assert!(Quantiles::new(Vec::new()).is_err());
 
         Ok(())
     }
