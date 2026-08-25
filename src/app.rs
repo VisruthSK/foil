@@ -473,7 +473,7 @@ fn command_spec(
         env.iter()
             .map(|(key, value)| (key.into(), value.into()))
             .collect(),
-    )?)
+    ))
 }
 
 fn lifecycle_config(lifecycle: &Lifecycle) -> LifecycleConfig<'_> {

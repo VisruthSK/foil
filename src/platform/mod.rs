@@ -1,6 +1,6 @@
 #[cfg(not(windows))]
 use std::process::{Command, Stdio};
-use std::{ffi::OsString, io, path::PathBuf, process::ExitStatus};
+use std::{ffi::OsString, path::PathBuf, process::ExitStatus};
 
 pub(crate) enum Wait {
     Exited(ExitStatus),
@@ -8,23 +8,16 @@ pub(crate) enum Wait {
     TimedOut,
 }
 
+/// A logical benchmark command: what to run, with which arguments, working
+/// directory, and effective child environment.
+///
+/// The executable itself is resolved by each platform backend at spawn time,
+/// so a benchmark `startup` command may create the program this spec names.
 pub(crate) struct CommandSpec {
     pub(crate) program: OsString,
-    #[cfg(not(windows))]
     pub(crate) args: Vec<OsString>,
-    #[cfg(not(windows))]
     pub(crate) cwd: PathBuf,
-    #[cfg(not(windows))]
     pub(crate) env: Vec<(OsString, OsString)>,
-
-    #[cfg(windows)]
-    pub(crate) application: Vec<u16>,
-    #[cfg(windows)]
-    pub(crate) command_line: Vec<u16>,
-    #[cfg(windows)]
-    pub(crate) environment: Vec<u16>,
-    #[cfg(windows)]
-    pub(crate) cwd_wide: Vec<u16>,
 }
 
 impl CommandSpec {
@@ -33,28 +26,13 @@ impl CommandSpec {
         args: Vec<OsString>,
         cwd: PathBuf,
         env: Vec<(OsString, OsString)>,
-    ) -> io::Result<Self> {
-        #[cfg(windows)]
-        {
-            let application = windows_application(&program, &env)?;
-            let command_line = windows_command_line(&program, &args);
-            let environment = windows_environment(&env);
-            let cwd_wide = wide(cwd.as_os_str());
-            Ok(Self {
-                program,
-                application,
-                command_line,
-                environment,
-                cwd_wide,
-            })
-        }
-        #[cfg(not(windows))]
-        Ok(Self {
+    ) -> Self {
+        Self {
             program,
             args,
             cwd,
             env,
-        })
+        }
     }
 
     #[cfg(not(windows))]
@@ -85,146 +63,12 @@ pub(crate) use macos::{Interrupt, Workload};
 #[cfg(windows)]
 pub(crate) use windows::{Interrupt, Workload};
 
-#[cfg(windows)]
-fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    value.encode_wide().chain(Some(0)).collect()
-}
-
-#[cfg(windows)]
-fn windows_application(
-    program: &std::ffi::OsStr,
-    overrides: &[(OsString, OsString)],
-) -> io::Result<Vec<u16>> {
-    use std::path::Path;
-    if program.is_empty() || Path::new(program).file_name().is_none() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "program path has no file name",
-        ));
-    }
-    let path = Path::new(program);
-    if path.components().count() > 1 {
-        return Ok(wide(with_exe(path).as_os_str()));
-    }
-    let child_path = overrides
-        .iter()
-        .rev()
-        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
-        .map(|(_, value)| value.as_os_str());
-    let mut directories = Vec::new();
-    if let Some(path) = child_path {
-        directories.extend(std::env::split_paths(path).filter(|path| !path.as_os_str().is_empty()));
-    }
-    if let Ok(mut path) = std::env::current_exe() {
-        path.pop();
-        directories.push(path);
-    }
-    if let Some(root) = std::env::var_os("SystemRoot") {
-        directories.push(PathBuf::from(&root).join("System32"));
-        directories.push(root.into());
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        directories
-            .extend(std::env::split_paths(&path).filter(|path| !path.as_os_str().is_empty()));
-    }
-    directories
-        .into_iter()
-        .map(|directory| directory.join(program))
-        .find_map(|path| searched_executable(&path))
-        .map(|path| wide(path.as_os_str()))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "program not found"))
-}
-
-#[cfg(windows)]
-fn searched_executable(path: &std::path::Path) -> Option<PathBuf> {
-    let mut path = path.to_owned();
-    if path.extension().is_none() {
-        path.set_extension("exe");
-    }
-    path.is_file().then_some(path)
-}
-
-#[cfg(windows)]
-fn with_exe(path: &std::path::Path) -> PathBuf {
-    if path.extension().is_none() {
-        let mut executable = path.to_owned();
-        executable.set_extension("exe");
-        if executable.is_file() {
-            return executable;
-        }
-    }
-    path.to_owned()
-}
-
-#[cfg(windows)]
-fn windows_command_line(program: &std::ffi::OsStr, args: &[OsString]) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    let mut line = Vec::new();
-    for argument in std::iter::once(program).chain(args.iter().map(OsString::as_os_str)) {
-        if !line.is_empty() {
-            line.push(b' ' as u16);
-        }
-        let argument: Vec<_> = argument.encode_wide().collect();
-        let quoted = argument.is_empty()
-            || argument
-                .iter()
-                .any(|&unit| [b' ' as u16, b'\t' as u16, b'"' as u16].contains(&unit));
-        if quoted {
-            line.push(b'"' as u16);
-        }
-        let mut backslashes = 0;
-        for unit in argument {
-            if unit == b'\\' as u16 {
-                backslashes += 1;
-            } else {
-                if unit == b'"' as u16 {
-                    line.extend(std::iter::repeat_n(b'\\' as u16, backslashes * 2 + 1));
-                } else {
-                    line.extend(std::iter::repeat_n(b'\\' as u16, backslashes));
-                }
-                backslashes = 0;
-                line.push(unit);
-            }
-        }
-        line.extend(std::iter::repeat_n(
-            b'\\' as u16,
-            if quoted { backslashes * 2 } else { backslashes },
-        ));
-        if quoted {
-            line.push(b'"' as u16);
-        }
-    }
-    line.push(0);
-    line
-}
-
-#[cfg(windows)]
-fn windows_environment(overrides: &[(OsString, OsString)]) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    let mut variables: Vec<_> = std::env::vars_os().collect();
-    for (key, value) in overrides {
-        variables.retain(|(existing, _)| !existing.eq_ignore_ascii_case(key));
-        variables.push((key.clone(), value.clone()));
-    }
-    variables.sort_by_cached_key(|(key, _)| key.to_string_lossy().to_lowercase());
-    let mut block = Vec::new();
-    for (key, value) in variables {
-        block.extend(key.encode_wide());
-        block.push(b'=' as u16);
-        block.extend(value.encode_wide());
-        block.push(0);
-    }
-    block.push(0);
-    block
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use anyhow::{Context, Result, ensure};
     use std::{
-        env, fs, thread,
+        env, fs, io, thread,
         time::{Duration, Instant},
     };
     use tempfile::tempdir;
@@ -240,7 +84,7 @@ mod tests {
                 .collect(),
             env::current_dir()?,
             env,
-        )?)
+        ))
     }
 
     fn spawn(spec: &CommandSpec) -> Result<Workload> {
@@ -373,7 +217,7 @@ mod tests {
                 .collect(),
             env::current_dir()?,
             vec![("PATH".into(), directory.path().as_os_str().to_owned())],
-        )?;
+        );
         let interrupt = Interrupt::new()?;
         let mut workload = spawn(&command)?;
         ensure!(matches!(
@@ -381,6 +225,99 @@ mod tests {
             Wait::Exited(status) if status.success()
         ));
         workload.terminate()?;
+        Ok(())
+    }
+
+    /// A benchmark `startup` may create the executable the benchmark command names,
+    /// so the spec must stay logical until spawn time. Spawning before the executable
+    /// exists fails; after startup "creates" it, the same spec runs.
+    #[cfg(windows)]
+    #[test]
+    fn an_executable_created_after_configuration_still_runs() -> Result<()> {
+        let directory = tempdir()?;
+        let executable = directory.path().join("late-tool.exe");
+        let command = CommandSpec::new(
+            executable.clone().into_os_string(),
+            ["--exact", "platform::tests::noop_child", "--ignored"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+            env::current_dir()?,
+            Vec::new(),
+        );
+        let interrupt = Interrupt::new()?;
+
+        let missing = Workload::prepare()
+            .context("prepare")?
+            .spawn(&command)
+            .err()
+            .context("spawning a missing program should fail")?;
+        ensure!(missing.kind() == io::ErrorKind::NotFound, "{missing}");
+
+        fs::copy(env::current_exe()?, &executable)?;
+        let mut workload = spawn(&command)?;
+        ensure!(matches!(
+            workload.wait(&interrupt, Some(Duration::from_secs(2)))?,
+            Wait::Exited(status) if status.success()
+        ));
+        workload.terminate()?;
+        Ok(())
+    }
+
+    /// A relative path-qualified program resolves against the benchmark's effective
+    /// child working directory, including the implicit `.exe` form.
+    #[cfg(windows)]
+    #[test]
+    fn a_relative_program_resolves_against_the_child_working_directory() -> Result<()> {
+        let directory = tempdir()?;
+        let nested = directory.path().join("bin");
+        fs::create_dir(&nested)?;
+        fs::copy(env::current_exe()?, nested.join("nested-tool.exe"))?;
+        let command = CommandSpec::new(
+            r"bin\nested-tool".into(),
+            ["--exact", "platform::tests::noop_child", "--ignored"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+            directory.path().to_owned(),
+            Vec::new(),
+        );
+        let interrupt = Interrupt::new()?;
+        let mut workload = spawn(&command)?;
+        ensure!(matches!(
+            workload.wait(&interrupt, Some(Duration::from_secs(2)))?,
+            Wait::Exited(status) if status.success()
+        ));
+        workload.terminate()?;
+        Ok(())
+    }
+
+    /// Batch files are rejected outright rather than run with ordinary-executable
+    /// argument quoting, whether named by explicit path or found through the PATH.
+    #[cfg(windows)]
+    #[test]
+    fn batch_files_are_rejected_with_a_clear_error() -> Result<()> {
+        let directory = tempdir()?;
+        let script = directory.path().join("scripty.cmd");
+        fs::write(&script, "@echo off\r\nexit /b 0\r\n")?;
+        let env = vec![("PATH".into(), directory.path().as_os_str().to_owned())];
+
+        let explicit = CommandSpec::new(script.clone().into_os_string(), Vec::new(), env::current_dir()?, Vec::new());
+        let error = Workload::prepare()
+            .context("prepare")?
+            .spawn(&explicit)
+            .err()
+            .context("an explicit batch file should be rejected")?;
+        ensure!(error.to_string().contains("batch"), "{error}");
+
+        let bare = CommandSpec::new("scripty".into(), Vec::new(), env::current_dir()?, env);
+        let error = Workload::prepare()
+            .context("prepare")?
+            .spawn(&bare)
+            .err()
+            .context("a batch file found through PATH should be rejected")?;
+        ensure!(error.to_string().contains("batch"), "{error}");
+
         Ok(())
     }
 
