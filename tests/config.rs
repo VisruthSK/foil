@@ -3,13 +3,15 @@ use foil::{Interval, Metric, Shrinkage, analyze_measurements};
 use std::{fs, num::NonZeroUsize, process::Command};
 use tempfile::{TempDir, tempdir};
 
-const REQUIRED: &str = "output-dir = 'bench'\nrepetitions = 12\ncommand = ['benchmark']\n";
+const REQUIRED: &str =
+    "output-dir = 'bench'\nrepetitions = 12\ninterval = [0.5, 0.8]\ncommand = ['benchmark']\n";
 
 const PREAMBLE: &str = "baseline = 'HEAD'\n\
     candidate = 'HEAD'\n\
     output-dir = 'bench'\n\
     repetitions = 10\n\
     draws = 1000\n\
+    interval = [0.5, 0.8]\n\
     seed = 0\n";
 
 const CONFIG: &str = "\
@@ -19,7 +21,7 @@ const CONFIG: &str = "\
     output-dir = 'configured'\n\
     repetitions = 12\n\
     draws = 2000\n\
-    interval = [0.5, 0.9]\n\
+    interval = [0.5, 0.8]\n\
     seed = 0\n\
     command = ['Rscript', 'benchmark.R']\n";
 
@@ -103,6 +105,7 @@ fn a_complete_configuration_runs_without_any_arguments() -> Result<()> {
         candidate = 'HEAD'\n\
         repetitions = 10\n\
         draws = 1000\n\
+        interval = [0.5, 0.8]\n\
         seed = 0\n\
         output-dir = 'benchmark'\n\
         command = ['git', '--version']\n",
@@ -191,7 +194,7 @@ fn builtin_defaults_apply_without_a_configuration_file() -> Result<()> {
         "[default: 0]",
         "[default: 4]",
         "[default: 10000]",
-        "[default: 0.5 0.8 0.98]",
+        "[default: 0.5 0.8 0.90]",
     ] {
         assert!(help.contains(default), "{default} is missing from\n{help}");
     }
@@ -210,7 +213,7 @@ fn help_ignores_configuration_defaults() -> Result<()> {
         "[default: HEAD]",
         "[default: 0]",
         "[default: 10000]",
-        "[default: 0.5 0.8 0.98]",
+        "[default: 0.5 0.8 0.90]",
     ] {
         assert!(help.contains(default), "{default} is missing from\n{help}");
     }
@@ -241,6 +244,26 @@ fn arguments_override_the_configuration() -> Result<()> {
         error.contains("At least 10 repetitions are required."),
         "{error}"
     );
+
+    Ok(())
+}
+
+/// An interval whose tails are narrower than one repetition's share is refused
+/// before any benchmark runs, not printed after them.
+#[test]
+fn an_interval_wider_than_the_repetitions_support_is_rejected_at_startup() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+         candidate = 'HEAD'\n\
+         output-dir = 'bench'\n\
+         repetitions = 10\n\
+         interval = [0.8, 0.90]\n\
+         command = ['git', '--version']\n",
+    )?;
+    let error = failure(&project, &[])?;
+
+    assert!(error.contains("widest supported interval"), "{error}");
+    assert!(error.contains("80%"), "{error}");
 
     Ok(())
 }
@@ -357,6 +380,7 @@ fn selectors_are_found_after_run_options() -> Result<()> {
         candidate = 'HEAD'\n\
         repetitions = 10\n\
         draws = 1000\n\
+        interval = [0.5, 0.8]\n\
         [benchmarks.first]\n\
         command = ['git', '--version']\n\
         [benchmarks.second]\n\
@@ -816,6 +840,7 @@ fn candidate_teardown_runs_after_baseline_teardown_fails() -> Result<()> {
              output-dir = 'bench'\n\
              repetitions = 10\n\
              draws = 1000\n\
+             interval = [0.5, 0.8]\n\
              [benchmarks.test]\n\
              teardown = ['git', 'update-ref', 'refs/tags/teardown-state', '{baseline}', 'HEAD']\n\
              command = ['git', '--version']\n"
@@ -1091,6 +1116,7 @@ const SUITE: &str = "baseline = 'HEAD'\n\
     output-dir = 'bench'\n\
     repetitions = 10\n\
     draws = 1000\n\
+    interval = [0.5, 0.8]\n\
     seed = 0\n\
     \n\
     [benchmarks.first]\n\
@@ -1229,6 +1255,7 @@ fn benchmarks_run_in_declaration_order() -> Result<()> {
         output-dir = 'bench'\n\
         repetitions = 10\n\
         draws = 1000\n\
+        interval = [0.5, 0.8]\n\
         \n\
         [benchmarks.zebra]\n\
         command = ['git', '--version']\n\
@@ -1320,6 +1347,7 @@ fn worktrees_are_shared_unless_isolation_is_requested() -> Result<()> {
         output-dir = 'bench'\n\
         repetitions = 10\n\
         draws = 1000\n\
+        interval = [0.5, 0.8]\n\
         [benchmarks.first]\n\
         command = ['git', 'config', '--file', 'shared.marker', 'first.ran', 'yes']\n\
         [benchmarks.second]\n\
@@ -1339,6 +1367,7 @@ fn worktrees_are_shared_unless_isolation_is_requested() -> Result<()> {
         output-dir = 'bench'\n\
         repetitions = 10\n\
         draws = 1000\n\
+        interval = [0.5, 0.8]\n\
         [benchmarks.isolated]\n\
         isolate = true\n\
         command = ['git', 'update-index', '--force-remove', 'sentinel']\n\

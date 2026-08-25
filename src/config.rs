@@ -143,7 +143,7 @@ pub(crate) struct RunConfig {
     pub(crate) timeout: Option<NonZeroU64>,
 
     /// Central credible interval widths.
-    #[arg(long = "interval", default_values = ["0.5", "0.8", "0.98"])]
+    #[arg(long = "interval", default_values = ["0.5", "0.8", "0.90"])]
     pub(crate) intervals: Vec<Interval>,
 
     /// Working directory for the benchmark and lifecycle commands, relative to the worktree root.
@@ -253,7 +253,18 @@ impl Cli {
                 resolved.cli.run.lifecycle = resolved.benchmark_lifecycle;
                 (name, resolved.cli.run)
             })
-            .collect();
+            .collect::<Vec<(Option<String>, RunConfig)>>();
+
+        for (name, run) in &runs {
+            for interval in &run.intervals {
+                interval
+                    .validate_for_pairs(run.repetitions.get())
+                    .with_context(|| match name {
+                        Some(name) => format!("Benchmark `{name}`"),
+                        None => "The benchmark".to_owned(),
+                    })?;
+            }
+        }
 
         Ok(Suite {
             config: ResolvedSuiteConfig {

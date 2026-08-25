@@ -12,11 +12,9 @@ use std::{
 };
 
 use rustix::buffer::spare_capacity;
-use rustix::event::kqueue::{
-    Event, EventFilter, EventFlags, ProcessEvents, kevent, kqueue,
-};
-use rustix::io::{Errno, FdFlags, fcntl_setfd, write};
+use rustix::event::kqueue::{Event, EventFilter, EventFlags, ProcessEvents, kevent, kqueue};
 use rustix::fs::{OFlags, fcntl_setfl};
+use rustix::io::{Errno, FdFlags, fcntl_setfd, write};
 use rustix::pipe::pipe;
 use rustix::process::{Pid, Signal, kill_process_group};
 
@@ -57,9 +55,7 @@ pub(crate) struct Prepared {
 
 impl Workload {
     pub(crate) fn prepare() -> io::Result<Prepared> {
-        Ok(Prepared {
-            kqueue: kqueue()?,
-        })
+        Ok(Prepared { kqueue: kqueue()? })
     }
 
     pub(crate) fn wait(
@@ -86,7 +82,12 @@ impl Workload {
         let mut dummy = Vec::with_capacity(2);
         // SAFETY: The child process and interrupt pipe fd are valid for the lifetime of this Workload.
         let registered = unsafe {
-            kevent(&self.kqueue, &changes, spare_capacity(&mut dummy), Some(Duration::ZERO))
+            kevent(
+                &self.kqueue,
+                &changes,
+                spare_capacity(&mut dummy),
+                Some(Duration::ZERO),
+            )
         };
         match registered {
             Ok(_) => {}
@@ -100,9 +101,8 @@ impl Workload {
             let remaining = timeout.map(|limit| limit.saturating_sub(started.elapsed()));
             eventlist.clear();
             // SAFETY: No changelist entries, so no fd validity requirements to uphold.
-            let n = unsafe {
-                kevent(&self.kqueue, &[], spare_capacity(&mut eventlist), remaining)?
-            };
+            let n =
+                unsafe { kevent(&self.kqueue, &[], spare_capacity(&mut eventlist), remaining)? };
             if n == 0 {
                 return Ok(Wait::TimedOut);
             }

@@ -302,7 +302,12 @@ mod tests {
         fs::write(&script, "@echo off\r\nexit /b 0\r\n")?;
         let env = vec![("PATH".into(), directory.path().as_os_str().to_owned())];
 
-        let explicit = CommandSpec::new(script.clone().into_os_string(), Vec::new(), env::current_dir()?, Vec::new());
+        let explicit = CommandSpec::new(
+            script.clone().into_os_string(),
+            Vec::new(),
+            env::current_dir()?,
+            Vec::new(),
+        );
         let error = Workload::prepare()
             .context("prepare")?
             .spawn(&explicit)

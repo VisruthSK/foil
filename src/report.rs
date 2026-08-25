@@ -33,6 +33,37 @@ fn magnitude<M: Metric>(value: M) -> String {
     format!("{:.1}{symbol}", value.base() * scale)
 }
 
+fn thousands(count: usize) -> String {
+    let digits = count.to_string();
+    let mut grouped = String::new();
+    for (position, digit) in digits.chars().enumerate() {
+        if position > 0 && (digits.len() - position) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
+impl<M: Metric> Summary<M> {
+    /// The line under each report's intervals. The draw counts are always shown,
+    /// because a fraction of draws is only known to within one draw either way:
+    /// an empty side reads as bounded by that resolution rather than exactly zero,
+    /// and a full side likewise.
+    fn probability(&self) -> String {
+        let total = self.draws;
+        let below = (self.probability_candidate_lower * total as f64).round() as usize;
+
+        format!(
+            "P(candidate {}): {:.1}% ({} of {} draws)",
+            M::LOWER,
+            100.0 * self.probability_candidate_lower,
+            thousands(below),
+            thousands(total),
+        )
+    }
+}
+
 impl<M: Metric> Summary<M> {
     /// A one-line summary for a report spanning several benchmarks, e.g. `1.2s -> 554.0ms [-52.41%, -51.31%]`.
     pub(crate) fn compact(&self) -> String {
@@ -100,12 +131,7 @@ impl<M: Metric> fmt::Display for Summary<M> {
         }
 
         writeln!(formatter)?;
-        writeln!(
-            formatter,
-            "P(candidate {}): {:.1}%",
-            M::LOWER,
-            100.0 * self.probability_candidate_lower
-        )
+        writeln!(formatter, "{}", self.probability())
     }
 }
 
@@ -170,7 +196,7 @@ mod tests {
 
     /// The CLI's default widths, so the golden below is what a user sees.
     fn default_intervals() -> [Interval; 3] {
-        [0.5, 0.8, 0.98].map(|width| Interval::new(width).expect("These are valid widths."))
+        [0.5, 0.8, 0.90].map(|width| Interval::new(width).expect("These are valid widths."))
     }
 
     /// Pins everything the report prints: the units, the sign and precision of every
@@ -188,9 +214,9 @@ mod tests {
             "Change: +20.0ms (+0.20%)\n",
             "  50% CrI: [+19.4ms, +20.4ms] (+0.19%, +0.20%)\n",
             "  80% CrI: [+19.0ms, +20.9ms] (+0.19%, +0.21%)\n",
-            "  98% CrI: [+18.1ms, +21.4ms] (+0.18%, +0.21%)\n",
+            "  90% CrI: [+18.6ms, +21.1ms] (+0.19%, +0.21%)\n",
             "\n",
-            "P(candidate faster): 0.0%\n",
+            "P(candidate faster): 0.0% (0 of 500 draws)\n",
         );
 
         let summary = tiny_change_on_large_totals::<Time>(500).summarize(&default_intervals())?;
@@ -200,14 +226,14 @@ mod tests {
         Ok(())
     }
 
-    /// The compact line picks the widest requested interval, here 98%, regardless of
+    /// The compact line picks the widest requested interval, here 90%, regardless of
     /// the order `--interval` was given in.
     #[test]
     fn compact_matches_golden() -> Result<()> {
-        let intervals = [0.98, 0.5, 0.8].map(|width| Interval::new(width).expect("Valid."));
+        let intervals = [0.90, 0.5, 0.8].map(|width| Interval::new(width).expect("Valid."));
         let summary = tiny_change_on_large_totals::<Time>(500).summarize(&intervals)?;
 
-        assert_eq!(summary.compact(), "10.0s -> 10.1s [+0.18%, +0.21%]");
+        assert_eq!(summary.compact(), "10.0s -> 10.1s [+0.19%, +0.21%]");
 
         Ok(())
     }
@@ -221,7 +247,7 @@ mod tests {
             "Change: +0.0B\n",
             "  50% CrI: [+0.0B, +0.0B]\n",
             "\n",
-            "P(candidate smaller): 0.0%\n",
+            "P(candidate smaller): 0.0% (0 of 500 draws)\n",
         );
 
         let half = [Interval::new(0.5)?];
@@ -292,12 +318,12 @@ mod tests {
         assert!((cri_80.relative.unwrap().lower - 0.17).abs() < 1e-9);
         assert!((cri_80.relative.unwrap().upper - 1.01).abs() < 1e-9);
 
-        let cri_98 = &summary.change.intervals[2];
-        assert_eq!(cri_98.interval.percent(), 98.0);
-        assert!((cri_98.absolute.lower.base() - (-0.0073)).abs() < 1e-9);
-        assert!((cri_98.absolute.upper.base() - 0.1091).abs() < 1e-9);
-        assert!((cri_98.relative.unwrap().lower - (-0.073)).abs() < 1e-9);
-        assert!((cri_98.relative.unwrap().upper - 1.091).abs() < 1e-9);
+        let cri_90 = &summary.change.intervals[2];
+        assert_eq!(cri_90.interval.percent(), 90.0);
+        assert!((cri_90.absolute.lower.base() - 0.0035).abs() < 1e-9);
+        assert!((cri_90.absolute.upper.base() - 0.1055).abs() < 1e-9);
+        assert!((cri_90.relative.unwrap().lower - 0.035).abs() < 1e-9);
+        assert!((cri_90.relative.unwrap().upper - 1.055).abs() < 1e-9);
 
         const EXPECTED: &str = concat!(
             "Baseline:  10.0s\n",
@@ -306,9 +332,9 @@ mod tests {
             "Change: +65.0ms (+0.65%)\n",
             "  50% CrI: [+35.0ms, +87.5ms] (+0.35%, +0.87%)\n",
             "  80% CrI: [+17.0ms, +101.0ms] (+0.17%, +1.01%)\n",
-            "  98% CrI: [-7.3ms, +109.1ms] (-0.07%, +1.09%)\n",
+            "  90% CrI: [+3.5ms, +105.5ms] (+0.04%, +1.05%)\n",
             "\n",
-            "P(candidate faster): 10.0%\n",
+            "P(candidate faster): 10.0% (1 of 10 draws)\n",
         );
 
         assert_eq!(summary.to_string(), EXPECTED);
@@ -320,7 +346,39 @@ mod tests {
     fn fixed_posterior_compact_matches_expected() -> Result<()> {
         let summary = fixed_summary(&default_intervals())?;
 
-        assert_eq!(summary.compact(), "10.0s -> 10.1s [-0.07%, +1.09%]");
+        assert_eq!(summary.compact(), "10.0s -> 10.1s [+0.04%, +1.05%]");
+
+        Ok(())
+    }
+
+    /// Ten thousand draws all on one side: the count and percentage are reported
+    /// as-is, not bounded by the draw resolution.
+    #[test]
+    fn a_one_sided_probability_reports_the_count_and_percentage() -> Result<()> {
+        let draws: Vec<Draw<Time>> = (0..10_000)
+            .map(|_| Draw {
+                baseline: Time::from_base(10.0),
+                candidate: Time::from_base(11.0),
+            })
+            .collect();
+        let slower = Summary::from_draws(&draws, &default_intervals())?;
+        assert_eq!(
+            slower.probability(),
+            "P(candidate faster): 0.0% (0 of 10,000 draws)"
+        );
+
+        let mirrored: Vec<Draw<Time>> = draws
+            .iter()
+            .map(|_| Draw {
+                baseline: Time::from_base(11.0),
+                candidate: Time::from_base(10.0),
+            })
+            .collect();
+        let faster = Summary::from_draws(&mirrored, &default_intervals())?;
+        assert_eq!(
+            faster.probability(),
+            "P(candidate faster): 100.0% (10,000 of 10,000 draws)"
+        );
 
         Ok(())
     }

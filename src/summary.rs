@@ -23,6 +23,28 @@ impl Interval {
         (tail, 1.0 - tail)
     }
 
+    /// Rejects widths whose tails are narrower than one repetition's share of the
+    /// posterior, i.e. anything above `1 - 2/pairs`. Ten pairs cap the width at 80%.
+    ///
+    /// A bootstrap quantile beyond the first order statistic's weight describes the
+    /// resampling noise rather than the data, so such an interval is refused up front
+    /// instead of printed after the benchmarks have run.
+    pub fn validate_for_pairs(self, pairs: usize) -> Result<Self> {
+        let widest = 100.0 * (pairs - 2) as f64 / pairs as f64;
+
+        ensure!(
+            self.percent() <= widest + 1e-6,
+            "A {:.0}% interval needs each tail to span at least one of the {} paired \
+             repetitions; the widest supported interval at {} repetitions is {:.0}%.",
+            self.percent(),
+            pairs,
+            pairs,
+            widest
+        );
+
+        Ok(self)
+    }
+
     pub fn percent(self) -> f64 {
         100.0 * self.0
     }
@@ -74,6 +96,7 @@ pub struct Summary<M> {
     pub candidate: M,
     pub change: Change<M>,
     pub probability_candidate_lower: f64,
+    pub draws: usize,
 }
 
 impl<M: Metric> Summary<M> {
@@ -93,6 +116,7 @@ impl<M: Metric> Summary<M> {
             baseline: M::from_base(baseline.median()),
             candidate: M::from_base(candidate.median()),
             probability_candidate_lower: absolute.fraction_below(0.0),
+            draws: draws.len(),
             change: Change {
                 absolute_median: M::from_base(absolute.median()),
                 relative_median: relative.as_ref().map(Quantiles::median),
@@ -158,5 +182,30 @@ impl Quantiles {
 
     fn fraction_below(&self, threshold: f64) -> f64 {
         self.0.partition_point(|&value| value < threshold) as f64 / self.0.len() as f64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_interval_at_the_repetition_boundary_is_accepted() -> Result<()> {
+        // Ten pairs put one repetition in each 10% tail, so exactly 80% is the widest.
+        Interval::new(0.8)?.validate_for_pairs(10)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn an_interval_wider_than_the_repetitions_support_is_rejected() -> Result<()> {
+        let error = Interval::new(0.98)?
+            .validate_for_pairs(10)
+            .err()
+            .expect("98% exceeds what ten pairs support");
+
+        assert!(error.to_string().contains("80%"), "{error}");
+
+        Ok(())
     }
 }

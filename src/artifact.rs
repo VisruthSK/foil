@@ -103,14 +103,26 @@ pub(crate) fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> 
         },
         suite_lifecycle: LifecycleDto {
             startup: utf8("suite startup", config.suite_lifecycle.startup)?,
-            startup_each_run: utf8("suite startup-each-run", config.suite_lifecycle.startup_each_run)?,
-            teardown_each_run: utf8("suite teardown-each-run", config.suite_lifecycle.teardown_each_run)?,
+            startup_each_run: utf8(
+                "suite startup-each-run",
+                config.suite_lifecycle.startup_each_run,
+            )?,
+            teardown_each_run: utf8(
+                "suite teardown-each-run",
+                config.suite_lifecycle.teardown_each_run,
+            )?,
             teardown: utf8("suite teardown", config.suite_lifecycle.teardown)?,
         },
         benchmark_lifecycle: LifecycleDto {
             startup: utf8("benchmark startup", config.benchmark_lifecycle.startup)?,
-            startup_each_run: utf8("benchmark startup-each-run", config.benchmark_lifecycle.startup_each_run)?,
-            teardown_each_run: utf8("benchmark teardown-each-run", config.benchmark_lifecycle.teardown_each_run)?,
+            startup_each_run: utf8(
+                "benchmark startup-each-run",
+                config.benchmark_lifecycle.startup_each_run,
+            )?,
+            teardown_each_run: utf8(
+                "benchmark teardown-each-run",
+                config.benchmark_lifecycle.teardown_each_run,
+            )?,
             teardown: utf8("benchmark teardown", config.benchmark_lifecycle.teardown)?,
         },
         command: utf8("benchmark", config.command)?,

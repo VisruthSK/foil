@@ -338,7 +338,9 @@ fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
 fn command_line(spec: &CommandSpec) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     let mut line = Vec::new();
-    for argument in std::iter::once(spec.program.as_os_str()).chain(spec.args.iter().map(OsString::as_os_str)) {
+    for argument in
+        std::iter::once(spec.program.as_os_str()).chain(spec.args.iter().map(OsString::as_os_str))
+    {
         if !line.is_empty() {
             line.push(b' ' as u16);
         }

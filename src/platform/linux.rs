@@ -127,7 +127,9 @@ impl Prepared {
                 let fd = BorrowedFd::borrow_raw(procs_fd);
                 match write(fd, b"0") {
                     Ok(1) => Ok(()),
-                    Ok(_) => Err(io::Error::other("write to cgroup.procs did not write all bytes")),
+                    Ok(_) => Err(io::Error::other(
+                        "write to cgroup.procs did not write all bytes",
+                    )),
                     Err(error) => Err(error.into()),
                 }
             });
