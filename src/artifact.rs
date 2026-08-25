@@ -1,7 +1,7 @@
 use crate::{Interval, Metric, Pair, Posterior, Repetition, Revision, RunOrder, Shrinkage};
 
 use anyhow::{Context, Result};
-use serde_json::json;
+use serde::Serialize;
 use std::{
     ffi::OsString,
     fs::File,
@@ -33,53 +33,91 @@ pub(crate) struct LifecycleConfig<'a> {
     pub(crate) teardown: &'a [OsString],
 }
 
-fn utf8<'a>(name: &str, command: &'a [OsString]) -> Result<Vec<&'a str>> {
+fn utf8(name: &str, command: &[OsString]) -> Result<Vec<String>> {
     command
         .iter()
         .map(|part| {
             part.to_str()
+                .map(|s| s.to_owned())
                 .with_context(|| format!("The {name} command contains non-UTF-8 text."))
         })
         .collect()
 }
 
+#[derive(Serialize)]
+struct RevisionDto {
+    revision: String,
+    hash: String,
+}
+
+#[derive(Serialize)]
+struct LifecycleDto {
+    startup: Vec<String>,
+    startup_each_run: Vec<String>,
+    teardown_each_run: Vec<String>,
+    teardown: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ConfigDto<'a> {
+    seed: u64,
+    repetitions: usize,
+    block_size: usize,
+    draws: usize,
+    timeout_seconds: Option<u64>,
+    isolate: bool,
+    shrinkage: f64,
+    intervals: Vec<f64>,
+    working_directory: Option<&'a Path>,
+    foil_version: &'static str,
+    baseline: RevisionDto,
+    candidate: RevisionDto,
+    suite_lifecycle: LifecycleDto,
+    benchmark_lifecycle: LifecycleDto,
+    command: Vec<String>,
+}
+
 pub(crate) fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
-    let value = json!({
-        "seed": config.seed,
-        "repetitions": config.repetitions,
-        "block_size": config.block_size,
-        "draws": config.draws,
-        "timeout_seconds": config.timeout_seconds,
-        "isolate": config.isolate,
-        "shrinkage": config.shrinkage.get(),
-        "intervals": config.intervals.iter().map(|interval| interval.percent() / 100.0).collect::<Vec<_>>(),
-        "working_directory": config.working_directory,
-        "foil_version": env!("CARGO_PKG_VERSION"),
-        "baseline": {
-            "revision": config.baseline.name(),
-            "hash": config.baseline.hash(),
+    let dto = ConfigDto {
+        seed: config.seed,
+        repetitions: config.repetitions,
+        block_size: config.block_size,
+        draws: config.draws,
+        timeout_seconds: config.timeout_seconds,
+        isolate: config.isolate,
+        shrinkage: config.shrinkage.get(),
+        intervals: config
+            .intervals
+            .iter()
+            .map(|interval| interval.percent() / 100.0)
+            .collect(),
+        working_directory: config.working_directory,
+        foil_version: env!("CARGO_PKG_VERSION"),
+        baseline: RevisionDto {
+            revision: config.baseline.name().to_owned(),
+            hash: config.baseline.hash().to_owned(),
         },
-        "candidate": {
-            "revision": config.candidate.name(),
-            "hash": config.candidate.hash(),
+        candidate: RevisionDto {
+            revision: config.candidate.name().to_owned(),
+            hash: config.candidate.hash().to_owned(),
         },
-        "suite_lifecycle": {
-            "startup": utf8("suite startup", config.suite_lifecycle.startup)?,
-            "startup_each_run": utf8("suite startup-each-run", config.suite_lifecycle.startup_each_run)?,
-            "teardown_each_run": utf8("suite teardown-each-run", config.suite_lifecycle.teardown_each_run)?,
-            "teardown": utf8("suite teardown", config.suite_lifecycle.teardown)?,
+        suite_lifecycle: LifecycleDto {
+            startup: utf8("suite startup", config.suite_lifecycle.startup)?,
+            startup_each_run: utf8("suite startup-each-run", config.suite_lifecycle.startup_each_run)?,
+            teardown_each_run: utf8("suite teardown-each-run", config.suite_lifecycle.teardown_each_run)?,
+            teardown: utf8("suite teardown", config.suite_lifecycle.teardown)?,
         },
-        "benchmark_lifecycle": {
-            "startup": utf8("benchmark startup", config.benchmark_lifecycle.startup)?,
-            "startup_each_run": utf8("benchmark startup-each-run", config.benchmark_lifecycle.startup_each_run)?,
-            "teardown_each_run": utf8("benchmark teardown-each-run", config.benchmark_lifecycle.teardown_each_run)?,
-            "teardown": utf8("benchmark teardown", config.benchmark_lifecycle.teardown)?,
+        benchmark_lifecycle: LifecycleDto {
+            startup: utf8("benchmark startup", config.benchmark_lifecycle.startup)?,
+            startup_each_run: utf8("benchmark startup-each-run", config.benchmark_lifecycle.startup_each_run)?,
+            teardown_each_run: utf8("benchmark teardown-each-run", config.benchmark_lifecycle.teardown_each_run)?,
+            teardown: utf8("benchmark teardown", config.benchmark_lifecycle.teardown)?,
         },
-        "command": utf8("benchmark", config.command)?,
-    });
+        command: utf8("benchmark", config.command)?,
+    };
 
     let mut writer = BufWriter::new(File::create(path)?);
-    serde_json::to_writer_pretty(&mut writer, &value)?;
+    serde_json::to_writer_pretty(&mut writer, &dto)?;
     writeln!(writer)?;
     writer.flush()?;
 
