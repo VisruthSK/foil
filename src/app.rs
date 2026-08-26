@@ -2,8 +2,8 @@ use crate::analysis::analyze_checked;
 use crate::config::{Cli, Lifecycle, ResolvedSuiteConfig, RunConfig, Suite};
 use crate::platform::{CommandSpec, Interrupt};
 use crate::{
-    BenchmarkLog, Config, LifecycleConfig, MeasurementsCsv, Pair, Repetition, Repetitions,
-    Revision, RunCommand, RunOrder, RunOutput, Side, Summary, Time, Worktree,
+    BenchmarkLog, CommandTemplate, Config, LifecycleConfig, MeasurementsCsv, Pair, Repetition,
+    Repetitions, Revision, RunOrder, RunOutput, Side, Summary, Time, Worktree, run_unmeasured,
     working_tree_has_modified_tracked_files, write_config_json, write_posterior_csv,
 };
 
@@ -27,14 +27,14 @@ struct Worktrees {
 }
 
 struct LifecycleCommands {
-    startup: Option<RunCommand>,
-    startup_each_run: Option<RunCommand>,
-    teardown_each_run: Option<RunCommand>,
-    teardown: Option<RunCommand>,
+    startup: Option<CommandTemplate>,
+    startup_each_run: Option<CommandTemplate>,
+    teardown_each_run: Option<CommandTemplate>,
+    teardown: Option<CommandTemplate>,
 }
 
 impl LifecycleCommands {
-    fn new(lifecycle: &Lifecycle, build: impl Fn(&[OsString]) -> Option<RunCommand>) -> Self {
+    fn new(lifecycle: &Lifecycle, build: impl Fn(&[OsString]) -> Option<CommandTemplate>) -> Self {
         Self {
             startup: build(&lifecycle.startup),
             startup_each_run: build(&lifecycle.startup_each_run),
@@ -273,9 +273,12 @@ fn compare(
     let run_command = |parts: &[OsString]| build_command(parts, working_directory.clone(), &envs);
     let suite_commands = LifecycleCommands::new(suite_lifecycle, run_command);
     let benchmark_commands = LifecycleCommands::new(&lifecycle, run_command);
+    // Clap requires at least one command argument.
+    let benchmark_template = build_command(&command, working_directory.clone(), &envs)
+        .expect("the benchmark command is non-empty");
     let benchmark = Pair {
-        baseline: command_spec(&command, &worktrees.baseline, &working_directory, &envs)?,
-        candidate: command_spec(&command, &worktrees.candidate, &working_directory, &envs)?,
+        baseline: benchmark_template.at(worktrees.baseline.path()),
+        candidate: benchmark_template.at(worktrees.candidate.path()),
     };
     let timeout = timeout.map(|seconds| Duration::from_secs(seconds.get()));
 
@@ -471,34 +474,13 @@ fn build_command(
     parts: &[OsString],
     working_directory: Option<std::path::PathBuf>,
     envs: &[(String, String)],
-) -> Option<RunCommand> {
+) -> Option<CommandTemplate> {
     let (program, arguments) = parts.split_first()?;
-    Some(RunCommand::new(
+    Some(CommandTemplate::new(
         program.clone(),
         arguments.to_vec(),
         working_directory,
-        envs.to_vec(),
-    ))
-}
-
-fn command_spec(
-    parts: &[OsString],
-    worktree: &Worktree,
-    working_directory: &Option<std::path::PathBuf>,
-    env: &[(String, String)],
-) -> Result<CommandSpec> {
-    let (program, args) = parts
-        .split_first()
-        .expect("Clap requires at least one command argument.");
-    let cwd = working_directory.as_ref().map_or_else(
-        || worktree.path().to_owned(),
-        |path| worktree.path().join(path),
-    );
-    Ok(CommandSpec::new(
-        program.clone(),
-        args.to_vec(),
-        cwd,
-        env.iter()
+        envs.iter()
             .map(|(key, value)| (key.into(), value.into()))
             .collect(),
     ))
@@ -514,7 +496,7 @@ fn lifecycle_config(lifecycle: &Lifecycle) -> LifecycleConfig<'_> {
 }
 
 fn run_in(
-    command: Option<&RunCommand>,
+    command: Option<&CommandTemplate>,
     worktree: &Worktree,
     interrupt: &Interrupt,
     side: Side,
@@ -522,21 +504,19 @@ fn run_in(
 ) -> Result<()> {
     command.map_or(Ok(()), |command| {
         let label = format!("{side} {phase}");
-        command
-            .run_once_in(worktree, interrupt, &label)
+        run_unmeasured(&command.at(worktree.path()), interrupt)
             .with_context(|| format!("The {label} failed."))
     })
 }
 
 fn run_at(
-    command: Option<&RunCommand>,
+    command: Option<&CommandTemplate>,
     directory: &Path,
     interrupt: &Interrupt,
     label: &str,
 ) -> Result<()> {
     command.map_or(Ok(()), |command| {
-        command
-            .run_once_at(directory, interrupt, label)
+        run_unmeasured(&command.at(directory), interrupt)
             .with_context(|| format!("The {label} failed."))
     })
 }
@@ -557,7 +537,7 @@ fn scoped<T>(
 }
 
 fn run_in_both(
-    command: Option<&RunCommand>,
+    command: Option<&CommandTemplate>,
     worktrees: &Pair<Worktree>,
     interrupt: &Interrupt,
     phase: &str,
@@ -568,12 +548,7 @@ fn run_in_both(
 
     let mut first_error = None;
     for side in [Side::Baseline, Side::Candidate] {
-        if let Err(error) = command
-            .run_once_in(
-                worktrees.get(side),
-                interrupt,
-                &format!("{side} benchmark {phase}"),
-            )
+        if let Err(error) = run_unmeasured(&command.at(worktrees.get(side).path()), interrupt)
             .with_context(|| format!("The {side} {phase} failed."))
         {
             if first_error.is_some() {

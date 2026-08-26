@@ -1,8 +1,8 @@
 use super::{CommandSpec, Wait};
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     io,
-    os::windows::io::OwnedHandle,
+    os::windows::{ffi::OsStrExt, io::OwnedHandle},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -28,8 +28,29 @@ pub(crate) struct Workload {
     job: raw::Job,
 }
 
+/// Everything computable before the timed interval begins.
+pub(crate) struct Prepared {
+    job: raw::Job,
+    attribute_list: raw::AttributeList,
+    input: OwnedHandle,
+    output: OwnedHandle,
+    application: Vec<u16>,
+    command_line: Vec<u16>,
+    environment: Option<Vec<u16>>,
+    cwd: Vec<u16>,
+}
+
 impl Workload {
-    pub(crate) fn prepare() -> io::Result<Prepared> {
+    pub(crate) fn prepare(spec: &CommandSpec) -> io::Result<Prepared> {
+        reject_embedded_nuls(spec)?;
+
+        // Resolution happens here rather than when the benchmark is configured, so a
+        // `startup` command can create the executable this command names.
+        let application = wide(resolve_application(spec)?.as_os_str());
+        let command_line = command_line(spec);
+        let environment = environment_block(&spec.env);
+        let cwd = wide(spec.cwd.as_os_str());
+
         let job = raw::Job::new()?;
         let (input, output) = raw::null_stdio_handles()?;
         let attribute_list = raw::AttributeList::new()?
@@ -40,25 +61,10 @@ impl Workload {
             attribute_list,
             input,
             output,
-            error_output: None,
-        })
-    }
-
-    /// A workload whose stdout and stderr are spooled to files for diagnostics.
-    pub(crate) fn prepare_spooled(stdout: &Path, stderr: &Path) -> io::Result<Prepared> {
-        let job = raw::Job::new()?;
-        let input = raw::null_stdio_handles()?.0;
-        let stdout_file = raw::create_inheritable_file(stdout)?;
-        let stderr_file = raw::create_inheritable_file(stderr)?;
-        let attribute_list = raw::AttributeList::new()?
-            .with_job(&job)?
-            .with_inherited_handles(&[&input, &stdout_file, &stderr_file])?;
-        Ok(Prepared {
-            job,
-            attribute_list,
-            input,
-            output: stdout_file,
-            error_output: Some(stderr_file),
+            application,
+            command_line,
+            environment,
+            cwd,
         })
     }
 
@@ -81,35 +87,15 @@ impl Workload {
     }
 }
 
-pub(crate) struct Prepared {
-    job: raw::Job,
-    attribute_list: raw::AttributeList,
-    input: OwnedHandle,
-    output: OwnedHandle,
-    // Set only when spooling; otherwise stderr shares `output`.
-    error_output: Option<OwnedHandle>,
-}
-
 impl Prepared {
-    pub(crate) fn spawn(self, spec: &CommandSpec) -> io::Result<Workload> {
-        // Resolution happens here rather than when the benchmark is configured, so a
-        // `startup` command can create the executable this command names.
-        let application = resolve_application(spec)?;
-        let application = wide(application.as_os_str());
-        let mut command_line = command_line(spec);
-        let environment = environment_block(&spec.env);
-        let cwd = wide(spec.cwd.as_os_str());
+    pub(crate) fn spawn(mut self) -> io::Result<Workload> {
         let child = raw::spawn_process(
-            &application,
-            &mut command_line,
-            &environment,
-            &cwd,
+            &mut self.application,
+            &mut self.command_line,
+            self.environment.as_deref_mut(),
+            &self.cwd,
             &self.attribute_list,
-            raw::StdioHandles {
-                stdin: &self.input,
-                stdout: &self.output,
-                stderr: self.error_output.as_ref().unwrap_or(&self.output),
-            },
+            (&self.input, &self.output),
         )?;
         Ok(Workload {
             child,
@@ -167,8 +153,7 @@ fn not_found(program: &OsString, attempted: &[PathBuf]) -> io::Error {
     io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "Could not find the benchmark program `{}`. A relative program resolves \
-             against the benchmark's working directory. Tried: {tried}.",
+            "Could not find the benchmark program `{}`. Tried: {tried}.",
             program.to_string_lossy()
         ),
     )
@@ -316,14 +301,33 @@ fn command_line(spec: &CommandSpec) -> Vec<u16> {
     line
 }
 
-fn environment_block(overrides: &[(OsString, OsString)]) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
+/// `None` inherits the parent environment untouched. Windows matches and sorts
+/// names case-insensitively; fold them like Rust std does, over UTF-16 units.
+fn environment_block(overrides: &[(OsString, OsString)]) -> Option<Vec<u16>> {
+    if overrides.is_empty() {
+        return None;
+    }
+
+    fn folded(name: &OsStr) -> Vec<u16> {
+        name.encode_wide()
+            .map(|unit| {
+                if (b'a' as u16..=b'z' as u16).contains(&unit) {
+                    unit - 32
+                } else {
+                    unit
+                }
+            })
+            .collect()
+    }
+
     let mut variables: Vec<_> = std::env::vars_os().collect();
     for (key, value) in overrides {
-        variables.retain(|(existing, _)| !existing.eq_ignore_ascii_case(key));
+        let folded_key = folded(key);
+        variables.retain(|(existing, _)| folded(existing) != folded_key);
         variables.push((key.clone(), value.clone()));
     }
-    variables.sort_by_cached_key(|(key, _)| key.to_string_lossy().to_lowercase());
+    variables.sort_by_cached_key(|(key, _)| folded(key));
+
     let mut block = Vec::new();
     for (key, value) in variables {
         block.extend(key.encode_wide());
@@ -332,5 +336,29 @@ fn environment_block(overrides: &[(OsString, OsString)]) -> Vec<u16> {
         block.push(0);
     }
     block.push(0);
-    block
+    Some(block)
+}
+
+/// Interior NULs would silently truncate the strings Win32 reads.
+fn reject_embedded_nuls(spec: &CommandSpec) -> io::Result<()> {
+    fn reject(value: &OsStr, what: &str) -> io::Result<()> {
+        if value.encode_wide().any(|unit| unit == 0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{what} contains an embedded NUL"),
+            ));
+        }
+        Ok(())
+    }
+
+    reject(&spec.program, "program")?;
+    for argument in &spec.args {
+        reject(argument, "argument")?;
+    }
+    reject(spec.cwd.as_os_str(), "working directory")?;
+    for (key, value) in &spec.env {
+        reject(key, "environment key")?;
+        reject(value, "environment value")?;
+    }
+    Ok(())
 }

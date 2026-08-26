@@ -1,5 +1,5 @@
-//! The crate's only unsafe module: every Win32 call, behind safe RAII types
-//! that own their handles through `OwnedHandle`.
+//! All Windows-specific unsafe code lives here, behind safe RAII types that
+//! own their handles through `OwnedHandle`.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -20,8 +20,7 @@ use windows_sys::Win32::{
     },
     Security::SECURITY_ATTRIBUTES,
     Storage::FileSystem::{
-        CREATE_ALWAYS, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING,
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     },
     System::{
         JobObjects::{
@@ -34,7 +33,7 @@ use windows_sys::Win32::{
             DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
             INFINITE, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
-            STARTF_USESTDHANDLES, STARTUPINFOEXW, SetEvent, TerminateProcess,
+            ResetEvent, STARTF_USESTDHANDLES, STARTUPINFOEXW, SetEvent, TerminateProcess,
             UpdateProcThreadAttribute, WaitForMultipleObjects, WaitForSingleObject,
         },
     },
@@ -90,6 +89,12 @@ impl Event {
     pub(crate) fn signal(&self) {
         // SAFETY: `self.0` is a valid event handle for the lifetime of `self`.
         unsafe { SetEvent(self.as_handle()) };
+    }
+
+    /// Clears a pending signal, so later waits start clean.
+    pub(crate) fn reset(&self) -> io::Result<()> {
+        // SAFETY: `self.0` is a valid event handle for the lifetime of `self`.
+        bool_result(unsafe { ResetEvent(self.as_handle()) })
     }
 
     fn as_handle(&self) -> HANDLE {
@@ -241,62 +246,23 @@ pub(crate) fn null_stdio_handles() -> io::Result<(OwnedHandle, OwnedHandle)> {
     Ok((open(GENERIC_READ)?, open(GENERIC_WRITE)?))
 }
 
-/// Opens a fresh, writable, inheritable handle at `path` for spooling one of a
-/// child's output streams.
-pub(crate) fn create_inheritable_file(path: &std::path::Path) -> io::Result<OwnedHandle> {
-    use std::os::windows::ffi::OsStrExt;
-    let mut wide_path: Vec<u16> = path.as_os_str().encode_wide().collect();
-    wide_path.push(0);
-
-    let security = SECURITY_ATTRIBUTES {
-        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: ptr::null_mut(),
-        bInheritHandle: TRUE,
-    };
-    // SAFETY: `wide_path` is NUL-terminated and outlives the call; the security
-    // attributes pointer stays valid for the call.
-    let handle = unsafe {
-        CreateFileW(
-            wide_path.as_ptr(),
-            GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            &security,
-            CREATE_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL,
-            ptr::null_mut(),
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `handle` is a valid file handle just returned by CreateFileW;
-    // ownership transfers to the OwnedHandle here.
-    Ok(unsafe { OwnedHandle::from_raw_handle(handle as _) })
-}
-
-/// The three stdio handles a spawned child inherits.
-pub(crate) struct StdioHandles<'a> {
-    pub(crate) stdin: &'a OwnedHandle,
-    pub(crate) stdout: &'a OwnedHandle,
-    pub(crate) stderr: &'a OwnedHandle,
-}
-
 /// Spawns `command_line` with `application` as the resolved executable image,
 /// attached to `attribute_list`'s job, with stdio wired to the inherited handles.
+/// A `None` environment inherits the parent's.
 pub(crate) fn spawn_process(
-    application: &[u16],
+    application: &mut [u16],
     command_line: &mut [u16],
-    environment: &[u16],
+    environment: Option<&mut [u16]>,
     cwd: &[u16],
     attribute_list: &AttributeList,
-    stdio: StdioHandles<'_>,
+    stdio: (&OwnedHandle, &OwnedHandle),
 ) -> io::Result<Child> {
     let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    startup.StartupInfo.hStdInput = stdio.stdin.as_raw_handle() as HANDLE;
-    startup.StartupInfo.hStdOutput = stdio.stdout.as_raw_handle() as HANDLE;
-    startup.StartupInfo.hStdError = stdio.stderr.as_raw_handle() as HANDLE;
+    startup.StartupInfo.hStdInput = stdio.0.as_raw_handle() as HANDLE;
+    startup.StartupInfo.hStdOutput = stdio.1.as_raw_handle() as HANDLE;
+    startup.StartupInfo.hStdError = stdio.1.as_raw_handle() as HANDLE;
     startup.lpAttributeList = attribute_list.as_ptr();
 
     let mut info: PROCESS_INFORMATION = unsafe { zeroed() };
@@ -305,20 +271,23 @@ pub(crate) fn spawn_process(
     // - `application` is NUL-terminated and stays alive for the call; the API
     //   treats lpApplicationName as read-only.
     // - `command_line` is writable and NUL-terminated, as the API requires.
-    // - `environment` is a double-NUL-terminated block sorted for case-insensitive lookup.
+    // - `environment`, when present, is a double-NUL-terminated block sorted for
+    //   case-insensitive lookup; null inherits the parent environment.
     // - `cwd` is NUL-terminated.
     // - `startup` and its attribute list (and the data its attributes reference)
     //   all remain alive and unmodified for the duration of the call.
     // - The inherited stdio handles remain valid for the duration of the call.
     bool_result(unsafe {
         CreateProcessW(
-            application.as_ptr(),
+            application.as_mut_ptr(),
             command_line.as_mut_ptr(),
             ptr::null(),
             ptr::null(),
             TRUE,
             EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-            environment.as_ptr().cast(),
+            environment
+                .map_or(ptr::null_mut(), |block| block.as_mut_ptr())
+                .cast(),
             cwd.as_ptr(),
             &startup.StartupInfo,
             &mut info,
@@ -350,7 +319,10 @@ pub(crate) fn wait_for(
             unsafe { WaitForMultipleObjects(2, handles.as_ptr(), FALSE, milliseconds(remaining)) };
         match result {
             WAIT_OBJECT_0 => return child.exit_status().map(Wait::Exited),
-            value if value == WAIT_OBJECT_0 + 1 => return Ok(Wait::Interrupted),
+            value if value == WAIT_OBJECT_0 + 1 => {
+                interrupt.reset()?;
+                return Ok(Wait::Interrupted);
+            }
             WAIT_TIMEOUT if timeout.is_some_and(|limit| started.elapsed() >= limit) => {
                 return Ok(Wait::TimedOut);
             }

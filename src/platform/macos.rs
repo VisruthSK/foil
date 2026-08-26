@@ -1,11 +1,8 @@
 use super::{CommandSpec, Wait};
 use std::{
     io,
-    os::{
-        fd::{AsRawFd, OwnedFd},
-        unix::process::CommandExt,
-    },
-    process::Child,
+    os::fd::{AsRawFd, OwnedFd},
+    process::{Child, Command},
     ptr,
     sync::Arc,
     time::{Duration, Instant},
@@ -14,7 +11,7 @@ use std::{
 use rustix::buffer::spare_capacity;
 use rustix::event::kqueue::{Event, EventFilter, EventFlags, ProcessEvents, kevent, kqueue};
 use rustix::fs::{OFlags, fcntl_setfl};
-use rustix::io::{Errno, FdFlags, fcntl_setfd, write};
+use rustix::io::{Errno, FdFlags, fcntl_setfd, read, write};
 use rustix::pipe::pipe;
 use rustix::process::{Pid, Signal, kill_process_group};
 
@@ -40,15 +37,6 @@ impl Interrupt {
     pub(crate) fn signal(&self) {
         let _ = write(&*self.write, &[1u8]);
     }
-
-    /// Non-blocking interrupt check; stays set once signaled.
-    pub(crate) fn poll_read(&self) -> io::Result<bool> {
-        use rustix::event::{PollFd, PollFlags, Timespec, poll};
-
-        let mut fds = [PollFd::new(&*self.read, PollFlags::IN)];
-        let zero = Timespec::try_from(std::time::Duration::ZERO).expect("a zero duration fits");
-        Ok(matches!(poll(&mut fds, Some(&zero)), Ok(ready) if ready > 0))
-    }
 }
 
 pub(crate) struct Workload {
@@ -60,11 +48,15 @@ pub(crate) struct Workload {
 
 pub(crate) struct Prepared {
     kqueue: OwnedFd,
+    command: Command,
 }
 
 impl Workload {
-    pub(crate) fn prepare() -> io::Result<Prepared> {
-        Ok(Prepared { kqueue: kqueue()? })
+    pub(crate) fn prepare(spec: &CommandSpec) -> io::Result<Prepared> {
+        Ok(Prepared {
+            kqueue: kqueue()?,
+            command: spec.command(),
+        })
     }
 
     pub(crate) fn wait(
@@ -121,30 +113,30 @@ impl Workload {
             {
                 return self.child.wait().map(Wait::Exited);
             }
+            drain_interrupt(&interrupt.read);
             return Ok(Wait::Interrupted);
         }
     }
 
     pub(crate) fn terminate(&mut self) -> io::Result<()> {
         let pgid = Pid::from_raw(self.pgid).expect("child pgid is positive");
-        let terminate = match kill_process_group(pgid, Signal::KILL) {
+        let terminated = match kill_process_group(pgid, Signal::KILL) {
             Ok(()) => Ok(()),
+            // The group already exited on its own.
             Err(Errno::SRCH) => Ok(()),
             Err(error) => Err(error.into()),
         };
-        if terminate.is_err() {
+        if terminated.is_err() {
             let _ = self.child.kill();
         }
-        let reap = self.child.wait().map(drop);
-        terminate.and(reap)
+        let reaped = self.child.wait().map(drop);
+        terminated.and(reaped)
     }
 }
 
 impl Prepared {
-    pub(crate) fn spawn(self, spec: &CommandSpec) -> io::Result<Workload> {
-        let mut command = spec.command();
-        command.process_group(0);
-        let child = command.spawn()?;
+    pub(crate) fn spawn(mut self) -> io::Result<Workload> {
+        let child = self.command.spawn()?;
         let pgid = child.id() as i32;
         Ok(Workload {
             child,
@@ -158,5 +150,14 @@ impl Drop for Workload {
     fn drop(&mut self) {
         let pgid = Pid::from_raw(self.pgid).expect("child pgid is positive");
         let _ = kill_process_group(pgid, Signal::KILL);
+    }
+}
+
+fn drain_interrupt(fd: &OwnedFd) {
+    loop {
+        match read(fd, &mut [0u8; 64]) {
+            Ok(n) if n > 0 => {}
+            _ => break,
+        }
     }
 }

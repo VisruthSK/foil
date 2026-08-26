@@ -1,27 +1,23 @@
 use super::{CommandSpec, Wait};
 use std::{
     env, fs,
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     io::{self, Read, Seek, Write},
     os::{
         fd::{AsRawFd, BorrowedFd, OwnedFd},
         unix::process::CommandExt,
     },
     path::PathBuf,
-    process::Child,
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    process::{Child, Command},
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
-use rustix::io::{Errno, write};
+use rustix::io::{Errno, read, write};
 use rustix::pipe::{PipeFlags, pipe_with};
 use rustix::process::{Pid, PidfdFlags, pidfd_open};
 
-static CGROUP_ID: AtomicU64 = AtomicU64::new(0);
 static CGROUP_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Clone)]
@@ -42,13 +38,6 @@ impl Interrupt {
     pub(crate) fn signal(&self) {
         let _ = write(&*self.write, &[1u8]);
     }
-
-    /// Non-blocking interrupt check; stays set once signaled.
-    pub(crate) fn poll_read(&self) -> io::Result<bool> {
-        let mut fds = [PollFd::new(&*self.read, PollFlags::IN)];
-        let zero = Timespec::try_from(Duration::ZERO).expect("a zero duration always fits");
-        Ok(matches!(poll(&mut fds, Some(&zero)), Ok(ready) if ready > 0))
-    }
 }
 
 pub(crate) struct Workload {
@@ -58,26 +47,40 @@ pub(crate) struct Workload {
 }
 
 pub(crate) struct Prepared {
+    command: Command,
     cgroup: Option<PathBuf>,
-    procs: File,
 }
 
 impl Workload {
-    pub(crate) fn prepare() -> io::Result<Prepared> {
+    pub(crate) fn prepare(spec: &CommandSpec) -> io::Result<Prepared> {
         let cgroup = create_cgroup()?;
-        let procs = match OpenOptions::new()
+        let procs = OpenOptions::new()
             .write(true)
             .open(cgroup.join("cgroup.procs"))
-        {
-            Ok(procs) => procs,
-            Err(error) => {
+            .map_err(|error| {
                 let _ = fs::remove_dir(&cgroup);
-                return Err(error);
-            }
-        };
+                error
+            })?;
+
+        // The closure owns the cgroup.procs handle; it stays open until the
+        // command is dropped, which happens after spawn has forked and exec'd.
+        let mut command = spec.command();
+        unsafe {
+            command.pre_exec(move || {
+                let fd = BorrowedFd::borrow_raw(procs.as_raw_fd());
+                match write(fd, b"0") {
+                    Ok(1) => Ok(()),
+                    Ok(_) => Err(io::Error::other(
+                        "write to cgroup.procs did not write all bytes",
+                    )),
+                    Err(error) => Err(error.into()),
+                }
+            });
+        }
+
         Ok(Prepared {
+            command,
             cgroup: Some(cgroup),
-            procs,
         })
     }
 
@@ -93,7 +96,10 @@ impl Workload {
         let started = Instant::now();
         loop {
             let remaining = timeout.map(|limit| limit.saturating_sub(started.elapsed()));
-            let ts = remaining.map(|r| Timespec::try_from(r).expect("duration fits in Timespec"));
+            let ts = remaining
+                .map(Timespec::try_from)
+                .transpose()
+                .map_err(|_| io::Error::other("timeout exceeds the Timespec range"))?;
             match poll(&mut fds, ts.as_ref()) {
                 Ok(0) => return Ok(Wait::TimedOut),
                 Ok(_) => {
@@ -101,6 +107,7 @@ impl Workload {
                         return self.child.wait().map(Wait::Exited);
                     }
                     if fds[1].revents().contains(PollFlags::IN) {
+                        drain_interrupt(&interrupt.read);
                         return Ok(Wait::Interrupted);
                     }
                 }
@@ -115,33 +122,18 @@ impl Workload {
         if terminate.is_err() {
             let _ = self.child.kill();
         }
-        let reap = self.child.wait().map(drop);
+        let reaped = self.child.wait().map(drop);
         let remove = terminate
             .as_ref()
             .map_or(Ok(()), |_| remove_when_empty(&self.cgroup));
-        terminate.and(reap).and(remove)
+        terminate.and(reaped).and(remove)
     }
 }
 
 impl Prepared {
-    pub(crate) fn spawn(mut self, spec: &CommandSpec) -> io::Result<Workload> {
-        let procs_fd = self.procs.as_raw_fd();
+    pub(crate) fn spawn(mut self) -> io::Result<Workload> {
         let cgroup = self.cgroup.take().expect("prepared cgroup is available");
-        let mut command = spec.command();
-        unsafe {
-            command.pre_exec(move || {
-                // SAFETY: procs_fd is a valid open file descriptor for the lifetime of this closure.
-                let fd = BorrowedFd::borrow_raw(procs_fd);
-                match write(fd, b"0") {
-                    Ok(1) => Ok(()),
-                    Ok(_) => Err(io::Error::other(
-                        "write to cgroup.procs did not write all bytes",
-                    )),
-                    Err(error) => Err(error.into()),
-                }
-            });
-        }
-        let mut child = match command.spawn() {
+        let mut child = match self.command.spawn() {
             Ok(child) => child,
             Err(error) => {
                 let _ = fs::remove_dir(&cgroup);
@@ -152,14 +144,10 @@ impl Prepared {
         let pidfd = match pidfd_open(pid, PidfdFlags::empty()) {
             Ok(pidfd) => pidfd,
             Err(error) => {
-                let error = io::Error::from(error);
                 let _ = kill_cgroup(&cgroup);
                 let _ = child.wait();
                 let _ = remove_when_empty(&cgroup);
-                return Err(io::Error::new(
-                    error.kind(),
-                    format!("pidfd_open failed; foil requires Linux 5.14 or newer: {error}"),
-                ));
+                return Err(io::Error::from(error));
             }
         };
         Ok(Workload {
@@ -182,6 +170,15 @@ impl Drop for Workload {
     fn drop(&mut self) {
         let _ = kill_cgroup(&self.cgroup);
         let _ = fs::remove_dir(&self.cgroup);
+    }
+}
+
+fn drain_interrupt(fd: &OwnedFd) {
+    loop {
+        match read(fd, &mut [0u8; 64]) {
+            Ok(n) if n > 0 => {}
+            _ => break,
+        }
     }
 }
 
@@ -215,27 +212,21 @@ fn remove_when_empty(cgroup: &std::path::Path) -> io::Result<()> {
 
 fn create_cgroup() -> io::Result<PathBuf> {
     let root = cgroup_root()?;
-    for _ in 0..16 {
-        let id = CGROUP_ID.fetch_add(1, Ordering::Relaxed);
-        let path = root.join(format!("foil-{}-{id}", std::process::id()));
-        match fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => {
-                return Err(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "Failed to create a workload cgroup under {}. Run foil inside a writable delegated cgroup v2 subtree: {error}",
-                        root.display()
-                    ),
-                ));
-            }
+    let path = root.join(format!("foil-{}", std::process::id()));
+    fs::create_dir(&path).map_err(|error| {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "stale foil cgroup exists: {}; remove it or set FOIL_CGROUP_ROOT",
+                    path.display()
+                ),
+            )
+        } else {
+            error
         }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "Could not allocate a cgroup.",
-    ))
+    })?;
+    Ok(path)
 }
 
 fn cgroup_root() -> io::Result<&'static PathBuf> {

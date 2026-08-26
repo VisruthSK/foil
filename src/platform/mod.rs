@@ -36,7 +36,11 @@ impl CommandSpec {
     }
 
     #[cfg(not(windows))]
+    /// Builds the child's command: null stdio and an own process group, so
+    /// signals reach the whole workload and only it.
     pub(crate) fn command(&self) -> Command {
+        use std::os::unix::process::CommandExt;
+
         let mut command = Command::new(&self.program);
         command
             .args(&self.args)
@@ -44,7 +48,8 @@ impl CommandSpec {
             .envs(self.env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            .process_group(0);
         command
     }
 }
@@ -88,9 +93,9 @@ mod tests {
     }
 
     fn spawn(spec: &CommandSpec) -> Result<Workload> {
-        Workload::prepare()
+        Workload::prepare(spec)
             .context("prepare")?
-            .spawn(spec)
+            .spawn()
             .context("spawn")
     }
 
@@ -268,11 +273,9 @@ mod tests {
         );
         let interrupt = Interrupt::new()?;
 
-        let missing = Workload::prepare()
-            .context("prepare")?
-            .spawn(&command)
+        let missing = Workload::prepare(&command)
             .err()
-            .context("spawning a missing program should fail")?;
+            .context("preparing a missing program should fail")?;
         ensure!(missing.kind() == io::ErrorKind::NotFound, "{missing}");
 
         fs::copy(env::current_exe()?, &executable)?;
@@ -329,17 +332,13 @@ mod tests {
             env::current_dir()?,
             Vec::new(),
         );
-        let error = Workload::prepare()
-            .context("prepare")?
-            .spawn(&explicit)
+        let error = Workload::prepare(&explicit)
             .err()
             .context("an explicit batch file should be rejected")?;
         ensure!(error.to_string().contains("batch"), "{error}");
 
         let bare = CommandSpec::new("scripty".into(), Vec::new(), env::current_dir()?, env);
-        let error = Workload::prepare()
-            .context("prepare")?
-            .spawn(&bare)
+        let error = Workload::prepare(&bare)
             .err()
             .context("a batch file found through PATH should be rejected")?;
         ensure!(error.to_string().contains("batch"), "{error}");
@@ -371,9 +370,9 @@ mod tests {
             raw += started.elapsed();
             ensure!(status.success());
 
-            let prepared = Workload::prepare()?;
+            let prepared = Workload::prepare(&command)?;
             let started = Instant::now();
-            let mut workload = prepared.spawn(&command)?;
+            let mut workload = prepared.spawn()?;
             ensure!(matches!(
                 workload.wait(&interrupt, None)?,
                 Wait::Exited(status) if status.success()
@@ -383,6 +382,48 @@ mod tests {
         }
         let overhead = (native.as_secs_f64() - raw.as_secs_f64()) * 1e6 / RUNS as f64;
         eprintln!("native runner overhead: {overhead:.1} us/run");
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn failing_child() {
+        std::process::exit(3);
+    }
+
+    /// A child that fails reports its status to the waiter.
+    #[test]
+    fn a_failing_child_reports_its_status_to_the_waiter() -> Result<()> {
+        let interrupt = Interrupt::new()?;
+        let mut workload = spawn(&spec("platform::tests::failing_child", Vec::new())?)?;
+        ensure!(matches!(
+            workload.wait(&interrupt, Some(Duration::from_secs(5)))?,
+            Wait::Exited(status) if !status.success()
+        ));
+        workload.terminate()?;
+        Ok(())
+    }
+
+    /// The first interrupt is consumed by the wait that observed it, so
+    /// teardown and later workloads start clean; only a second Ctrl+C exits.
+    #[test]
+    fn an_interrupt_does_not_poison_later_workloads() -> Result<()> {
+        let interrupt = Interrupt::new()?;
+        interrupt.signal();
+        thread::sleep(Duration::from_millis(100));
+        let mut first = spawn(&spec("platform::tests::noop_child", Vec::new())?)?;
+        ensure!(matches!(
+            first.wait(&interrupt, Some(Duration::from_secs(5)))?,
+            Wait::Interrupted
+        ));
+        first.terminate()?;
+
+        let mut second = spawn(&spec("platform::tests::noop_child", Vec::new())?)?;
+        ensure!(matches!(
+            second.wait(&interrupt, Some(Duration::from_secs(5)))?,
+            Wait::Exited(status) if status.success()
+        ));
+        second.terminate()?;
         Ok(())
     }
 

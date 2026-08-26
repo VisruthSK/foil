@@ -2,7 +2,6 @@ mod analysis;
 mod app;
 mod artifact;
 mod config;
-mod lifecycle;
 mod metric;
 mod platform;
 mod posterior;
@@ -21,7 +20,7 @@ pub use metric::{Metric, PeakMemory, Time, Unit};
 pub use posterior::{Draw, Posterior, Shrinkage};
 pub(crate) use repetition::{Pair, Repetition, Repetitions, RunOrder, Side};
 pub use run::Bytes;
-pub(crate) use run::{BenchmarkLog, RunCommand, RunOutput};
+pub(crate) use run::{BenchmarkLog, CommandTemplate, RunOutput, run_unmeasured};
 pub use summary::{Change, ChangeBounds, Interval, Range, Summary};
 pub(crate) use worktree::{Revision, Worktree, working_tree_has_modified_tracked_files};
 

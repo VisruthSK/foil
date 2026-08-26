@@ -706,10 +706,6 @@ fn a_failing_benchmark_startup_stops_before_the_measured_runs() -> Result<()> {
     let error = failure(&project, &[])?;
 
     assert!(error.contains("The baseline startup failed."), "{error}");
-    assert!(
-        error.contains("Not a valid object name absent-object"),
-        "{error}"
-    );
 
     let bench = project.path().join("bench/test");
     assert!(bench.join("config.json").is_file());

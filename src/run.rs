@@ -1,5 +1,5 @@
 use crate::{
-    Side, Worktree,
+    Side,
     platform::{CommandSpec, Interrupt, Wait, Workload},
 };
 use anyhow::{Context, Result, bail};
@@ -13,11 +13,69 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(crate) struct RunCommand {
+/// A configured command that has not been bound to a working directory yet.
+pub(crate) struct CommandTemplate {
     program: OsString,
     args: Vec<OsString>,
     working_directory: Option<PathBuf>,
-    env: Vec<(String, String)>,
+    env: Vec<(OsString, OsString)>,
+}
+
+impl CommandTemplate {
+    pub(crate) fn new(
+        program: OsString,
+        args: Vec<OsString>,
+        working_directory: Option<PathBuf>,
+        env: Vec<(OsString, OsString)>,
+    ) -> Self {
+        Self {
+            program,
+            args,
+            working_directory,
+            env,
+        }
+    }
+
+    /// Resolves against a root directory into an executable spec.
+    pub(crate) fn at(&self, root: &Path) -> CommandSpec {
+        let cwd = self
+            .working_directory
+            .as_ref()
+            .map_or_else(|| root.to_owned(), |path| root.join(path));
+        CommandSpec::new(
+            self.program.clone(),
+            self.args.clone(),
+            cwd,
+            self.env.clone(),
+        )
+    }
+}
+
+/// Runs a command outside any measured interval: no timeout, no records.
+/// The first Ctrl+C interrupts it like any other workload; cleanup still runs.
+pub(crate) fn run_unmeasured(spec: &CommandSpec, interrupt: &Interrupt) -> Result<()> {
+    let mut workload = Workload::prepare(spec)
+        .context("Failed to prepare workload containment.")?
+        .spawn()?;
+    let outcome = workload.wait(interrupt, None);
+    let cleanup = workload.terminate();
+    match outcome? {
+        Wait::Exited(status) if status.success() => {
+            cleanup?;
+            Ok(())
+        }
+        Wait::Exited(status) => {
+            report_secondary(cleanup, "Cleanup");
+            bail!("{:?} failed with {status}.", spec.program);
+        }
+        Wait::Interrupted => {
+            report_secondary(cleanup, "Cleanup");
+            bail!("Interrupted.");
+        }
+        Wait::TimedOut => Err(anyhow::anyhow!(
+            "the platform reported a timeout without a timeout"
+        )),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -40,55 +98,6 @@ pub(crate) struct RunOutput {
     exit_status: ExitStatus,
     elapsed_time: Duration,
     peak_memory: Option<Bytes>,
-}
-
-impl RunCommand {
-    pub(crate) fn new(
-        program: OsString,
-        args: Vec<OsString>,
-        working_directory: Option<PathBuf>,
-        env: Vec<(String, String)>,
-    ) -> Self {
-        Self {
-            program,
-            args,
-            working_directory,
-            env,
-        }
-    }
-
-    pub(crate) fn run_once_in(
-        &self,
-        worktree: &Worktree,
-        interrupt: &Interrupt,
-        label: &str,
-    ) -> Result<()> {
-        self.run_once_at(worktree.path(), interrupt, label)
-    }
-
-    pub(crate) fn run_once_at(
-        &self,
-        directory: &Path,
-        interrupt: &Interrupt,
-        label: &str,
-    ) -> Result<()> {
-        let cwd = self
-            .working_directory
-            .as_ref()
-            .map_or_else(|| directory.to_owned(), |path| directory.join(path));
-        let spec = CommandSpec::new(
-            self.program.clone(),
-            self.args.clone(),
-            cwd,
-            self.env
-                .iter()
-                .map(|(key, value)| (key.into(), value.into()))
-                .collect(),
-        );
-        // Lifecycle commands run outside the measured interval; the executor
-        // bounds output, honors interrupts, and applies its own timeout.
-        crate::lifecycle::execute(&spec, interrupt, None, label)
-    }
 }
 
 impl RunOutput {
@@ -176,10 +185,11 @@ impl<W: Write> BenchmarkLog<W> {
         side: Side,
     ) -> Result<RunOutput> {
         self.starting(side);
-        let prepared = Workload::prepare().context("Failed to prepare workload containment.")?;
+        let prepared =
+            Workload::prepare(command).context("Failed to prepare workload containment.")?;
         let started = Instant::now();
         let mut workload = prepared
-            .spawn(command)
+            .spawn()
             .with_context(|| format!("Failed to run {:?}.", command.program))?;
         let remaining = timeout.map(|timeout| timeout.saturating_sub(started.elapsed()));
         let outcome = match workload.wait(interrupt, remaining) {
