@@ -23,7 +23,7 @@ use windows_sys::Win32::{
     },
     Security::SECURITY_ATTRIBUTES,
     Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS,
+        CREATE_ALWAYS, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
         OPEN_EXISTING,
     },
     System::{
@@ -150,8 +150,10 @@ impl AttributeList {
         // SAFETY: A null list with a valid byte count queries the required size;
         // the failure of this query call is expected and its result is ignored.
         unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 2, 0, &mut bytes) };
-        let storage = vec![0usize; bytes.div_ceil(size_of::<usize>())].into_boxed_slice();
-        let list = storage.as_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
+        let mut storage = vec![0usize; bytes.div_ceil(size_of::<usize>())].into_boxed_slice();
+        // The list is initialized and read through this pointer, so it is taken
+        // as mutable.
+        let list = storage.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
         // SAFETY: `list` points into `storage`, which was sized by the query
         // above for exactly 2 attributes; `bytes` remains writable for the call.
         bool_result(unsafe { InitializeProcThreadAttributeList(list, 2, 0, &mut bytes) })?;
@@ -251,8 +253,8 @@ pub(crate) fn null_stdio_handles() -> io::Result<(OwnedHandle, OwnedHandle)> {
     Ok((open(GENERIC_READ)?, open(GENERIC_WRITE)?))
 }
 
-/// Opens (creating or truncating) a writable, inheritable file handle at
-/// `path`, for spooling one of a child's output streams.
+/// Opens a fresh, writable, inheritable file handle at `path`, for spooling one
+/// of a child's output streams. Any existing file at `path` is truncated.
 pub(crate) fn create_inheritable_file(path: &std::path::Path) -> io::Result<OwnedHandle> {
     use std::os::windows::ffi::OsStrExt;
     let mut wide_path: Vec<u16> = path.as_os_str().encode_wide().collect();
@@ -271,7 +273,7 @@ pub(crate) fn create_inheritable_file(path: &std::path::Path) -> io::Result<Owne
             GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             &security,
-            OPEN_ALWAYS,
+            CREATE_ALWAYS,
             FILE_ATTRIBUTE_NORMAL,
             ptr::null_mut(),
         )
@@ -293,7 +295,6 @@ pub(crate) struct StdioHandles<'a> {
 
 /// Spawns `command_line` with `application` as the resolved executable image,
 /// attached to `attribute_list`'s job, with stdio wired to the inherited handles.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_process(
     application: &[u16],
     command_line: &mut [u16],

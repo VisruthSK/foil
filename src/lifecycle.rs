@@ -11,7 +11,7 @@
 //! final tail of each stream.
 
 use crate::platform::{CommandSpec, Interrupt};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow};
 use std::{
     fs::File,
     io::{Read, Seek},
@@ -34,46 +34,58 @@ pub(crate) fn execute(
     timeout: Option<Duration>,
     label: &str,
 ) -> Result<()> {
-    let directory = tempfile::tempdir().context("Failed to create a spool directory.")?;
-    let spool = Spool {
-        stdout: directory.path().join("stdout"),
-        stderr: directory.path().join("stderr"),
+    let spool = Spool::new()?;
+
+    let failure = match platform_run(spec, interrupt, timeout, &spool)
+        .with_context(|| format!("Failed to run {:?}.", spec.program))?
+    {
+        None => return Ok(()),
+        Some(failure) => failure,
     };
 
-    let outcome = platform_run(spec, interrupt, timeout, &spool)
-        .with_context(|| format!("Failed to run {:?}.", spec.program))?;
-
-    // Successful output is suppressed anyway, so only failures and aborts pay
-    // for reading the spooled tails. The TempDir cleans up either way.
-    if matches!(outcome, Outcome::Succeeded) {
-        return Ok(());
-    }
+    // Successful output is suppressed anyway, so only failures pay for reading
+    // the spooled tails.
     let stdout = tail_from_file(&spool.stdout)?;
     let stderr = tail_from_file(&spool.stderr)?;
 
-    match outcome {
-        Outcome::Failed(status) => bail!(
+    Err(match failure {
+        Failure::Exited(status) => anyhow!(
             "{:?} failed with {}.{}",
             spec.program,
             status,
             display_tails(label, &stdout, &stderr)
         ),
-        Outcome::Interrupted => bail!("Interrupted."),
-        Outcome::TimedOut(limit) => bail!("{:?} timed out after {limit:?}.", spec.program),
-        Outcome::Succeeded => unreachable!("handled above"),
-    }
+        Failure::Interrupted => anyhow!("Interrupted."),
+        Failure::TimedOut(limit) => anyhow!("{:?} timed out after {limit:?}.", spec.program),
+    })
 }
 
-enum Outcome {
-    Succeeded,
-    Failed(ExitStatus),
+/// Why a lifecycle command did not succeed, when it did not.
+enum Failure {
+    Exited(ExitStatus),
     Interrupted,
     TimedOut(Duration),
 }
 
+/// Temporary files that capture a command's output streams. Deleting them when
+/// this is dropped also discards everything not kept by a tail.
 struct Spool {
+    _directory: tempfile::TempDir,
     stdout: PathBuf,
     stderr: PathBuf,
+}
+
+impl Spool {
+    fn new() -> Result<Self> {
+        let directory = tempfile::tempdir().context("Failed to create a spool directory.")?;
+        let stdout = directory.path().join("stdout");
+        let stderr = directory.path().join("stderr");
+        Ok(Self {
+            _directory: directory,
+            stdout,
+            stderr,
+        })
+    }
 }
 
 /// The tail of one output stream, keeping only what fits in `OUTPUT_LIMIT`.
@@ -126,8 +138,8 @@ fn platform_run(
     interrupt: &Interrupt,
     timeout: Option<Duration>,
     spool: &Spool,
-) -> Result<Outcome> {
-    use rustix::process::{Pid, Signal};
+) -> Result<Option<Failure>> {
+    use rustix::process::Pid;
     use std::{
         os::unix::process::CommandExt,
         process::{Command, Stdio},
@@ -137,6 +149,8 @@ fn platform_run(
     let stdout = File::create(&spool.stdout)?;
     let stderr = File::create(&spool.stderr)?;
 
+    // The child leads its own process group, so the whole workload can be
+    // signaled without touching foil's own group.
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
@@ -144,44 +158,31 @@ fn platform_run(
         .envs(spec.env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
+        .stderr(Stdio::from(stderr))
+        .process_group(0);
 
-    #[cfg(target_os = "macos")]
-    command.process_group(0);
-
-    #[cfg(target_os = "linux")]
-    unsafe {
-        command.pre_exec(|| {
-            // Runs between fork and exec in the child; setpgid(0, 0) makes the
-            // child lead its own process group so the whole workload can be
-            // signaled. Failures here would leave the group unkillable, but
-            // setpgid on a fresh child does not fail in practice.
-            let _ = rustix::process::setpgid(None::<Pid>, None::<Pid>);
-            Ok(())
-        });
-    }
-
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("Failed to run {:?}.", spec.program))?;
-    // Both spawn paths above make the child a group leader, so the pgid is its pid.
+    let mut child = command.spawn()?;
+    // A pgid of 0 makes the child its own group leader, so the pgid is its pid.
     let group = Pid::from_raw(child.id() as i32).expect("child pid is positive");
 
     let deadline = timeout.map(|limit| Instant::now() + limit);
     loop {
         if let Some(status) = child.try_wait()? {
-            if status.success() {
-                return Ok(Outcome::Succeeded);
-            }
-            return Ok(Outcome::Failed(status));
+            return Ok(if status.success() {
+                None
+            } else {
+                Some(Failure::Exited(status))
+            });
         }
         if interrupt.poll_read()? {
             kill_tree(&mut child, group);
-            return Ok(Outcome::Interrupted);
+            return Ok(Some(Failure::Interrupted));
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             kill_tree(&mut child, group);
-            return Ok(Outcome::TimedOut(timeout.expect("the deadline exists")));
+            return Ok(Some(Failure::TimedOut(
+                timeout.expect("the deadline exists"),
+            )));
         }
         std::thread::sleep(POLL_INTERVAL);
     }
@@ -191,16 +192,17 @@ fn platform_run(
 fn kill_tree(child: &mut std::process::Child, group: rustix::process::Pid) {
     use rustix::process::Signal;
 
-    let killed = match rustix::process::kill_process_group(group, Signal::KILL) {
+    let terminated = match rustix::process::kill_process_group(group, Signal::KILL) {
         Ok(()) => Ok(()),
         // The group already exited on its own.
         Err(rustix::io::Errno::SRCH) => Ok(()),
-        Err(error) => Err(error),
+        Err(error) => Err(std::io::Error::from(error)),
     };
-    if killed.is_err() {
+    if terminated.is_err() {
         let _ = child.kill();
     }
-    let _ = child.wait();
+    let reaped = child.wait().map(drop);
+    report_secondary(terminated.and(reaped), "Cleanup");
 }
 
 #[cfg(windows)]
@@ -209,27 +211,27 @@ fn platform_run(
     interrupt: &Interrupt,
     timeout: Option<Duration>,
     spool: &Spool,
-) -> Result<Outcome> {
+) -> Result<Option<Failure>> {
     use crate::platform::{Wait, Workload};
 
     let mut workload = Workload::prepare_spooled(&spool.stdout, &spool.stderr)
         .context("Failed to prepare workload containment.")?
         .spawn(spec)?;
 
-    match workload.wait(interrupt, timeout)? {
-        Wait::Exited(status) if status.success() => Ok(Outcome::Succeeded),
-        Wait::Exited(status) => Ok(Outcome::Failed(status)),
+    Ok(match workload.wait(interrupt, timeout)? {
+        Wait::Exited(status) if status.success() => None,
+        Wait::Exited(status) => Some(Failure::Exited(status)),
         Wait::Interrupted => {
             report_secondary(workload.terminate(), "Cleanup");
-            Ok(Outcome::Interrupted)
+            Some(Failure::Interrupted)
         }
         Wait::TimedOut => {
             report_secondary(workload.terminate(), "Cleanup");
-            Ok(Outcome::TimedOut(
+            Some(Failure::TimedOut(
                 timeout.expect("a timed-out wait has a timeout"),
             ))
         }
-    }
+    })
 }
 
 fn report_secondary<E: std::fmt::Display>(result: std::result::Result<(), E>, label: &str) {
@@ -253,6 +255,34 @@ mod tests {
 
     const MARKER: &str = "FOIL_PROCESS_TEST_MARKER";
 
+    /// A shell one-liner is the only reliable chatty child: the test harness
+    /// itself merges and reprints captured streams, so this binary cannot serve.
+    #[cfg(windows)]
+    fn shell(script: &str) -> CommandSpec {
+        CommandSpec::new(
+            "cmd".into(),
+            vec!["/c".into(), script.into()],
+            env::current_dir().expect("a working directory"),
+            Vec::new(),
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn shell(script: &str) -> CommandSpec {
+        CommandSpec::new(
+            "/bin/sh".into(),
+            vec!["-c".into(), script.into()],
+            env::current_dir().expect("a working directory"),
+            Vec::new(),
+        )
+    }
+
+    #[cfg(windows)]
+    const FAILING_STREAMS: &str = "echo OUT-LINE & echo ERR-LINE 1>&2 & exit 7";
+
+    #[cfg(not(windows))]
+    const FAILING_STREAMS: &str = "echo OUT-LINE; echo ERR-LINE 1>&2; exit 7";
+
     fn spec(test: &str, env: Vec<(OsString, OsString)>) -> Result<CommandSpec> {
         Ok(CommandSpec::new(
             env::current_exe()?.into_os_string(),
@@ -268,15 +298,7 @@ mod tests {
     #[test]
     fn a_failing_command_reports_output_from_both_streams() -> Result<()> {
         let interrupt = Interrupt::new()?;
-        let spec = CommandSpec::new(
-            "cmd".into(),
-            ["/c", "echo OUT-LINE & echo ERR-LINE 1>&2 & exit 7"]
-                .iter()
-                .map(std::convert::Into::into)
-                .collect(),
-            env::current_dir()?,
-            Vec::new(),
-        );
+        let spec = shell(FAILING_STREAMS);
         let error = execute(&spec, &interrupt, None, "probe").expect_err("fails");
         let text = format!("{error:#}");
         ensure!(text.contains("failed with exit code: 7"), "{text}");
@@ -288,16 +310,7 @@ mod tests {
     #[test]
     fn successful_lifecycle_output_is_suppressed() -> Result<()> {
         let interrupt = Interrupt::new()?;
-        let spec = CommandSpec::new(
-            "cmd".into(),
-            ["/c", "echo noisy & exit 0"]
-                .iter()
-                .map(std::convert::Into::into)
-                .collect(),
-            env::current_dir()?,
-            Vec::new(),
-        );
-        execute(&spec, &interrupt, None, "quiet phase")?;
+        execute(&shell("echo noisy"), &interrupt, None, "quiet phase")?;
         Ok(())
     }
 
