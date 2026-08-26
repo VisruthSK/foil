@@ -201,8 +201,7 @@ mod tests {
     fn an_interval_wider_than_the_repetitions_support_is_rejected() -> Result<()> {
         let error = Interval::new(0.98)?
             .validate_for_pairs(10)
-            .err()
-            .expect("98% exceeds what ten pairs support");
+            .expect_err("98% exceeds what ten pairs support");
 
         assert!(error.to_string().contains("80%"), "{error}");
 
