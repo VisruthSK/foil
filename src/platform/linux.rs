@@ -43,14 +43,11 @@ impl Interrupt {
         let _ = write(&*self.write, &[1u8]);
     }
 
-    /// Non-blocking check for a pending interrupt. Level-triggered: once
-    /// signaled, every later poll reports the interrupt until it is consumed.
+    /// Non-blocking interrupt check; stays set once signaled.
     pub(crate) fn poll_read(&self) -> io::Result<bool> {
         let mut fds = [PollFd::new(&*self.read, PollFlags::IN)];
-        Ok(matches!(
-            poll(&mut fds, Some(&Timespec::ZERO)),
-            Ok(ready) if ready > 0
-        ))
+        let zero = Timespec::try_from(Duration::ZERO).expect("a zero duration always fits");
+        Ok(matches!(poll(&mut fds, Some(&zero)), Ok(ready) if ready > 0))
     }
 }
 

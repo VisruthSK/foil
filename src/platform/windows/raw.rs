@@ -1,8 +1,5 @@
-//! The only module in the crate allowed to contain unsafe code.
-//!
-//! Every Win32 call lives here, wrapped by safe RAII types that own their
-//! handles through `OwnedHandle`. The rest of the Windows backend, and every
-//! other module in the crate, is safe Rust.
+//! The crate's only unsafe module: every Win32 call, behind safe RAII types
+//! that own their handles through `OwnedHandle`.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -45,7 +42,7 @@ use windows_sys::Win32::{
 
 use crate::platform::Wait;
 
-/// A job object with kill-on-close. Terminating it ends the whole workload.
+/// A kill-on-close job object covering the whole workload.
 pub(crate) struct Job(OwnedHandle);
 
 impl Job {
@@ -80,7 +77,7 @@ impl Job {
     }
 }
 
-/// A manual-reset event used to wake a blocked wait on interrupt.
+/// A manual-reset event that wakes a blocked wait on interrupt.
 pub(crate) struct Event(OwnedHandle);
 
 impl Event {
@@ -100,7 +97,6 @@ impl Event {
     }
 }
 
-/// A spawned process whose handle this type owns.
 pub(crate) struct Child(OwnedHandle);
 
 impl Child {
@@ -131,12 +127,8 @@ impl Child {
     }
 }
 
-/// An initialized `PROC_THREAD_ATTRIBUTE_LIST`.
-///
-/// The list points into `storage`, so storage must never reallocate: it is a
-/// boxed slice, which cannot grow. The attribute values (`jobs`, `handles`)
-/// are referenced by pointer from the list, so they are kept alive here until
-/// after `spawn_process` has consumed the list.
+/// An initialized attribute list. It points into `_storage`, which must never
+/// reallocate, and keeps the data its attributes reference alive.
 pub(crate) struct AttributeList {
     _storage: Box<[usize]>,
     list: LPPROC_THREAD_ATTRIBUTE_LIST,
@@ -151,8 +143,6 @@ impl AttributeList {
         // the failure of this query call is expected and its result is ignored.
         unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 2, 0, &mut bytes) };
         let mut storage = vec![0usize; bytes.div_ceil(size_of::<usize>())].into_boxed_slice();
-        // The list is initialized and read through this pointer, so it is taken
-        // as mutable.
         let list = storage.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
         // SAFETY: `list` points into `storage`, which was sized by the query
         // above for exactly 2 attributes; `bytes` remains writable for the call.
@@ -167,9 +157,8 @@ impl AttributeList {
 
     pub(crate) fn with_job(mut self, job: &Job) -> io::Result<Self> {
         let jobs = Box::new([job.as_handle()]);
-        // SAFETY: `self.list` is initialized; `jobs` is stored in `self.jobs`
-        // immediately after, keeping the referenced data alive for the list's
-        // remaining lifetime, which covers the CreateProcessW call.
+        // SAFETY: `self.list` is initialized; `jobs` outlives the CreateProcessW
+        // call via `self.jobs`.
         bool_result(unsafe {
             UpdateProcThreadAttribute(
                 self.list,
@@ -190,9 +179,8 @@ impl AttributeList {
             .iter()
             .map(|handle| handle.as_raw_handle() as HANDLE)
             .collect();
-        // SAFETY: `self.list` is initialized; `handles` is stored in
-        // `self.handles` immediately after, keeping the referenced data alive
-        // for the list's remaining lifetime, which covers CreateProcessW.
+        // SAFETY: `self.list` is initialized; `handles` outlives the
+        // CreateProcessW call via `self.handles`.
         bool_result(unsafe {
             UpdateProcThreadAttribute(
                 self.list,
@@ -253,8 +241,8 @@ pub(crate) fn null_stdio_handles() -> io::Result<(OwnedHandle, OwnedHandle)> {
     Ok((open(GENERIC_READ)?, open(GENERIC_WRITE)?))
 }
 
-/// Opens a fresh, writable, inheritable file handle at `path`, for spooling one
-/// of a child's output streams. Any existing file at `path` is truncated.
+/// Opens a fresh, writable, inheritable handle at `path` for spooling one of a
+/// child's output streams.
 pub(crate) fn create_inheritable_file(path: &std::path::Path) -> io::Result<OwnedHandle> {
     use std::os::windows::ffi::OsStrExt;
     let mut wide_path: Vec<u16> = path.as_os_str().encode_wide().collect();
@@ -338,10 +326,9 @@ pub(crate) fn spawn_process(
     })?;
 
     // SAFETY: On success CreateProcessW returns owned handles; the thread
-    // handle's only purpose is resuming a suspended main thread, which never
-    // applies here, so closing it immediately is correct.
+    // handle is never needed here, so it closes immediately.
     drop(unsafe { OwnedHandle::from_raw_handle(info.hThread as _) });
-    // SAFETY: Same as above; the process handle is kept alive inside Child.
+    // SAFETY: The process handle stays alive inside Child.
     let child = Child(unsafe { OwnedHandle::from_raw_handle(info.hProcess as _) });
 
     Ok(child)
@@ -385,8 +372,8 @@ fn owned(handle: HANDLE) -> io::Result<OwnedHandle> {
     if handle.is_null() {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: `handle` is non-null and was returned by a Win32 create call,
-    // so we own it; the conversion transfers that ownership into OwnedHandle.
+    // SAFETY: `handle` is non-null and owned by us; the conversion transfers
+    // ownership into OwnedHandle.
     Ok(unsafe { OwnedHandle::from_raw_handle(handle as _) })
 }
 

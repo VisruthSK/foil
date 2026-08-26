@@ -108,8 +108,7 @@ mod tests {
             elapsed >= Duration::from_millis(80),
             "woke after {elapsed:?}"
         );
-        // A coarse polling loop would overshoot the deadline by whole ticks;
-        // native waiting lands within a small multiple of the deadline.
+        // Coarse polling would overshoot by whole ticks; native waits do not.
         ensure!(
             elapsed < Duration::from_millis(600),
             "woke after {elapsed:?}"
@@ -118,9 +117,7 @@ mod tests {
         Ok(())
     }
 
-    /// Direct process exit wins when exit, interrupt, and timeout readiness
-    /// become observable in the same wait. This pins runner semantics that each
-    /// backend implements natively.
+    /// Direct exit wins over simultaneous interrupt and timeout readiness.
     #[test]
     fn direct_exit_wins_over_simultaneous_interrupt_and_timeout() -> Result<()> {
         let interrupt = Interrupt::new()?;

@@ -1,14 +1,6 @@
-//! Lifecycle command execution.
-//!
-//! Setup and teardown commands run outside the measured interval, so they use
-//! a lighter executor than benchmarks: no timing, no measurement records, no
-//! Linux cgroup per invocation. What they do get is bounded output capture,
-//! first-Ctrl+C handling, whole-workload termination, direct-child reaping,
-//! and timeout support.
-//!
-//! Output is spooled to temporary files rather than piped, so a chatty command
-//! can never fill a buffer and stall, and diagnostics only pay for reading the
-//! final tail of each stream.
+//! Lifecycle execution: bounded spooled output, first-Ctrl+C handling,
+//! whole-workload termination and reaping, internal timeouts — without
+//! timing, measurement records, or cgroups.
 
 use crate::platform::{CommandSpec, Interrupt};
 use anyhow::{Context, Result, anyhow};
@@ -20,11 +12,9 @@ use std::{
     time::Duration,
 };
 
-/// Per-stream output cap. A failing command's diagnostics keep this much of
-/// each stream; anything beyond it is dropped and noted as truncated.
+/// Per-stream diagnostic tail cap.
 const OUTPUT_LIMIT: u64 = 64 * 1024;
 
-/// How often the Unix wait loop re-checks child exit, interrupts, and timeouts.
 #[cfg(unix)]
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -43,8 +33,6 @@ pub(crate) fn execute(
         Some(failure) => failure,
     };
 
-    // Successful output is suppressed anyway, so only failures pay for reading
-    // the spooled tails.
     let stdout = tail_from_file(&spool.stdout)?;
     let stderr = tail_from_file(&spool.stderr)?;
 
@@ -60,15 +48,12 @@ pub(crate) fn execute(
     })
 }
 
-/// Why a lifecycle command did not succeed, when it did not.
 enum Failure {
     Exited(ExitStatus),
     Interrupted,
     TimedOut(Duration),
 }
 
-/// Temporary files that capture a command's output streams. Deleting them when
-/// this is dropped also discards everything not kept by a tail.
 struct Spool {
     _directory: tempfile::TempDir,
     stdout: PathBuf,
@@ -149,8 +134,7 @@ fn platform_run(
     let stdout = File::create(&spool.stdout)?;
     let stderr = File::create(&spool.stderr)?;
 
-    // The child leads its own process group, so the whole workload can be
-    // signaled without touching foil's own group.
+    // Own process group, so signals reach the whole workload and only it.
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
@@ -162,7 +146,6 @@ fn platform_run(
         .process_group(0);
 
     let mut child = command.spawn()?;
-    // A pgid of 0 makes the child its own group leader, so the pgid is its pid.
     let group = Pid::from_raw(child.id() as i32).expect("child pid is positive");
 
     let deadline = timeout.map(|limit| Instant::now() + limit);
@@ -194,7 +177,6 @@ fn kill_tree(child: &mut std::process::Child, group: rustix::process::Pid) {
 
     let terminated = match rustix::process::kill_process_group(group, Signal::KILL) {
         Ok(()) => Ok(()),
-        // The group already exited on its own.
         Err(rustix::io::Errno::SRCH) => Ok(()),
         Err(error) => Err(std::io::Error::from(error)),
     };
@@ -255,8 +237,7 @@ mod tests {
 
     const MARKER: &str = "FOIL_PROCESS_TEST_MARKER";
 
-    /// A shell one-liner is the only reliable chatty child: the test harness
-    /// itself merges and reprints captured streams, so this binary cannot serve.
+    /// Test binaries merge and reprint captured streams; only a shell serves.
     #[cfg(windows)]
     fn shell(script: &str) -> CommandSpec {
         CommandSpec::new(
@@ -363,8 +344,7 @@ mod tests {
         )?;
 
         let interrupt = Interrupt::new()?;
-        // The command hangs after spawning a descendant; the timeout must end
-        // the whole workload, descendant included, before it writes its marker.
+        // The descendant writes its marker only if it survives the timeout.
         let error = execute(
             &command,
             &interrupt,
@@ -400,8 +380,7 @@ mod tests {
     #[test]
     #[ignore]
     fn marker_writer() {
-        // Only writes after surviving its sleep, so a killed workload never
-        // produces the marker.
+        // Writes only if it survives, so a killed workload leaves no marker.
         thread::sleep(Duration::from_millis(600));
         let marker = env::var_os(MARKER).expect("a marker path is set");
         std::fs::write(marker, "finished").expect("the marker is writable");
@@ -412,13 +391,13 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("spool");
 
-        // Exactly at the limit: nothing is dropped.
+        // Exactly at the limit: nothing dropped.
         std::fs::write(&path, vec![b'a'; OUTPUT_LIMIT as usize])?;
         let tail = tail_from_file(&path)?;
         ensure!(tail.bytes.len() == OUTPUT_LIMIT as usize);
         ensure!(!tail.dropped);
 
-        // One byte over: the tail starts mid-stream and notes the drop.
+        // One byte over: mid-stream tail, drop noted.
         std::fs::write(&path, vec![b'a'; OUTPUT_LIMIT as usize + 1])?;
         let tail = tail_from_file(&path)?;
         ensure!(tail.bytes.len() == OUTPUT_LIMIT as usize);

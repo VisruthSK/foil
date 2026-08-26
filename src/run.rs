@@ -85,9 +85,8 @@ impl RunCommand {
                 .map(|(key, value)| (key.into(), value.into()))
                 .collect(),
         );
-        // Lifecycle commands run outside the measured interval: no timing, no
-        // measurement records, no benchmark timeout. The executor still bounds
-        // output, honors interrupts, and supports its own internal timeout.
+        // Lifecycle commands run outside the measured interval; the executor
+        // bounds output, honors interrupts, and applies its own timeout.
         crate::lifecycle::execute(&spec, interrupt, None, label)
     }
 }

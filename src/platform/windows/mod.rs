@@ -44,8 +44,7 @@ impl Workload {
         })
     }
 
-    /// A workload whose stdout and stderr are spooled to files instead of
-    /// discarded, for lifecycle commands that need failure diagnostics.
+    /// A workload whose stdout and stderr are spooled to files for diagnostics.
     pub(crate) fn prepare_spooled(stdout: &Path, stderr: &Path) -> io::Result<Prepared> {
         let job = raw::Job::new()?;
         let input = raw::null_stdio_handles()?.0;
@@ -74,7 +73,7 @@ impl Workload {
     pub(crate) fn terminate(&mut self) -> io::Result<()> {
         let terminate = self.job.terminate();
         if terminate.is_err() {
-            // The job could not be terminated; kill the child directly as a fallback.
+            // Fall back to killing the child directly.
             let _ = self.child.terminate();
         }
         let reap = self.child.reap();
@@ -87,7 +86,7 @@ pub(crate) struct Prepared {
     attribute_list: raw::AttributeList,
     input: OwnedHandle,
     output: OwnedHandle,
-    // Only set when spooling; otherwise stderr shares `output` (the NUL device).
+    // Set only when spooling; otherwise stderr shares `output`.
     error_output: Option<OwnedHandle>,
 }
 

@@ -46,10 +46,6 @@ fn thousands(count: usize) -> String {
 }
 
 impl<M: Metric> Summary<M> {
-    /// The line under each report's intervals. The draw counts are always shown,
-    /// because a fraction of draws is only known to within one draw either way:
-    /// an empty side reads as bounded by that resolution rather than exactly zero,
-    /// and a full side likewise.
     fn probability(&self) -> String {
         let total = self.draws;
         let below = (self.probability_candidate_lower * total as f64).round() as usize;
@@ -351,8 +347,6 @@ mod tests {
         Ok(())
     }
 
-    /// Ten thousand draws all on one side: the count and percentage are reported
-    /// as-is, not bounded by the draw resolution.
     #[test]
     fn a_one_sided_probability_reports_the_count_and_percentage() -> Result<()> {
         let draws: Vec<Draw<Time>> = (0..10_000)
