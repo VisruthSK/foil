@@ -9,7 +9,7 @@ NB: `foil` is currently experimental, the API may change without warning.
 ## Usage
 
 ```sh
-foil --baseline main --candidate HEAD --repetitions 30 --interval 0.5 0.8 0.98 --output-dir benchmark/ -- cargo bench
+foil --baseline main --candidate HEAD --repetitions 30 --interval 0.5 0.8 0.90 --output-dir benchmark/ -- cargo bench
 ```
 
 Run `foil --help` for the full set of options.
@@ -27,7 +27,7 @@ baseline = "main"
 candidate = "HEAD"
 repetitions = 30
 block-size = 4
-interval = [0.5, 0.8, 0.98]
+interval = [0.5, 0.8, 0.90]
 output-dir = "benchmark/"
 ```
 
@@ -48,7 +48,7 @@ startup = ["cargo", "build", "--release"]
 command = ["./target/release/parse", "corpus/"]
 ```
 
-Benchmark lifecycle commands share the benchmark's `working-directory` and `env`. Successful lifecycle output is suppressed; failures report both nonempty streams under explicit labels. `foil` discards stdout and stderr from measured commands. If output is part of the workload, redirect it explicitly in the benchmark command. Teardown is still attempted after startup, benchmark, timeout, or interruption failures; the original error remains primary and additional cleanup errors are also reported.
+Benchmark lifecycle commands share the benchmark's `working-directory` and `env`. Lifecycle output is spooled while running, so a chatty command cannot stall; successful output is suppressed, and failures report the last 64 KiB of each stream under explicit labels, with `[...truncated...]` where more was discarded. The first Ctrl-C interrupts a lifecycle command: its whole workload is terminated and reaped, and teardown still unwinds afterward. `foil` discards stdout and stderr from measured commands. If output is part of the workload, redirect it explicitly in the benchmark command. Teardown is still attempted after startup, benchmark, timeout, or interruption failures; the original error remains primary and additional cleanup errors are also reported.
 
 A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override ordinary options, and anything it leaves unset, including `command`, is inherited from the top level. Lifecycle commands are not inherited: suite and benchmark lifecycles remain distinct and compose. Its `env` table is merged with the top-level one, variable by variable, with the benchmark's values winning on conflicts:
 
