@@ -23,7 +23,8 @@ use windows_sys::Win32::{
     },
     Security::SECURITY_ATTRIBUTES,
     Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS,
+        OPEN_EXISTING,
     },
     System::{
         JobObjects::{
@@ -140,7 +141,7 @@ pub(crate) struct AttributeList {
     _storage: Box<[usize]>,
     list: LPPROC_THREAD_ATTRIBUTE_LIST,
     jobs: Option<Box<[HANDLE; 1]>>,
-    handles: Option<Box<[HANDLE; 2]>>,
+    handles: Option<Box<[HANDLE]>>,
 }
 
 impl AttributeList {
@@ -182,15 +183,11 @@ impl AttributeList {
         Ok(self)
     }
 
-    pub(crate) fn with_inherited_handles(
-        mut self,
-        input: &OwnedHandle,
-        output: &OwnedHandle,
-    ) -> io::Result<Self> {
-        let handles = Box::new([
-            input.as_raw_handle() as HANDLE,
-            output.as_raw_handle() as HANDLE,
-        ]);
+    pub(crate) fn with_inherited_handles(mut self, handles: &[&OwnedHandle]) -> io::Result<Self> {
+        let handles: Box<[HANDLE]> = handles
+            .iter()
+            .map(|handle| handle.as_raw_handle() as HANDLE)
+            .collect();
         // SAFETY: `self.list` is initialized; `handles` is stored in
         // `self.handles` immediately after, keeping the referenced data alive
         // for the list's remaining lifetime, which covers CreateProcessW.
@@ -200,7 +197,7 @@ impl AttributeList {
                 0,
                 PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
                 handles.as_ptr().cast(),
-                size_of::<[HANDLE; 2]>(),
+                size_of::<HANDLE>() * handles.len(),
                 ptr::null_mut(),
                 ptr::null(),
             )
@@ -254,9 +251,48 @@ pub(crate) fn null_stdio_handles() -> io::Result<(OwnedHandle, OwnedHandle)> {
     Ok((open(GENERIC_READ)?, open(GENERIC_WRITE)?))
 }
 
+/// Opens (creating or truncating) a writable, inheritable file handle at
+/// `path`, for spooling one of a child's output streams.
+pub(crate) fn create_inheritable_file(path: &std::path::Path) -> io::Result<OwnedHandle> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut wide_path: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide_path.push(0);
+
+    let security = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: ptr::null_mut(),
+        bInheritHandle: TRUE,
+    };
+    // SAFETY: `wide_path` is NUL-terminated and outlives the call; the security
+    // attributes pointer stays valid for the call.
+    let handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &security,
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `handle` is a valid file handle just returned by CreateFileW;
+    // ownership transfers to the OwnedHandle here.
+    Ok(unsafe { OwnedHandle::from_raw_handle(handle as _) })
+}
+
+/// The three stdio handles a spawned child inherits.
+pub(crate) struct StdioHandles<'a> {
+    pub(crate) stdin: &'a OwnedHandle,
+    pub(crate) stdout: &'a OwnedHandle,
+    pub(crate) stderr: &'a OwnedHandle,
+}
+
 /// Spawns `command_line` with `application` as the resolved executable image,
-/// attached to `attribute_list`'s job, with stdio wired to the inherited
-/// `input`/`output` handles.
+/// attached to `attribute_list`'s job, with stdio wired to the inherited handles.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_process(
     application: &[u16],
@@ -264,15 +300,14 @@ pub(crate) fn spawn_process(
     environment: &[u16],
     cwd: &[u16],
     attribute_list: &AttributeList,
-    input: &OwnedHandle,
-    output: &OwnedHandle,
+    stdio: StdioHandles<'_>,
 ) -> io::Result<Child> {
     let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    startup.StartupInfo.hStdInput = input.as_raw_handle() as HANDLE;
-    startup.StartupInfo.hStdOutput = output.as_raw_handle() as HANDLE;
-    startup.StartupInfo.hStdError = output.as_raw_handle() as HANDLE;
+    startup.StartupInfo.hStdInput = stdio.stdin.as_raw_handle() as HANDLE;
+    startup.StartupInfo.hStdOutput = stdio.stdout.as_raw_handle() as HANDLE;
+    startup.StartupInfo.hStdError = stdio.stderr.as_raw_handle() as HANDLE;
     startup.lpAttributeList = attribute_list.as_ptr();
 
     let mut info: PROCESS_INFORMATION = unsafe { zeroed() };

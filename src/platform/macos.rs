@@ -40,6 +40,18 @@ impl Interrupt {
     pub(crate) fn signal(&self) {
         let _ = write(&*self.write, &[1u8]);
     }
+
+    /// Non-blocking check for a pending interrupt. Level-triggered: once
+    /// signaled, every later poll reports the interrupt until it is consumed.
+    pub(crate) fn poll_read(&self) -> io::Result<bool> {
+        use rustix::event::{PollFd, PollFlags, Timespec, poll};
+
+        let mut fds = [PollFd::new(&*self.read, PollFlags::IN)];
+        Ok(matches!(
+            poll(&mut fds, Some(&Timespec::ZERO)),
+            Ok(ready) if ready > 0
+        ))
+    }
 }
 
 pub(crate) struct Workload {

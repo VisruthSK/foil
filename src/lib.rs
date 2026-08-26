@@ -2,6 +2,7 @@ mod analysis;
 mod app;
 mod artifact;
 mod config;
+mod lifecycle;
 mod metric;
 mod platform;
 mod posterior;

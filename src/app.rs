@@ -80,9 +80,21 @@ pub(crate) fn run() -> Result<()> {
     let startup = build_command(&lifecycle.startup, None, &[]);
     let teardown = build_command(&lifecycle.teardown, None, &[]);
     scoped(
-        run_at(startup.as_ref(), Path::new("."), "suite startup"),
+        run_at(
+            startup.as_ref(),
+            Path::new("."),
+            &interrupt,
+            "suite startup",
+        ),
         || execute_suite(&suite, &lifecycle, &suite_output_dir, runs, &interrupt),
-        || run_at(teardown.as_ref(), Path::new("."), "suite teardown"),
+        || {
+            run_at(
+                teardown.as_ref(),
+                Path::new("."),
+                &interrupt,
+                "suite teardown",
+            )
+        },
     )
 }
 
@@ -271,7 +283,12 @@ fn compare(
     let schedule = RunOrder::schedule(repetition_count, block_size, &mut schedule_rng);
 
     let repetitions = scoped(
-        run_in_both(benchmark_commands.startup.as_ref(), worktrees, "startup"),
+        run_in_both(
+            benchmark_commands.startup.as_ref(),
+            worktrees,
+            interrupt,
+            "startup",
+        ),
         || {
             ensure!(!interrupted(), "Interrupted.");
             measure_all(
@@ -285,7 +302,14 @@ fn compare(
                 timeout,
             )
         },
-        || run_in_both(benchmark_commands.teardown.as_ref(), worktrees, "teardown"),
+        || {
+            run_in_both(
+                benchmark_commands.teardown.as_ref(),
+                worktrees,
+                interrupt,
+                "teardown",
+            )
+        },
     )?;
 
     let analysis = analyze_checked(
@@ -399,6 +423,7 @@ fn measure_one<W: std::io::Write>(
     let suite_start = run_in(
         suite.startup_each_run.as_ref(),
         worktree,
+        interrupt,
         side,
         "suite startup-each-run",
     );
@@ -407,6 +432,7 @@ fn measure_one<W: std::io::Write>(
         let benchmark_start = run_in(
             benchmark_lifecycle.startup_each_run.as_ref(),
             worktree,
+            interrupt,
             side,
             "benchmark startup-each-run",
         );
@@ -422,6 +448,7 @@ fn measure_one<W: std::io::Write>(
             run_in(
                 benchmark_lifecycle.teardown_each_run.as_ref(),
                 worktree,
+                interrupt,
                 side,
                 "benchmark teardown-each-run",
             ),
@@ -433,6 +460,7 @@ fn measure_one<W: std::io::Write>(
         run_in(
             suite.teardown_each_run.as_ref(),
             worktree,
+            interrupt,
             side,
             "suite teardown-each-run",
         ),
@@ -488,21 +516,27 @@ fn lifecycle_config(lifecycle: &Lifecycle) -> LifecycleConfig<'_> {
 fn run_in(
     command: Option<&RunCommand>,
     worktree: &Worktree,
+    interrupt: &Interrupt,
     side: Side,
     phase: &str,
 ) -> Result<()> {
     command.map_or(Ok(()), |command| {
         let label = format!("{side} {phase}");
         command
-            .run_once_in(worktree, &label)
+            .run_once_in(worktree, interrupt, &label)
             .with_context(|| format!("The {label} failed."))
     })
 }
 
-fn run_at(command: Option<&RunCommand>, directory: &Path, label: &str) -> Result<()> {
+fn run_at(
+    command: Option<&RunCommand>,
+    directory: &Path,
+    interrupt: &Interrupt,
+    label: &str,
+) -> Result<()> {
     command.map_or(Ok(()), |command| {
         command
-            .run_once_at(directory, label)
+            .run_once_at(directory, interrupt, label)
             .with_context(|| format!("The {label} failed."))
     })
 }
@@ -525,6 +559,7 @@ fn scoped<T>(
 fn run_in_both(
     command: Option<&RunCommand>,
     worktrees: &Pair<Worktree>,
+    interrupt: &Interrupt,
     phase: &str,
 ) -> Result<()> {
     let Some(command) = command else {
@@ -534,7 +569,11 @@ fn run_in_both(
     let mut first_error = None;
     for side in [Side::Baseline, Side::Candidate] {
         if let Err(error) = command
-            .run_once_in(worktrees.get(side), &format!("{side} benchmark {phase}"))
+            .run_once_in(
+                worktrees.get(side),
+                interrupt,
+                &format!("{side} benchmark {phase}"),
+            )
             .with_context(|| format!("The {side} {phase} failed."))
         {
             if first_error.is_some() {

@@ -34,12 +34,32 @@ impl Workload {
         let (input, output) = raw::null_stdio_handles()?;
         let attribute_list = raw::AttributeList::new()?
             .with_job(&job)?
-            .with_inherited_handles(&input, &output)?;
+            .with_inherited_handles(&[&input, &output])?;
         Ok(Prepared {
             job,
             attribute_list,
             input,
             output,
+            error_output: None,
+        })
+    }
+
+    /// A workload whose stdout and stderr are spooled to files instead of
+    /// discarded, for lifecycle commands that need failure diagnostics.
+    pub(crate) fn prepare_spooled(stdout: &Path, stderr: &Path) -> io::Result<Prepared> {
+        let job = raw::Job::new()?;
+        let input = raw::null_stdio_handles()?.0;
+        let stdout_file = raw::create_inheritable_file(stdout)?;
+        let stderr_file = raw::create_inheritable_file(stderr)?;
+        let attribute_list = raw::AttributeList::new()?
+            .with_job(&job)?
+            .with_inherited_handles(&[&input, &stdout_file, &stderr_file])?;
+        Ok(Prepared {
+            job,
+            attribute_list,
+            input,
+            output: stdout_file,
+            error_output: Some(stderr_file),
         })
     }
 
@@ -67,6 +87,8 @@ pub(crate) struct Prepared {
     attribute_list: raw::AttributeList,
     input: OwnedHandle,
     output: OwnedHandle,
+    // Only set when spooling; otherwise stderr shares `output` (the NUL device).
+    error_output: Option<OwnedHandle>,
 }
 
 impl Prepared {
@@ -84,8 +106,11 @@ impl Prepared {
             &environment,
             &cwd,
             &self.attribute_list,
-            &self.input,
-            &self.output,
+            raw::StdioHandles {
+                stdin: &self.input,
+                stdout: &self.output,
+                stderr: self.error_output.as_ref().unwrap_or(&self.output),
+            },
         )?;
         Ok(Workload {
             child,

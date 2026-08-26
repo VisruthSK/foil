@@ -108,7 +108,31 @@ mod tests {
             elapsed >= Duration::from_millis(80),
             "woke after {elapsed:?}"
         );
-        ensure!(elapsed < Duration::from_secs(2), "woke after {elapsed:?}");
+        // A coarse polling loop would overshoot the deadline by whole ticks;
+        // native waiting lands within a small multiple of the deadline.
+        ensure!(
+            elapsed < Duration::from_millis(600),
+            "woke after {elapsed:?}"
+        );
+        workload.terminate()?;
+        Ok(())
+    }
+
+    /// Direct process exit wins when exit, interrupt, and timeout readiness
+    /// become observable in the same wait. This pins runner semantics that each
+    /// backend implements natively.
+    #[test]
+    fn direct_exit_wins_over_simultaneous_interrupt_and_timeout() -> Result<()> {
+        let interrupt = Interrupt::new()?;
+        // The child exits before the interrupt fires, so by the time wait runs,
+        // the exited-child handle and the event are ready at the same instant.
+        let mut workload = spawn(&spec("platform::tests::noop_child", Vec::new())?)?;
+        thread::sleep(Duration::from_millis(200));
+        interrupt.signal();
+        ensure!(matches!(
+            workload.wait(&interrupt, Some(Duration::from_secs(5)))?,
+            Wait::Exited(status) if status.success()
+        ));
         workload.terminate()?;
         Ok(())
     }

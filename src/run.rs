@@ -2,14 +2,14 @@ use crate::{
     Side, Worktree,
     platform::{CommandSpec, Interrupt, Wait, Workload},
 };
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use std::{
     ffi::OsString,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
+    process::ExitStatus,
     time::{Duration, Instant},
 };
 
@@ -57,30 +57,38 @@ impl RunCommand {
         }
     }
 
-    pub(crate) fn run_once_in(&self, worktree: &Worktree, label: &str) -> Result<()> {
-        self.run_once_at(worktree.path(), label)
+    pub(crate) fn run_once_in(
+        &self,
+        worktree: &Worktree,
+        interrupt: &Interrupt,
+        label: &str,
+    ) -> Result<()> {
+        self.run_once_at(worktree.path(), interrupt, label)
     }
 
-    pub(crate) fn run_once_at(&self, directory: &Path, label: &str) -> Result<()> {
+    pub(crate) fn run_once_at(
+        &self,
+        directory: &Path,
+        interrupt: &Interrupt,
+        label: &str,
+    ) -> Result<()> {
         let cwd = self
             .working_directory
             .as_ref()
             .map_or_else(|| directory.to_owned(), |path| directory.join(path));
-        let output = Command::new(&self.program)
-            .args(&self.args)
-            .current_dir(cwd)
-            .envs(self.env.iter().map(|(key, value)| (key, value)))
-            .stdin(Stdio::null())
-            .output()
-            .with_context(|| format!("Failed to run {:?}.", self.program))?;
-        ensure!(
-            output.status.success(),
-            "{:?} failed with {}.{}",
-            self.program,
-            output.status,
-            display_output(label, &output.stdout, &output.stderr)
+        let spec = CommandSpec::new(
+            self.program.clone(),
+            self.args.clone(),
+            cwd,
+            self.env
+                .iter()
+                .map(|(key, value)| (key.into(), value.into()))
+                .collect(),
         );
-        Ok(())
+        // Lifecycle commands run outside the measured interval: no timing, no
+        // measurement records, no benchmark timeout. The executor still bounds
+        // output, honors interrupts, and supports its own internal timeout.
+        crate::lifecycle::execute(&spec, interrupt, None, label)
     }
 }
 
@@ -118,19 +126,6 @@ impl RunOutput {
     pub(crate) fn peak_memory(&self) -> Option<Bytes> {
         self.peak_memory
     }
-}
-
-fn display_output(label: &str, stdout: &[u8], stderr: &[u8]) -> String {
-    let mut output = String::new();
-    for (stream, bytes) in [("stdout", stdout), ("stderr", stderr)] {
-        if !bytes.is_empty() {
-            output.push_str(&format!(
-                "\n[{label} {stream}]\n{}",
-                String::from_utf8_lossy(bytes).trim_end()
-            ));
-        }
-    }
-    output
 }
 
 pub(crate) struct BenchmarkLog<W> {
