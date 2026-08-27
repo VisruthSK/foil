@@ -7,6 +7,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use windows_sys::Win32::{Foundation::TRUE, Globalization::CompareStringOrdinal};
 
 mod raw;
 
@@ -90,7 +91,7 @@ impl Workload {
 impl Prepared {
     pub(crate) fn spawn(mut self) -> io::Result<Workload> {
         let child = raw::spawn_process(
-            &mut self.application,
+            &self.application,
             &mut self.command_line,
             self.environment.as_deref_mut(),
             &self.cwd,
@@ -302,31 +303,44 @@ fn command_line(spec: &CommandSpec) -> Vec<u16> {
 }
 
 /// `None` inherits the parent environment untouched. Windows matches and sorts
-/// names case-insensitively; fold them like Rust std does, over UTF-16 units.
+/// names case-insensitively using CompareStringOrdinal.
 fn environment_block(overrides: &[(OsString, OsString)]) -> Option<Vec<u16>> {
     if overrides.is_empty() {
         return None;
     }
 
-    fn folded(name: &OsStr) -> Vec<u16> {
-        name.encode_wide()
-            .map(|unit| {
-                if (b'a' as u16..=b'z' as u16).contains(&unit) {
-                    unit - 32
-                } else {
-                    unit
-                }
-            })
-            .collect()
+    /// Case-insensitive comparison using Windows' CompareStringOrdinal.
+    fn cmp_ordinal(a: &OsStr, b: &OsStr) -> std::cmp::Ordering {
+        let a_wide: Vec<u16> = a.encode_wide().chain(Some(0)).collect();
+        let b_wide: Vec<u16> = b.encode_wide().chain(Some(0)).collect();
+        // SAFETY: both slices are NUL-terminated and valid for the call.
+        let result = unsafe {
+            CompareStringOrdinal(
+                a_wide.as_ptr(),
+                a_wide.len() as i32 - 1,
+                b_wide.as_ptr(),
+                b_wide.len() as i32 - 1,
+                TRUE,
+            )
+        };
+        // CompareStringOrdinal returns 0 on error, 1 if a < b, 2 if a == b, 3 if a > b.
+        match result {
+            1 => std::cmp::Ordering::Less,
+            2 => std::cmp::Ordering::Equal,
+            3 => std::cmp::Ordering::Greater,
+            _ => {
+                // On error, fall back to byte comparison.
+                a_wide.cmp(&b_wide)
+            }
+        }
     }
 
     let mut variables: Vec<_> = std::env::vars_os().collect();
     for (key, value) in overrides {
-        let folded_key = folded(key);
-        variables.retain(|(existing, _)| folded(existing) != folded_key);
+        variables.retain(|(existing, _)| cmp_ordinal(existing, key) != std::cmp::Ordering::Equal);
         variables.push((key.clone(), value.clone()));
     }
-    variables.sort_by_cached_key(|(key, _)| folded(key));
+    variables.sort_by(|(a, _), (b, _)| cmp_ordinal(a, b));
 
     let mut block = Vec::new();
     for (key, value) in variables {

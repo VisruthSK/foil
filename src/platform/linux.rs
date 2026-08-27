@@ -1,4 +1,4 @@
-use super::{CommandSpec, Wait};
+use super::{CommandSpec, Wait, drain_interrupt};
 use std::{
     env, fs,
     fs::OpenOptions,
@@ -14,7 +14,7 @@ use std::{
 };
 
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
-use rustix::io::{Errno, read, write};
+use rustix::io::{Errno, write};
 use rustix::pipe::{PipeFlags, pipe_with};
 use rustix::process::{Pid, PidfdFlags, pidfd_open};
 
@@ -173,15 +173,6 @@ impl Drop for Workload {
     }
 }
 
-fn drain_interrupt(fd: &OwnedFd) {
-    loop {
-        match read(fd, &mut [0u8; 64]) {
-            Ok(n) if n > 0 => {}
-            _ => break,
-        }
-    }
-}
-
 fn kill_cgroup(cgroup: &std::path::Path) -> io::Result<()> {
     OpenOptions::new()
         .write(true)
@@ -210,6 +201,10 @@ fn remove_when_empty(cgroup: &std::path::Path) -> io::Result<()> {
     }
 }
 
+/// Creates a cgroup named `foil-{pid}`; the deterministic name means only one
+/// workload may be live at a time — a stale cgroup surfaces as an error.
+/// Creates a cgroup named `foil-{pid}`; the deterministic name means only one
+/// workload may be live at a time — a stale cgroup surfaces as an error.
 fn create_cgroup() -> io::Result<PathBuf> {
     let root = cgroup_root()?;
     let path = root.join(format!("foil-{}", std::process::id()));

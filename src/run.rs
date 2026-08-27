@@ -59,22 +59,26 @@ pub(crate) fn run_unmeasured(spec: &CommandSpec, interrupt: &Interrupt) -> Resul
         .spawn()?;
     let outcome = workload.wait(interrupt, None);
     let cleanup = workload.terminate();
-    match outcome? {
-        Wait::Exited(status) if status.success() => {
+    match outcome {
+        Ok(Wait::Exited(status)) if status.success() => {
             cleanup?;
             Ok(())
         }
-        Wait::Exited(status) => {
+        Ok(Wait::Exited(status)) => {
             report_secondary(cleanup, "Cleanup");
             bail!("{:?} failed with {status}.", spec.program);
         }
-        Wait::Interrupted => {
+        Ok(Wait::Interrupted) => {
             report_secondary(cleanup, "Cleanup");
             bail!("Interrupted.");
         }
-        Wait::TimedOut => Err(anyhow::anyhow!(
+        Ok(Wait::TimedOut) => Err(anyhow::anyhow!(
             "the platform reported a timeout without a timeout"
         )),
+        Err(error) => {
+            report_secondary(cleanup, "Cleanup");
+            Err(error).with_context(|| format!("Failed to wait for {:?}.", spec.program))
+        }
     }
 }
 

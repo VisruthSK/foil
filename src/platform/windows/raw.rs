@@ -250,7 +250,7 @@ pub(crate) fn null_stdio_handles() -> io::Result<(OwnedHandle, OwnedHandle)> {
 /// attached to `attribute_list`'s job, with stdio wired to the inherited handles.
 /// A `None` environment inherits the parent's.
 pub(crate) fn spawn_process(
-    application: &mut [u16],
+    application: &[u16],
     command_line: &mut [u16],
     environment: Option<&mut [u16]>,
     cwd: &[u16],
@@ -279,7 +279,7 @@ pub(crate) fn spawn_process(
     // - The inherited stdio handles remain valid for the duration of the call.
     bool_result(unsafe {
         CreateProcessW(
-            application.as_mut_ptr(),
+            application.as_ptr() as *mut u16,
             command_line.as_mut_ptr(),
             ptr::null(),
             ptr::null(),

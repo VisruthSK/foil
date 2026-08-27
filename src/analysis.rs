@@ -3,8 +3,8 @@ use crate::{
     Interval, Pair, Posterior, Repetition, Repetitions, RunOrder, Shrinkage, Summary, Time,
 };
 use anyhow::{Context, Result, ensure};
+use rand::SeedableRng;
 use rand::rngs::Xoshiro256PlusPlus;
-use rand_core::SeedableRng;
 use std::{
     fs::File,
     io::{BufRead, BufReader},

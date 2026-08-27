@@ -1,4 +1,4 @@
-use super::{CommandSpec, Wait};
+use super::{CommandSpec, Wait, drain_interrupt};
 use std::{
     io,
     os::fd::{AsRawFd, OwnedFd},
@@ -11,7 +11,7 @@ use std::{
 use rustix::buffer::spare_capacity;
 use rustix::event::kqueue::{Event, EventFilter, EventFlags, ProcessEvents, kevent, kqueue};
 use rustix::fs::{OFlags, fcntl_setfl};
-use rustix::io::{Errno, FdFlags, fcntl_setfd, read, write};
+use rustix::io::{Errno, FdFlags, fcntl_setfd, write};
 use rustix::pipe::pipe;
 use rustix::process::{Pid, Signal, kill_process_group};
 
@@ -53,9 +53,12 @@ pub(crate) struct Prepared {
 
 impl Workload {
     pub(crate) fn prepare(spec: &CommandSpec) -> io::Result<Prepared> {
+        use std::os::unix::process::CommandExt;
+        let mut command = spec.command();
+        command.process_group(0);
         Ok(Prepared {
             kqueue: kqueue()?,
-            command: spec.command(),
+            command,
         })
     }
 
@@ -150,14 +153,5 @@ impl Drop for Workload {
     fn drop(&mut self) {
         let pgid = Pid::from_raw(self.pgid).expect("child pgid is positive");
         let _ = kill_process_group(pgid, Signal::KILL);
-    }
-}
-
-fn drain_interrupt(fd: &OwnedFd) {
-    loop {
-        match read(fd, &mut [0u8; 64]) {
-            Ok(n) if n > 0 => {}
-            _ => break,
-        }
     }
 }

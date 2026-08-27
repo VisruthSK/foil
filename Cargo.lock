@@ -228,7 +228,6 @@ dependencies = [
  "ctrlc",
  "indicatif",
  "rand",
- "rand_core",
  "rand_distr",
  "rustix",
  "serde",

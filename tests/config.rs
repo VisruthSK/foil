@@ -719,6 +719,65 @@ fn a_failing_benchmark_startup_stops_before_the_measured_runs() -> Result<()> {
 }
 
 #[test]
+fn candidate_startup_does_not_run_when_baseline_startup_fails() -> Result<()> {
+    let project = repository("")?;
+    let baseline = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project.path())
+        .output()?;
+    let baseline = String::from_utf8(baseline.stdout)?.trim().to_owned();
+    git(
+        &project,
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "--message",
+            "candidate",
+        ],
+    )?;
+    let candidate = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project.path())
+        .output()?;
+    let candidate = String::from_utf8(candidate.stdout)?.trim().to_owned();
+    git(
+        &project,
+        &["update-ref", "refs/tags/startup-state", &candidate],
+    )?;
+    fs::write(
+        project.path().join("foil.toml"),
+        format!(
+            "baseline = '{baseline}'\n\
+             candidate = '{candidate}'\n\
+             output-dir = 'bench'\n\
+             repetitions = 10\n\
+             draws = 1000\n\
+             interval = [0.5, 0.8]\n\
+             [benchmarks.test]\n\
+             startup = ['git', 'update-ref', 'refs/tags/startup-state', '{baseline}', 'HEAD']\n\
+             command = ['git', '--version']\n"
+        ),
+    )?;
+
+    let error = failure(&project, &[])?;
+    assert!(error.contains("The baseline startup failed."), "{error}");
+
+    let state = Command::new("git")
+        .args(["rev-parse", "refs/tags/startup-state"])
+        .current_dir(project.path())
+        .output()?;
+    assert!(state.status.success());
+    assert_eq!(
+        String::from_utf8(state.stdout)?.trim(),
+        candidate,
+        "candidate startup ran despite baseline startup failure"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn stale_outputs_are_removed_for_every_selected_benchmark() -> Result<()> {
     let project = repository(&format!(
         "{PREAMBLE}[benchmarks.first]\n\

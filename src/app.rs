@@ -8,13 +8,13 @@ use crate::{
 };
 
 use anyhow::{Context, Result, ensure};
+use rand::SeedableRng;
 use rand::rngs::Xoshiro256PlusPlus;
-use rand_core::SeedableRng;
 use std::{
     ffi::OsString,
     fs,
     io::{BufWriter, ErrorKind},
-    path::Path,
+    path::{Path, PathBuf},
     process,
     sync::atomic::{AtomicU8, Ordering},
     time::Duration,
@@ -34,12 +34,24 @@ struct LifecycleCommands {
 }
 
 impl LifecycleCommands {
-    fn new(lifecycle: &Lifecycle, build: impl Fn(&[OsString]) -> Option<CommandTemplate>) -> Self {
+    fn new(
+        lifecycle: &Lifecycle,
+        working_directory: Option<PathBuf>,
+        envs: &[(String, String)],
+    ) -> Self {
         Self {
-            startup: build(&lifecycle.startup),
-            startup_each_run: build(&lifecycle.startup_each_run),
-            teardown_each_run: build(&lifecycle.teardown_each_run),
-            teardown: build(&lifecycle.teardown),
+            startup: build_command(&lifecycle.startup, working_directory.clone(), envs),
+            startup_each_run: build_command(
+                &lifecycle.startup_each_run,
+                working_directory.clone(),
+                envs,
+            ),
+            teardown_each_run: build_command(
+                &lifecycle.teardown_each_run,
+                working_directory.clone(),
+                envs,
+            ),
+            teardown: build_command(&lifecycle.teardown, working_directory, envs),
         }
     }
 }
@@ -270,9 +282,8 @@ fn compare(
 
     let mut schedule_rng = Xoshiro256PlusPlus::seed_from_u64(crate::seed::schedule(suite.seed));
 
-    let run_command = |parts: &[OsString]| build_command(parts, working_directory.clone(), &envs);
-    let suite_commands = LifecycleCommands::new(suite_lifecycle, run_command);
-    let benchmark_commands = LifecycleCommands::new(&lifecycle, run_command);
+    let suite_commands = LifecycleCommands::new(suite_lifecycle, working_directory.clone(), &envs);
+    let benchmark_commands = LifecycleCommands::new(&lifecycle, working_directory.clone(), &envs);
     // Clap requires at least one command argument.
     let benchmark_template = build_command(&command, working_directory.clone(), &envs)
         .expect("the benchmark command is non-empty");
@@ -286,7 +297,7 @@ fn compare(
     let schedule = RunOrder::schedule(repetition_count, block_size, &mut schedule_rng);
 
     let repetitions = scoped(
-        run_in_both(
+        run_startup_both(
             benchmark_commands.startup.as_ref(),
             worktrees,
             interrupt,
@@ -306,7 +317,7 @@ fn compare(
             )
         },
         || {
-            run_in_both(
+            run_teardown_both(
                 benchmark_commands.teardown.as_ref(),
                 worktrees,
                 interrupt,
@@ -350,6 +361,16 @@ fn compare(
     Ok(summary)
 }
 
+struct MeasurementContext<'a, W: std::io::Write> {
+    benchmark: &'a Pair<CommandSpec>,
+    suite: &'a LifecycleCommands,
+    benchmark_lifecycle: &'a LifecycleCommands,
+    worktrees: &'a Pair<Worktree>,
+    log: &'a mut BenchmarkLog<W>,
+    interrupt: &'a Interrupt,
+    timeout: Option<Duration>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn measure_all(
     benchmark: &Pair<CommandSpec>,
@@ -377,22 +398,21 @@ fn measure_all(
     let mut measurements = MeasurementsCsv::create(&measurements_path)
         .with_context(|| format!("Failed to create {}.", measurements_path.display()))?;
 
+    let mut ctx = MeasurementContext {
+        benchmark,
+        suite,
+        benchmark_lifecycle,
+        worktrees,
+        log: &mut log,
+        interrupt,
+        timeout,
+    };
+
     for &order in schedule {
         ensure!(!interrupted(), "Interrupted.");
         let [first, second] = order.sides();
 
-        let mut measure = |side: Side| -> Result<RunOutput> {
-            measure_one(
-                benchmark,
-                suite,
-                benchmark_lifecycle,
-                side,
-                worktrees,
-                &mut log,
-                interrupt,
-                timeout,
-            )
-        };
+        let mut measure = |side: Side| -> Result<RunOutput> { measure_one(&mut ctx, side) };
         let first_output = measure(first)?;
         let second_output = measure(second)?;
 
@@ -410,60 +430,55 @@ fn measure_all(
     Repetitions::try_from(measured_repetitions)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn measure_one<W: std::io::Write>(
-    benchmark: &Pair<CommandSpec>,
-    suite: &LifecycleCommands,
-    benchmark_lifecycle: &LifecycleCommands,
+    ctx: &mut MeasurementContext<'_, W>,
     side: Side,
-    worktrees: &Pair<Worktree>,
-    log: &mut BenchmarkLog<W>,
-    interrupt: &Interrupt,
-    timeout: Option<Duration>,
 ) -> Result<RunOutput> {
-    let worktree = worktrees.get(side);
-    log.phase(side, "suite startup");
+    let worktree = ctx.worktrees.get(side);
+    ctx.log.phase(side, "suite startup");
     let suite_start = run_in(
-        suite.startup_each_run.as_ref(),
+        ctx.suite.startup_each_run.as_ref(),
         worktree,
-        interrupt,
+        ctx.interrupt,
         side,
         "suite startup-each-run",
     );
     let body = suite_start.and_then(|()| {
-        log.phase(side, "benchmark startup");
+        ctx.log.phase(side, "benchmark startup");
         let benchmark_start = run_in(
-            benchmark_lifecycle.startup_each_run.as_ref(),
+            ctx.benchmark_lifecycle.startup_each_run.as_ref(),
             worktree,
-            interrupt,
+            ctx.interrupt,
             side,
             "benchmark startup-each-run",
         );
         let measured = benchmark_start.and_then(|()| {
             ensure!(!interrupted(), "Interrupted.");
-            let output = log.measure(benchmark.get(side), interrupt, timeout, side)?;
+            let output =
+                ctx.log
+                    .measure(ctx.benchmark.get(side), ctx.interrupt, ctx.timeout, side)?;
             ensure!(!interrupted(), "Interrupted.");
             Ok(output)
         });
-        log.phase(side, "benchmark teardown");
+        ctx.log.phase(side, "benchmark teardown");
         combine(
             measured,
             run_in(
-                benchmark_lifecycle.teardown_each_run.as_ref(),
+                ctx.benchmark_lifecycle.teardown_each_run.as_ref(),
                 worktree,
-                interrupt,
+                ctx.interrupt,
                 side,
                 "benchmark teardown-each-run",
             ),
         )
     });
-    log.phase(side, "suite teardown");
+    ctx.log.phase(side, "suite teardown");
     combine(
         body,
         run_in(
-            suite.teardown_each_run.as_ref(),
+            ctx.suite.teardown_each_run.as_ref(),
             worktree,
-            interrupt,
+            ctx.interrupt,
             side,
             "suite teardown-each-run",
         ),
@@ -502,11 +517,12 @@ fn run_in(
     side: Side,
     phase: &str,
 ) -> Result<()> {
-    command.map_or(Ok(()), |command| {
-        let label = format!("{side} {phase}");
-        run_unmeasured(&command.at(worktree.path()), interrupt)
-            .with_context(|| format!("The {label} failed."))
-    })
+    run_at(
+        command,
+        worktree.path(),
+        interrupt,
+        &format!("{side} {phase}"),
+    )
 }
 
 fn run_at(
@@ -536,7 +552,28 @@ fn scoped<T>(
     combine(startup.and_then(|()| body()), teardown())
 }
 
-fn run_in_both(
+/// Runs a lifecycle command on both sides with fail-fast semantics: if the
+/// baseline side fails, the candidate side is not run.
+fn run_startup_both(
+    command: Option<&CommandTemplate>,
+    worktrees: &Pair<Worktree>,
+    interrupt: &Interrupt,
+    phase: &str,
+) -> Result<()> {
+    let Some(command) = command else {
+        return Ok(());
+    };
+    for side in [Side::Baseline, Side::Candidate] {
+        run_unmeasured(&command.at(worktrees.get(side).path()), interrupt)
+            .with_context(|| format!("The {side} {phase} failed."))?;
+    }
+    Ok(())
+}
+
+/// Runs a lifecycle command on both sides with best-effort semantics: both
+/// sides run regardless of failures; the first error is returned, subsequent
+/// errors are printed to stderr.
+fn run_teardown_both(
     command: Option<&CommandTemplate>,
     worktrees: &Pair<Worktree>,
     interrupt: &Interrupt,

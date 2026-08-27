@@ -11,8 +11,9 @@ pub(crate) enum Wait {
 /// A logical benchmark command: what to run, with which arguments, working
 /// directory, and effective child environment.
 ///
-/// The executable itself is resolved by each platform backend at spawn time,
-/// so a benchmark `startup` command may create the program this spec names.
+/// The executable is resolved late enough that a benchmark `startup` command
+/// may create the program this spec names: on Windows at prepare time, on
+/// Unix by the OS at exec time.
 pub(crate) struct CommandSpec {
     pub(crate) program: OsString,
     pub(crate) args: Vec<OsString>,
@@ -36,11 +37,8 @@ impl CommandSpec {
     }
 
     #[cfg(not(windows))]
-    /// Builds the child's command: null stdio and an own process group, so
-    /// signals reach the whole workload and only it.
+    /// Builds the child's command with null stdio.
     pub(crate) fn command(&self) -> Command {
-        use std::os::unix::process::CommandExt;
-
         let mut command = Command::new(&self.program);
         command
             .args(&self.args)
@@ -48,8 +46,7 @@ impl CommandSpec {
             .envs(self.env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0);
+            .stderr(Stdio::null());
         command
     }
 }
@@ -60,6 +57,17 @@ mod linux;
 mod macos;
 #[cfg(windows)]
 mod windows;
+
+#[cfg(unix)]
+pub(crate) fn drain_interrupt(fd: &std::os::fd::OwnedFd) {
+    use rustix::io::read;
+    loop {
+        match read(fd, &mut [0u8; 64]) {
+            Ok(n) if n > 0 => {}
+            _ => break,
+        }
+    }
+}
 
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{Interrupt, Workload};
