@@ -1,5 +1,5 @@
 pub mod common;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use common::*;
 use foil::{Interval, Metric, Shrinkage, analyze_measurements};
 use std::{fs, num::NonZeroUsize};
@@ -52,6 +52,50 @@ fn a_complete_configuration_runs_without_any_arguments() -> Result<()> {
             report.contains(interval),
             "{interval} is missing from\n{report}"
         );
+    }
+
+    let log: Vec<serde_json::Value> =
+        fs::read_to_string(project.path().join("benchmark/benchmark.log"))?
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<serde_json::Result<_>>()?;
+    assert_eq!(log.len(), 20);
+    for (index, entry) in log.iter().enumerate() {
+        assert_eq!(entry["run"], index + 1);
+        assert!(matches!(
+            entry["side"].as_str(),
+            Some("baseline" | "candidate")
+        ));
+        assert_eq!(entry["exit_code"], 0);
+        assert_eq!(entry["peak_memory_bytes"], serde_json::Value::Null);
+        assert_eq!(entry["timed_out"], false);
+        assert_eq!(entry["interrupted"], false);
+    }
+
+    let measurements = fs::read_to_string(project.path().join("benchmark/measurements.csv"))?;
+    let rows: Vec<_> = measurements.lines().collect();
+    assert_eq!(
+        rows[0],
+        "repetition,order,baseline_seconds,candidate_seconds"
+    );
+    assert_eq!(rows.len(), 11);
+    for (index, row) in rows[1..].iter().enumerate() {
+        let fields: Vec<_> = row.split(',').collect();
+        assert_eq!(fields.len(), 4);
+        assert_eq!(fields[0], (index + 1).to_string());
+        assert!(matches!(fields[1], "baseline_first" | "candidate_first"));
+        fields[2].parse::<f64>()?;
+        fields[3].parse::<f64>()?;
+    }
+
+    let posterior = fs::read_to_string(project.path().join("benchmark/posterior.csv"))?;
+    let rows: Vec<_> = posterior.lines().collect();
+    assert_eq!(rows[0], "baseline_seconds,candidate_seconds");
+    assert_eq!(rows.len(), 1_001);
+    for row in &rows[1..] {
+        let (baseline, candidate) = row.split_once(',').context("invalid posterior row")?;
+        baseline.parse::<f64>()?;
+        candidate.parse::<f64>()?;
     }
 
     Ok(())

@@ -171,8 +171,8 @@ impl MeasurementsCsv {
             "{},{},{},{}",
             row,
             order,
-            baseline.elapsed().as_secs_f64(),
-            candidate.elapsed().as_secs_f64(),
+            baseline.elapsed.as_secs_f64(),
+            candidate.elapsed.as_secs_f64(),
         )?;
         self.writer.flush()?;
         self.rows = row;
@@ -222,36 +222,6 @@ mod tests {
                 RunOrder::CandidateFirst
             },
         }
-    }
-
-    #[test]
-    fn measurements_csv_contains_complete_pairs() -> Result<()> {
-        let directory = tempdir()?;
-        let path = directory.path().join("measurements.csv");
-
-        let mut csv = MeasurementsCsv::create(&path)?;
-        for index in 0..10 {
-            csv.append(&repetition(index))?;
-        }
-        drop(csv);
-
-        const EXPECTED: &str = concat!(
-            "repetition,order,baseline_seconds,candidate_seconds\n",
-            "1,baseline_first,1,0.5\n",
-            "2,candidate_first,1,0.5\n",
-            "3,baseline_first,1,0.5\n",
-            "4,candidate_first,1,0.5\n",
-            "5,baseline_first,1,0.5\n",
-            "6,candidate_first,1,0.5\n",
-            "7,baseline_first,1,0.5\n",
-            "8,candidate_first,1,0.5\n",
-            "9,baseline_first,1,0.5\n",
-            "10,candidate_first,1,0.5\n",
-        );
-
-        assert_eq!(read_to_string(path)?, EXPECTED);
-
-        Ok(())
     }
 
     #[test]

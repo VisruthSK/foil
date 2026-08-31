@@ -98,8 +98,6 @@ pub(crate) fn run_unmeasured(spec: &CommandSpec, interrupt: &Interrupt) -> Resul
 pub struct Bytes(u64);
 
 impl Bytes {
-    pub const ZERO: Self = Self(0);
-
     pub const fn new(bytes: u64) -> Self {
         Self(bytes)
     }
@@ -113,16 +111,6 @@ impl Bytes {
 pub(crate) struct Measurement {
     pub(crate) elapsed: Duration,
     pub(crate) peak_memory: Option<Bytes>,
-}
-
-impl Measurement {
-    pub(crate) fn elapsed(&self) -> Duration {
-        self.elapsed
-    }
-
-    pub(crate) fn peak_memory(&self) -> Option<Bytes> {
-        self.peak_memory
-    }
 }
 
 pub(crate) struct BenchmarkLog<W> {
@@ -334,45 +322,5 @@ fn report_finished(finished: Finished) {
 impl<W> Drop for BenchmarkLog<W> {
     fn drop(&mut self) {
         self.progress.finish_and_clear();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::process::ExitStatus;
-
-    #[test]
-    fn the_log_matches_golden() -> Result<()> {
-        let mut buffer = Vec::new();
-        {
-            let mut log = BenchmarkLog::new(&mut buffer, 2, None);
-            log.append(
-                Side::Baseline,
-                Duration::from_secs_f64(1.5),
-                Some(ExitStatus::default()),
-                None,
-                false,
-                false,
-            )?;
-            log.append(
-                Side::Candidate,
-                Duration::from_secs_f64(1.5),
-                Some(ExitStatus::default()),
-                None,
-                false,
-                false,
-            )?;
-        }
-        let entries: Vec<serde_json::Value> = String::from_utf8(buffer)?
-            .lines()
-            .map(serde_json::from_str)
-            .collect::<serde_json::Result<_>>()?;
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0]["exit_code"], 0);
-        assert_eq!(entries[0]["timed_out"], false);
-        assert_eq!(entries[0]["interrupted"], false);
-        assert!(entries[0].get("stdout").is_none());
-        Ok(())
     }
 }

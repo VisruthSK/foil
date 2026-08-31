@@ -33,6 +33,20 @@ struct LifecycleCommands {
     teardown: Option<CommandTemplate>,
 }
 
+struct Interrupts {
+    work: Interrupt,
+    cleanup: Interrupt,
+}
+
+impl Interrupts {
+    fn new() -> std::io::Result<Self> {
+        Ok(Self {
+            work: Interrupt::new()?,
+            cleanup: Interrupt::new()?,
+        })
+    }
+}
+
 impl LifecycleCommands {
     fn new(
         lifecycle: &Lifecycle,
@@ -74,8 +88,8 @@ fn handle_interrupt(interrupt: &Interrupt) {
 }
 
 pub(crate) fn run() -> Result<()> {
-    let interrupt = Interrupt::new().context("Failed to create the interrupt handle.")?;
-    let signal = interrupt.clone();
+    let interrupts = Interrupts::new().context("Failed to create the interrupt handles.")?;
+    let signal = interrupts.work.clone();
     ctrlc::set_handler(move || handle_interrupt(&signal))
         .context("Failed to set the Ctrl+C handler.")?;
 
@@ -90,30 +104,34 @@ pub(crate) fn run() -> Result<()> {
 
     let startup = build_command(&lifecycle.startup, None, &[]);
     let teardown = build_command(&lifecycle.teardown, None, &[]);
-    scoped(
+    let result = scoped(
         run_at(
             startup.as_ref(),
             Path::new("."),
-            &interrupt,
+            &interrupts.work,
             "suite startup",
         ),
-        || execute_suite(&suite, &lifecycle, runs, &interrupt),
+        || execute_suite(&suite, &lifecycle, runs, &interrupts),
         || {
             run_at(
                 teardown.as_ref(),
                 Path::new("."),
-                &interrupt,
+                &interrupts.cleanup,
                 "suite teardown",
             )
         },
-    )
+    );
+    if result.is_ok() {
+        ensure!(!interrupted(), "Interrupted.");
+    }
+    result
 }
 
 fn execute_suite(
     suite: &ResolvedSuiteConfig,
     lifecycle: &Lifecycle,
     runs: Vec<(Option<String>, RunConfig)>,
-    interrupt: &Interrupt,
+    interrupts: &Interrupts,
 ) -> Result<()> {
     if working_tree_has_modified_tracked_files()? {
         eprintln!(
@@ -143,7 +161,7 @@ fn execute_suite(
             &worktrees.pair,
             &output_dir,
             heading,
-            interrupt,
+            interrupts,
         )?;
     }
 
@@ -242,7 +260,7 @@ fn compare(
     worktrees: &Pair<Worktree>,
     output_dir: &Path,
     heading: Option<&str>,
-    interrupt: &Interrupt,
+    interrupts: &Interrupts,
 ) -> Result<Summary<Time>> {
     let RunConfig {
         isolate: _,
@@ -263,7 +281,6 @@ fn compare(
 
     let suite_commands = LifecycleCommands::new(suite_lifecycle, working_directory.clone(), &envs);
     let benchmark_commands = LifecycleCommands::new(&lifecycle, working_directory.clone(), &envs);
-    // Clap requires at least one command argument.
     let benchmark_template = build_command(&command, working_directory.clone(), &envs)
         .expect("the benchmark command is non-empty");
     let benchmark = Pair {
@@ -278,28 +295,26 @@ fn compare(
         run_startup_both(
             benchmark_commands.startup.as_ref(),
             worktrees,
-            interrupt,
+            &interrupts.work,
             "startup",
         ),
         || {
             ensure!(!interrupted(), "Interrupted.");
-            measure_all(
-                &benchmark,
-                &suite_commands,
-                &benchmark_commands,
+            let context = MeasurementContext {
+                benchmark: &benchmark,
+                suite: &suite_commands,
+                benchmark_lifecycle: &benchmark_commands,
                 worktrees,
-                &schedule,
-                output_dir,
-                interrupt,
+                interrupts,
                 timeout,
-                heading,
-            )
+            };
+            measure_all(context, &schedule, output_dir, heading)
         },
         || {
             run_teardown_both(
                 benchmark_commands.teardown.as_ref(),
                 worktrees,
-                interrupt,
+                &interrupts.cleanup,
                 "teardown",
             )
         },
@@ -340,26 +355,19 @@ fn compare(
     Ok(summary)
 }
 
-struct MeasurementContext<'a, W: std::io::Write> {
+struct MeasurementContext<'a> {
     benchmark: &'a Pair<CommandSpec>,
     suite: &'a LifecycleCommands,
     benchmark_lifecycle: &'a LifecycleCommands,
     worktrees: &'a Pair<Worktree>,
-    log: &'a mut BenchmarkLog<W>,
-    interrupt: &'a Interrupt,
+    interrupts: &'a Interrupts,
     timeout: Option<Duration>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn measure_all(
-    benchmark: &Pair<CommandSpec>,
-    suite: &LifecycleCommands,
-    benchmark_lifecycle: &LifecycleCommands,
-    worktrees: &Pair<Worktree>,
+    context: MeasurementContext<'_>,
     schedule: &[RunOrder],
     output_dir: &Path,
-    interrupt: &Interrupt,
-    timeout: Option<Duration>,
     benchmark_name: Option<&str>,
 ) -> Result<Repetitions<Measurement>> {
     let repetition_count = schedule.len();
@@ -379,21 +387,12 @@ fn measure_all(
     let mut measurements = MeasurementsCsv::create(&measurements_path)
         .with_context(|| format!("Failed to create {}.", measurements_path.display()))?;
 
-    let mut ctx = MeasurementContext {
-        benchmark,
-        suite,
-        benchmark_lifecycle,
-        worktrees,
-        log: &mut log,
-        interrupt,
-        timeout,
-    };
-
     for &order in schedule {
         ensure!(!interrupted(), "Interrupted.");
         let [first, second] = order.sides();
 
-        let mut measure = |side: Side| -> Result<Measurement> { measure_one(&mut ctx, side) };
+        let mut measure =
+            |side: Side| -> Result<Measurement> { measure_one(&context, &mut log, side) };
         let first_output = measure(first)?;
         let second_output = measure(second)?;
 
@@ -405,61 +404,64 @@ fn measure_all(
         measured_repetitions.push(repetition);
     }
 
-    // Clears the progress line before the report starts printing.
     drop(log);
 
     Repetitions::try_from(measured_repetitions)
 }
 
 fn measure_one<W: std::io::Write>(
-    ctx: &mut MeasurementContext<'_, W>,
+    context: &MeasurementContext<'_>,
+    log: &mut BenchmarkLog<W>,
     side: Side,
 ) -> Result<Measurement> {
-    let worktree = ctx.worktrees.get(side);
-    ctx.log.phase(side, "suite startup");
+    let worktree = context.worktrees.get(side);
+    log.phase(side, "suite startup");
     let suite_start = run_in(
-        ctx.suite.startup_each_run.as_ref(),
+        context.suite.startup_each_run.as_ref(),
         worktree,
-        ctx.interrupt,
+        &context.interrupts.work,
         side,
         "suite startup-each-run",
     );
     let body = suite_start.and_then(|()| {
-        ctx.log.phase(side, "benchmark startup");
+        log.phase(side, "benchmark startup");
         let benchmark_start = run_in(
-            ctx.benchmark_lifecycle.startup_each_run.as_ref(),
+            context.benchmark_lifecycle.startup_each_run.as_ref(),
             worktree,
-            ctx.interrupt,
+            &context.interrupts.work,
             side,
             "benchmark startup-each-run",
         );
         let measured = benchmark_start.and_then(|()| {
             ensure!(!interrupted(), "Interrupted.");
-            let output =
-                ctx.log
-                    .measure(ctx.benchmark.get(side), ctx.interrupt, ctx.timeout, side)?;
+            let output = log.measure(
+                context.benchmark.get(side),
+                &context.interrupts.work,
+                context.timeout,
+                side,
+            )?;
             ensure!(!interrupted(), "Interrupted.");
             Ok(output)
         });
-        ctx.log.phase(side, "benchmark teardown");
+        log.phase(side, "benchmark teardown");
         combine(
             measured,
             run_in(
-                ctx.benchmark_lifecycle.teardown_each_run.as_ref(),
+                context.benchmark_lifecycle.teardown_each_run.as_ref(),
                 worktree,
-                ctx.interrupt,
+                &context.interrupts.cleanup,
                 side,
                 "benchmark teardown-each-run",
             ),
         )
     });
-    ctx.log.phase(side, "suite teardown");
+    log.phase(side, "suite teardown");
     combine(
         body,
         run_in(
-            ctx.suite.teardown_each_run.as_ref(),
+            context.suite.teardown_each_run.as_ref(),
             worktree,
-            ctx.interrupt,
+            &context.interrupts.cleanup,
             side,
             "suite teardown-each-run",
         ),
@@ -583,6 +585,22 @@ fn run_teardown_both(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{env, fs, num::NonZeroUsize};
+    use tempfile::tempdir;
+
+    const CLEANUP_MARKER: &str = "FOIL_CLEANUP_MARKER";
+
+    fn helper(test: &str, env: Vec<(OsString, OsString)>) -> Result<CommandSpec> {
+        Ok(CommandSpec::new(
+            env::current_exe()?.into_os_string(),
+            ["--exact", test, "--ignored"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+            env::current_dir()?,
+            env,
+        ))
+    }
 
     #[test]
     fn the_second_interrupt_exits_with_status_130() -> Result<()> {
@@ -594,6 +612,22 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_outside_a_wait_does_not_poison_cleanup() -> Result<()> {
+        let status = process::Command::new(env::current_exe()?)
+            .args([
+                "--exact",
+                "app::tests::analysis_interrupt_cleanup_child",
+                "--ignored",
+            ])
+            .status()?;
+        assert!(
+            status.success(),
+            "cleanup regression child failed: {status}"
+        );
+        Ok(())
+    }
+
+    #[test]
     #[ignore]
     fn second_interrupt_child() -> Result<()> {
         INTERRUPTS.store(0, Ordering::Relaxed);
@@ -601,5 +635,77 @@ mod tests {
         handle_interrupt(&interrupt);
         handle_interrupt(&interrupt);
         unreachable!("the second interrupt exits")
+    }
+
+    #[test]
+    #[ignore]
+    fn analysis_interrupt_cleanup_child() -> Result<()> {
+        INTERRUPTS.store(0, Ordering::Relaxed);
+        let interrupts = Interrupts::new()?;
+        let directory = tempdir()?;
+        let marker = directory.path().join("cleanup-ran");
+        let cleanup = helper(
+            "app::tests::cleanup_marker_child",
+            vec![(CLEANUP_MARKER.into(), marker.as_os_str().to_owned())],
+        )?;
+        let repetitions = (0..10)
+            .map(|position| Repetition {
+                outputs: Pair {
+                    baseline: Measurement {
+                        elapsed: Duration::from_secs(1),
+                        peak_memory: None,
+                    },
+                    candidate: Measurement {
+                        elapsed: Duration::from_secs(2),
+                        peak_memory: None,
+                    },
+                },
+                order: if position % 2 == 0 {
+                    RunOrder::BaselineFirst
+                } else {
+                    RunOrder::CandidateFirst
+                },
+            })
+            .collect::<Vec<_>>()
+            .try_into()?;
+        let mut signaled = false;
+
+        let result = scoped(
+            Ok(()),
+            || {
+                analyze_checked(
+                    &repetitions,
+                    0,
+                    NonZeroUsize::new(1_000).unwrap(),
+                    crate::Shrinkage::NONE,
+                    &[crate::Interval::new(0.5)?],
+                    || {
+                        if !signaled {
+                            signaled = true;
+                            handle_interrupt(&interrupts.work);
+                        }
+                        ensure!(!interrupted(), "Interrupted.");
+                        Ok(())
+                    },
+                )
+                .map(drop)
+            },
+            || run_unmeasured(&cleanup, &interrupts.cleanup),
+        );
+
+        assert_eq!(result.unwrap_err().to_string(), "Interrupted.");
+        assert!(interrupted());
+        assert!(marker.exists(), "cleanup did not execute");
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn cleanup_marker_child() -> Result<()> {
+        fs::write(
+            env::var_os(CLEANUP_MARKER).expect("cleanup marker is configured"),
+            "ran",
+        )?;
+        Ok(())
     }
 }

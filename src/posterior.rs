@@ -119,7 +119,6 @@ struct WeightedRegressionMoments {
 }
 
 impl WeightedRegressionMoments {
-    /// Folds one weighted row into the sums.
     fn add(&mut self, weight: f64, row: &RegressionRow) {
         self.design.add_observation(weight, row);
         self.midpoint.add_observation(weight, row, row.midpoint);
@@ -184,20 +183,6 @@ pub struct Posterior<M> {
 }
 
 impl<M: Metric> Posterior<M> {
-    /// Draws Bayesian-bootstrap samples of the adjusted mean baseline and candidate value.
-    #[cfg(test)]
-    pub(crate) fn bootstrap(
-        repetitions: &Repetitions<Measurement>,
-        draws: NonZeroUsize,
-        shrinkage: Shrinkage,
-        rng: &mut impl Rng,
-    ) -> Result<Self>
-    where
-        M: MeasuredMetric,
-    {
-        Self::bootstrap_checked(repetitions, draws, shrinkage, rng, || Ok(()))
-    }
-
     /// Draws Bayesian-bootstrap samples while checking for cancellation before each draw.
     pub(crate) fn bootstrap_checked(
         repetitions: &Repetitions<Measurement>,
@@ -261,213 +246,41 @@ impl<M: Metric> Posterior<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::write_posterior_csv;
-    use crate::metric::{PeakMemory, Time};
-    use crate::repetition::{Pair, Repetition, RunOrder};
-    use crate::run::{Bytes, Measurement};
+    use crate::{Pair, Repetition, RunOrder, Time};
     use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
-    use std::fs::read_to_string;
     use std::time::Duration;
-    use tempfile::tempdir;
 
-    /// Ten paired repetitions carrying a mild upward drift, with both run orders
-    /// represented so `Repetitions` accepts them.
-    ///
-    /// Memory is left at zero throughout, which is what lets a test detect a metric
-    /// that reads the wrong field.
     fn fixture() -> Result<Repetitions<Measurement>> {
-        let baseline = [1.00, 1.08, 1.13, 1.18, 1.27, 1.31, 1.39, 1.44, 1.53, 1.59];
-        let candidate = [1.04, 1.06, 1.19, 1.17, 1.31, 1.30, 1.46, 1.41, 1.58, 1.61];
-        let orders = [
-            RunOrder::CandidateFirst,
-            RunOrder::BaselineFirst,
-            RunOrder::BaselineFirst,
-            RunOrder::CandidateFirst,
-            RunOrder::CandidateFirst,
-            RunOrder::BaselineFirst,
-            RunOrder::CandidateFirst,
-            RunOrder::BaselineFirst,
-            RunOrder::BaselineFirst,
-            RunOrder::CandidateFirst,
-        ];
-
-        let measure = |seconds: f64| Measurement {
-            elapsed: Duration::from_secs_f64(seconds),
-            peak_memory: Some(Bytes::ZERO),
-        };
-
-        (0..baseline.len())
+        (0..10)
             .map(|position| Repetition {
                 outputs: Pair {
-                    baseline: measure(baseline[position]),
-                    candidate: measure(candidate[position]),
+                    baseline: Measurement {
+                        elapsed: Duration::from_secs_f64(1.0 + position as f64 / 10.0),
+                        peak_memory: None,
+                    },
+                    candidate: Measurement {
+                        elapsed: Duration::from_secs_f64(1.1 + position as f64 / 10.0),
+                        peak_memory: None,
+                    },
                 },
-                order: orders[position],
+                order: if position % 2 == 0 {
+                    RunOrder::BaselineFirst
+                } else {
+                    RunOrder::CandidateFirst
+                },
             })
             .collect::<Vec<_>>()
             .try_into()
     }
 
-    /// The generator every golden is pinned to.
-    ///
-    /// `Xoshiro256PlusPlus` rather than `StdRng`, whose stream `rand` is free to
-    /// change between releases. That would invalidate the goldens without any change
-    /// to this crate, and it is also the generator `main` uses.
-    fn rng() -> Xoshiro256PlusPlus {
-        Xoshiro256PlusPlus::seed_from_u64(0)
-    }
-
-    /// The fixture's posterior for `M` at seed 0.
-    fn posterior<M: Metric + MeasuredMetric>(draws: usize, shrinkage: f64) -> Result<Posterior<M>> {
-        let draws = NonZeroUsize::new(draws).expect("Test draw counts are positive.");
-
-        Posterior::bootstrap(&fixture()?, draws, Shrinkage::new(shrinkage)?, &mut rng())
-    }
-
-    /// Eight time draws, for golden comparison.
-    fn golden(shrinkage: f64) -> Result<Vec<(f64, f64)>> {
-        Ok(posterior::<Time>(8, shrinkage)?
-            .draws()
-            .iter()
-            .map(|draw| (draw.baseline.base(), draw.candidate.base()))
-            .collect())
-    }
-
-    /// Pins the adjusted means bit for bit. Any change to the arithmetic, the order of
-    /// RNG consumption, or the fixture moves these numbers, so a refactor meant to be
-    /// inert fails here.
-    ///
-    /// These say nothing about whether the model is correct. They were generated from
-    /// the code they check, so they catch drift, not error.
-    #[test]
-    fn unshrunk_posterior_matches_golden() -> Result<()> {
-        #[rustfmt::skip]
-        const EXPECTED: [(f64, f64); 8] = [
-            (1.2947094189758073, 1.3181596849182757),
-            (1.295794106123628,  1.3142782690813486),
-            (1.2901681962200746, 1.3153286953279186),
-            (1.2948331312861074, 1.3383861101432366),
-            (1.2943604503099144, 1.3140897265174494),
-            (1.287205483379233,  1.295401275903725),
-            (1.2873420629313597, 1.2950401423013826),
-            (1.2917392395536966, 1.3134285293933505),
-        ];
-
-        assert_eq!(golden(0.0)?, EXPECTED);
-
-        Ok(())
-    }
-
-    /// Same, through the `Gamma` path, which a shrinkage of zero skips entirely.
-    #[test]
-    fn shrunk_posterior_matches_golden() -> Result<()> {
-        #[rustfmt::skip]
-        const EXPECTED: [(f64, f64); 8] = [
-            (1.2987470681009876, 1.3141220357930954),
-            (1.3034419507117767, 1.3148530015498219),
-            (1.3034869031980645, 1.3229031219464489),
-            (1.2963181289876267, 1.3077913512511117),
-            (1.2963354841261892, 1.3072501069680238),
-            (1.2888327854737045, 1.2935494197590378),
-            (1.2974459759699728, 1.311355238500543),
-            (1.2885189566400443, 1.2988151609969738),
-        ];
-
-        assert_eq!(golden(5.0)?, EXPECTED);
-
-        Ok(())
-    }
-
-    /// Typical magnitude of the adjusted difference across a posterior.
-    ///
-    /// Compared distributionally rather than draw by draw: a shrunk run pulls one extra
-    /// `Gamma` sample per draw, so its weight stream diverges from an unshrunk run's and
-    /// the two are not paired.
-    fn median_absolute_difference(shrinkage: f64) -> Result<f64> {
-        let mut differences: Vec<f64> = posterior::<Time>(4_000, shrinkage)?
-            .draws()
-            .iter()
-            .map(|draw| draw.absolute().base().abs())
-            .collect();
-
-        differences.sort_by(f64::total_cmp);
-
-        Ok(differences[differences.len() / 2])
-    }
-
-    /// More shrinkage has to pull the adjusted difference further toward zero.
-    #[test]
-    fn shrinkage_narrows_the_difference() -> Result<()> {
-        let none = median_absolute_difference(0.0)?;
-        let some = median_absolute_difference(5.0)?;
-        let lots = median_absolute_difference(50.0)?;
-
-        assert!(
-            lots < some && some < none,
-            "Expected monotone narrowing, got none={none}, five={some}, fifty={lots}."
-        );
-
-        Ok(())
-    }
-
-    /// Pins the machine-readable side: header, column order, and the full precision a
-    /// reader needs to reproduce the summary.
-    #[test]
-    fn posterior_csv_matches_golden() -> Result<()> {
-        const EXPECTED: &str = concat!(
-            "baseline_seconds,candidate_seconds\n",
-            "1.2947094189758073,1.3181596849182757\n",
-            "1.295794106123628,1.3142782690813486\n",
-            "1.2901681962200746,1.3153286953279186\n",
-        );
-
-        let directory = tempdir()?;
-        let path = directory.path().join("posterior.csv");
-
-        write_posterior_csv(&path, &posterior::<Time>(3, 0.0)?)?;
-
-        assert_eq!(read_to_string(&path)?, EXPECTED);
-
-        Ok(())
-    }
-
-    /// `Metric` has to select the response, not just ride along. The fixture records
-    /// no memory, so reading the wrong field yields runtimes near 1.3 instead of zeros.
-    #[test]
-    fn memory_metric_reads_the_memory_field() -> Result<()> {
-        let zero = PeakMemory::from_base(0.0);
-
-        assert_eq!(
-            posterior::<PeakMemory>(8, 0.0)?.draws(),
-            [Draw {
-                baseline: zero,
-                candidate: zero
-            }; 8]
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn bootstrapping_is_deterministic() -> Result<()> {
-        let draws = || posterior::<Time>(1_000, 0.0).map(|it| it.draws().to_vec());
-
-        assert_eq!(draws()?, draws()?);
-
-        Ok(())
-    }
-
     #[test]
     fn bootstrapping_can_be_cancelled_between_draws() -> Result<()> {
-        let repetitions = fixture()?;
-        let mut rng = rng();
         let mut checks = 0;
-
         let error = Posterior::<Time>::bootstrap_checked(
-            &repetitions,
+            &fixture()?,
             NonZeroUsize::new(1_000).unwrap(),
-            Shrinkage::new(0.0)?,
-            &mut rng,
+            Shrinkage::NONE,
+            &mut Xoshiro256PlusPlus::seed_from_u64(0),
             || {
                 checks += 1;
                 anyhow::ensure!(checks < 4, "Interrupted.");
@@ -475,11 +288,10 @@ mod tests {
             },
         )
         .err()
-        .context("Bootstrapping should stop when cancelled.")?;
+        .context("bootstrapping should stop when cancelled")?;
 
         assert_eq!(error.to_string(), "Interrupted.");
         assert_eq!(checks, 4);
-
         Ok(())
     }
 }

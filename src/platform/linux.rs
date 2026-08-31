@@ -3,10 +3,7 @@ use std::{
     env, fs,
     fs::OpenOptions,
     io::{self, Read, Seek, Write},
-    os::{
-        fd::{AsRawFd, BorrowedFd, OwnedFd},
-        unix::process::CommandExt,
-    },
+    os::{fd::OwnedFd, unix::process::CommandExt},
     path::PathBuf,
     process::{Child, Command},
     sync::{Arc, OnceLock},
@@ -122,19 +119,14 @@ impl Workload {
         let cgroup = Cgroup::new()?;
         let procs = cgroup.open_procs()?;
 
-        // The closure owns the cgroup.procs handle; it stays open until the
-        // command is dropped, which happens after spawn has forked and exec'd.
         let mut command = spec.command();
         unsafe {
-            command.pre_exec(move || {
-                let fd = BorrowedFd::borrow_raw(procs.as_raw_fd());
-                match write(fd, b"0") {
-                    Ok(1) => Ok(()),
-                    Ok(_) => Err(io::Error::other(
-                        "write to cgroup.procs did not write all bytes",
-                    )),
-                    Err(error) => Err(error.into()),
-                }
+            // SAFETY: After fork this closure only invokes async-signal-safe write(2)
+            // on an inherited fd and constructs allocation-free raw OS errors.
+            command.pre_exec(move || match write(&procs, b"0") {
+                Ok(1) => Ok(()),
+                Ok(_) => Err(io::Error::from_raw_os_error(Errno::IO.raw_os_error())),
+                Err(error) => Err(io::Error::from_raw_os_error(error.raw_os_error())),
             });
         }
 

@@ -162,3 +162,25 @@ impl Quantiles {
         self.0.partition_point(|&value| value < threshold) as f64 / self.0.len() as f64
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantiles_sort_and_interpolate() -> Result<()> {
+        let quantiles = Quantiles::new(vec![4.0, 1.0, 3.0, 2.0])?;
+
+        assert_eq!(quantiles.at(0.0), 1.0);
+        assert_eq!(quantiles.at(0.25), 1.75);
+        assert_eq!(quantiles.at(0.5), 2.5);
+        assert_eq!(quantiles.at(1.0), 4.0);
+        Ok(())
+    }
+
+    #[test]
+    fn quantiles_reject_empty_and_nan_inputs() {
+        assert!(Quantiles::new(Vec::new()).is_err());
+        assert!(Quantiles::new(vec![1.0, f64::NAN]).is_err());
+    }
+}

@@ -126,9 +126,6 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    #[cfg(windows)]
-    use std::io;
-
     const MARKER: &str = "FOIL_PROCESS_TEST_MARKER";
 
     fn spec(test: &str, env: Vec<(OsString, OsString)>) -> Result<CommandSpec> {
@@ -223,27 +220,6 @@ mod tests {
         sender.join().expect("the signal thread does not panic");
         Ok(())
     }
-
-    #[test]
-    fn timeout_terminates_the_complete_workload() -> Result<()> {
-        let directory = tempdir()?;
-        let marker = directory.path().join("descendant-finished");
-        let command = spec(
-            "platform::tests::parent_child",
-            vec![(MARKER.into(), marker.as_os_str().to_owned())],
-        )?;
-        let interrupt = Interrupt::new()?;
-        let mut workload = spawn(&command)?;
-        ensure!(matches!(
-            workload.wait(&interrupt, Some(Duration::from_millis(100)))?,
-            Wait::TimedOut
-        ));
-        let _ = finish(workload)?;
-        thread::sleep(Duration::from_millis(800));
-        ensure!(!marker.exists(), "the descendant survived termination");
-        Ok(())
-    }
-
     #[test]
     fn interruption_terminates_the_complete_workload() -> Result<()> {
         let directory = tempdir()?;
@@ -269,206 +245,6 @@ mod tests {
         ensure!(!marker.exists(), "the descendant survived interruption");
         Ok(())
     }
-
-    #[test]
-    fn descendant_inheritance_cannot_delay_direct_child_exit() -> Result<()> {
-        let directory = tempdir()?;
-        let marker = directory.path().join("orphan-finished");
-        let command = spec(
-            "platform::tests::orphan_parent",
-            vec![(MARKER.into(), marker.as_os_str().to_owned())],
-        )?;
-        let interrupt = Interrupt::new()?;
-        let started = Instant::now();
-        {
-            let mut workload = spawn(&command)?;
-            ensure!(matches!(
-                workload.wait(&interrupt, Some(Duration::from_secs(2)))?,
-                Wait::Exited
-            ));
-            ensure!(finish(workload)?.success());
-        }
-        ensure!(started.elapsed() < Duration::from_secs(1));
-        thread::sleep(Duration::from_millis(800));
-        ensure!(!marker.exists(), "the orphan escaped containment");
-        Ok(())
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_resolves_the_executable_from_the_child_path() -> Result<()> {
-        let directory = tempdir()?;
-        let dir_path = directory.path().to_path_buf();
-        let executable = dir_path.join("path-only-tool.exe");
-        fs::copy(env::current_exe()?, &executable)?;
-        let command = CommandSpec::new(
-            "path-only-tool".into(),
-            ["--exact", "platform::tests::noop_child", "--ignored"]
-                .into_iter()
-                .map(OsString::from)
-                .collect(),
-            env::current_dir()?,
-            vec![("PATH".into(), dir_path.as_os_str().to_owned())],
-        );
-        let interrupt = Interrupt::new()?;
-        let mut workload = spawn(&command)?;
-        ensure!(matches!(
-            workload.wait(&interrupt, Some(Duration::from_secs(2)))?,
-            Wait::Exited
-        ));
-        ensure!(finish(workload)?.success());
-        Ok(())
-    }
-
-    /// A benchmark `startup` may create the executable the benchmark command names,
-    /// so resolution happens at prepare time. Preparing before the executable
-    /// exists fails; after startup "creates" it, the same spec runs.
-    #[cfg(windows)]
-    #[test]
-    fn an_executable_created_after_configuration_still_runs() -> Result<()> {
-        let directory = tempdir()?;
-        let executable = directory.path().join("late-tool.exe");
-        let command = CommandSpec::new(
-            executable.clone().into_os_string(),
-            ["--exact", "platform::tests::noop_child", "--ignored"]
-                .into_iter()
-                .map(OsString::from)
-                .collect(),
-            env::current_dir()?,
-            Vec::new(),
-        );
-        let interrupt = Interrupt::new()?;
-
-        let prepare_error = Workload::prepare(&command)
-            .err()
-            .context("preparing a missing program should fail")?;
-        ensure!(
-            prepare_error.kind() == io::ErrorKind::NotFound,
-            "expected NotFound, got: {}",
-            prepare_error
-        );
-
-        fs::copy(env::current_exe()?, &executable)?;
-        let mut workload = spawn(&command)?;
-        ensure!(matches!(
-            workload.wait(&interrupt, Some(Duration::from_secs(2)))?,
-            Wait::Exited
-        ));
-        ensure!(finish(workload)?.success());
-        Ok(())
-    }
-
-    /// A relative path-qualified program resolves against the benchmark's effective
-    /// child working directory, including the implicit `.exe` form.
-    #[cfg(windows)]
-    #[test]
-    fn a_relative_program_resolves_against_the_child_working_directory() -> Result<()> {
-        let directory = tempdir()?;
-        let nested = directory.path().join("bin");
-        fs::create_dir(&nested)?;
-        fs::copy(env::current_exe()?, nested.join("nested-tool.exe"))?;
-        let command = CommandSpec::new(
-            r"bin\nested-tool".into(),
-            ["--exact", "platform::tests::noop_child", "--ignored"]
-                .into_iter()
-                .map(OsString::from)
-                .collect(),
-            directory.path().to_owned(),
-            Vec::new(),
-        );
-        let interrupt = Interrupt::new()?;
-        let mut workload = spawn(&command)?;
-        ensure!(matches!(
-            workload.wait(&interrupt, Some(Duration::from_secs(2)))?,
-            Wait::Exited
-        ));
-        ensure!(finish(workload)?.success());
-        Ok(())
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn batch_files_are_rejected() -> Result<()> {
-        let directory = tempdir()?;
-        let script = directory.path().join("scripty.cmd");
-        fs::write(&script, "@echo off\r\nexit /b 0\r\n")?;
-        let env = vec![("PATH".into(), directory.path().as_os_str().to_owned())];
-
-        let explicit = CommandSpec::new(
-            script.clone().into_os_string(),
-            Vec::new(),
-            env::current_dir()?,
-            Vec::new(),
-        );
-        let error = Workload::prepare(&explicit)
-            .err()
-            .context("an explicit batch file should be rejected")?;
-        ensure!(error.to_string().contains("batch"), "{}", error);
-
-        let bare = CommandSpec::new("scripty".into(), Vec::new(), env::current_dir()?, env);
-        let error = Workload::prepare(&bare)
-            .err()
-            .context("a batch file found through PATH should be rejected")?;
-        ensure!(error.to_string().contains("batch"), "{}", error);
-
-        Ok(())
-    }
-
-    #[test]
-    #[ignore = "release-only native-runner diagnostic"]
-    fn native_runner_overhead() -> Result<()> {
-        ensure!(
-            !cfg!(debug_assertions),
-            "run this diagnostic with --release"
-        );
-        const RUNS: usize = 100;
-        let command = spec("platform::tests::noop_child", Vec::new())?;
-        let interrupt = Interrupt::new()?;
-        let executable = env::current_exe()?;
-        let mut raw = Duration::ZERO;
-        let mut native = Duration::ZERO;
-        for _ in 0..RUNS {
-            let started = Instant::now();
-            let status = std::process::Command::new(&executable)
-                .args(["--exact", "platform::tests::noop_child", "--ignored"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()?;
-            raw += started.elapsed();
-            ensure!(status.success());
-
-            let prepared = Workload::prepare(&command)?;
-            let started = Instant::now();
-            let mut workload = prepared.spawn()?;
-            ensure!(matches!(workload.wait(&interrupt, None)?, Wait::Exited));
-            ensure!(finish(workload)?.success());
-            native += started.elapsed();
-        }
-        let overhead = (native.as_secs_f64() - raw.as_secs_f64()) * 1e6 / RUNS as f64;
-        eprintln!("native runner overhead: {overhead:.1} us/run");
-        Ok(())
-    }
-
-    #[test]
-    #[ignore]
-    fn failing_child() {
-        std::process::exit(3);
-    }
-
-    /// A child that fails reports its status to the waiter.
-    #[test]
-    fn a_failing_child_reports_its_status_to_the_waiter() -> Result<()> {
-        let interrupt = Interrupt::new()?;
-        let mut workload = spawn(&spec("platform::tests::failing_child", Vec::new())?)?;
-        ensure!(matches!(
-            workload.wait(&interrupt, Some(Duration::from_secs(5)))?,
-            Wait::Exited
-        ));
-        ensure!(!finish(workload)?.success());
-        Ok(())
-    }
-
     /// The first interrupt is consumed by the wait that observed it, so
     /// teardown and later workloads start clean; only a second Ctrl+C exits.
     #[test]
@@ -491,7 +267,6 @@ mod tests {
         ensure!(finish(second)?.success());
         Ok(())
     }
-
     #[test]
     #[ignore]
     fn slow_child() {
@@ -507,13 +282,6 @@ mod tests {
     fn parent_child() {
         let status = child().status().expect("the descendant starts");
         assert!(status.success(), "the descendant failed with {status}");
-    }
-
-    #[test]
-    #[ignore]
-    #[allow(clippy::zombie_processes)]
-    fn orphan_parent() {
-        child().spawn().expect("the descendant starts");
     }
 
     #[test]

@@ -60,7 +60,7 @@ impl Metric for Time {
 
 impl MeasuredMetric for Time {
     fn read(output: &Measurement) -> Result<Self> {
-        Ok(Self(output.elapsed().as_secs_f64()))
+        Ok(Self(output.elapsed.as_secs_f64()))
     }
 }
 
@@ -106,9 +106,37 @@ impl MeasuredMetric for PeakMemory {
     fn read(output: &Measurement) -> Result<Self> {
         Ok(Self(
             output
-                .peak_memory()
+                .peak_memory
                 .context("Peak memory was not measured.")?
                 .get() as f64,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::run::{Bytes, Measurement};
+    use std::time::Duration;
+
+    #[test]
+    fn peak_memory_reads_the_memory_field() -> Result<()> {
+        let measurement = Measurement {
+            elapsed: Duration::from_secs(7),
+            peak_memory: Some(Bytes::new(42)),
+        };
+
+        assert_eq!(PeakMemory::read(&measurement)?, PeakMemory::from_base(42.0));
+        Ok(())
+    }
+
+    #[test]
+    fn missing_peak_memory_is_an_error() {
+        let measurement = Measurement {
+            elapsed: Duration::ZERO,
+            peak_memory: None,
+        };
+
+        assert!(PeakMemory::read(&measurement).is_err());
     }
 }
