@@ -2,8 +2,8 @@ use crate::analysis::analyze_checked;
 use crate::config::{Cli, Lifecycle, ResolvedSuiteConfig, RunConfig, Suite};
 use crate::platform::{CommandSpec, Interrupt};
 use crate::{
-    BenchmarkLog, CommandTemplate, Config, LifecycleConfig, MeasurementsCsv, Pair, Repetition,
-    Repetitions, Revision, RunOrder, RunOutput, Side, Summary, Time, Worktree, run_unmeasured,
+    BenchmarkLog, CommandTemplate, Config, LifecycleConfig, Measurement, MeasurementsCsv, Pair,
+    Repetition, Repetitions, Revision, RunOrder, Side, Summary, Time, Worktree, run_unmeasured,
     working_tree_has_modified_tracked_files, write_config_json, write_posterior_csv,
 };
 
@@ -82,11 +82,10 @@ pub(crate) fn run() -> Result<()> {
     let Suite {
         config: suite,
         lifecycle,
-        output_dir: suite_output_dir,
         runs,
     } = Cli::suite()?;
 
-    clear_outputs(&suite_output_dir, &runs)?;
+    clear_outputs(&runs)?;
     write_configs(&suite, &lifecycle, &runs)?;
 
     let startup = build_command(&lifecycle.startup, None, &[]);
@@ -98,7 +97,7 @@ pub(crate) fn run() -> Result<()> {
             &interrupt,
             "suite startup",
         ),
-        || execute_suite(&suite, &lifecycle, &suite_output_dir, runs, &interrupt),
+        || execute_suite(&suite, &lifecycle, runs, &interrupt),
         || {
             run_at(
                 teardown.as_ref(),
@@ -113,7 +112,6 @@ pub(crate) fn run() -> Result<()> {
 fn execute_suite(
     suite: &ResolvedSuiteConfig,
     lifecycle: &Lifecycle,
-    suite_output_dir: &Path,
     runs: Vec<(Option<String>, RunConfig)>,
     interrupt: &Interrupt,
 ) -> Result<()> {
@@ -122,26 +120,23 @@ fn execute_suite(
             "Warning: the working tree has modified tracked files, which are never benchmarked."
         );
     }
-    let multiple = runs.len() > 1;
     let revisions = Pair {
         baseline: suite.baseline.clone(),
         candidate: suite.candidate.clone(),
     };
     let shared = create_worktrees(&revisions)?;
 
-    let mut compact = Vec::with_capacity(runs.len());
-
     for (name, config) in runs {
         ensure!(!interrupted(), "Interrupted.");
         let output_dir = output_directory(name.as_deref(), &config);
-        let heading = if multiple { name.as_deref() } else { None };
+        let heading = name.as_deref();
         let isolated = config
             .isolate
             .then(|| create_worktrees(&revisions))
             .transpose()?;
         let worktrees = isolated.as_ref().unwrap_or(&shared);
 
-        let summary = compare(
+        compare(
             suite,
             lifecycle,
             config,
@@ -150,19 +145,6 @@ fn execute_suite(
             heading,
             interrupt,
         )?;
-
-        if let Some(name) = name {
-            compact.push(format!("{name}: {}", summary.compact()));
-        }
-    }
-
-    if multiple {
-        let report = format!("{}\n", compact.join("\n"));
-        print!("{report}");
-
-        let report_path = suite_output_dir.join("report_short.txt");
-        fs::write(&report_path, &report)
-            .with_context(|| format!("Failed to write {}.", report_path.display()))?;
     }
 
     Ok(())
@@ -194,7 +176,7 @@ fn output_directory(name: Option<&str>, config: &RunConfig) -> std::path::PathBu
     )
 }
 
-fn clear_outputs(suite_output_dir: &Path, runs: &[(Option<String>, RunConfig)]) -> Result<()> {
+fn clear_outputs(runs: &[(Option<String>, RunConfig)]) -> Result<()> {
     let mut result = Ok(());
     for (name, config) in runs {
         let output_dir = output_directory(name.as_deref(), config);
@@ -208,10 +190,7 @@ fn clear_outputs(suite_output_dir: &Path, runs: &[(Option<String>, RunConfig)]) 
             result = combine(result, remove_generated(&output_dir.join(artifact)));
         }
     }
-    combine(
-        result,
-        remove_generated(&suite_output_dir.join("report_short.txt")),
-    )
+    result
 }
 
 fn remove_generated(path: &Path) -> Result<()> {
@@ -295,7 +274,6 @@ fn compare(
 
     let repetition_count = repetition_count.get();
     let schedule = RunOrder::schedule(repetition_count, block_size, &mut schedule_rng);
-
     let repetitions = scoped(
         run_startup_both(
             benchmark_commands.startup.as_ref(),
@@ -314,6 +292,7 @@ fn compare(
                 output_dir,
                 interrupt,
                 timeout,
+                heading,
             )
         },
         || {
@@ -381,7 +360,8 @@ fn measure_all(
     output_dir: &Path,
     interrupt: &Interrupt,
     timeout: Option<Duration>,
-) -> Result<Repetitions> {
+    benchmark_name: Option<&str>,
+) -> Result<Repetitions<Measurement>> {
     let repetition_count = schedule.len();
     let mut measured_repetitions = Vec::with_capacity(repetition_count);
 
@@ -392,6 +372,7 @@ fn measure_all(
                 .with_context(|| format!("Failed to create {}.", log_path.display()))?,
         ),
         repetition_count * 2,
+        benchmark_name.map(str::to_owned),
     );
 
     let measurements_path = output_dir.join("measurements.csv");
@@ -412,7 +393,7 @@ fn measure_all(
         ensure!(!interrupted(), "Interrupted.");
         let [first, second] = order.sides();
 
-        let mut measure = |side: Side| -> Result<RunOutput> { measure_one(&mut ctx, side) };
+        let mut measure = |side: Side| -> Result<Measurement> { measure_one(&mut ctx, side) };
         let first_output = measure(first)?;
         let second_output = measure(second)?;
 
@@ -433,7 +414,7 @@ fn measure_all(
 fn measure_one<W: std::io::Write>(
     ctx: &mut MeasurementContext<'_, W>,
     side: Side,
-) -> Result<RunOutput> {
+) -> Result<Measurement> {
     let worktree = ctx.worktrees.get(side);
     ctx.log.phase(side, "suite startup");
     let suite_start = run_in(

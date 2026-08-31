@@ -1,4 +1,4 @@
-mod common;
+pub mod common;
 use anyhow::{Result, ensure};
 use common::*;
 use foil::{Interval, Metric, Shrinkage, analyze_measurements};
@@ -17,7 +17,6 @@ fn a_complete_configuration_runs_without_any_arguments() -> Result<()> {
         candidate = 'HEAD'\n\
         repetitions = 10\n\
         draws = 1000\n\
-        interval = [0.5, 0.8]\n\
         seed = 0\n\
         output-dir = 'benchmark'\n\
         command = ['git', '--version']\n",
@@ -45,6 +44,15 @@ fn a_complete_configuration_runs_without_any_arguments() -> Result<()> {
     assert_eq!(config["seed"], 0);
     assert_eq!(config["foil_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(config["command"], serde_json::json!(["git", "--version"]));
+    assert_eq!(config["intervals"], serde_json::json!([0.5, 0.8, 0.9]));
+
+    let report = fs::read_to_string(project.path().join("benchmark/report.txt"))?;
+    for interval in ["50% CrI", "80% CrI", "90% CrI"] {
+        assert!(
+            report.contains(interval),
+            "{interval} is missing from\n{report}"
+        );
+    }
 
     Ok(())
 }
@@ -65,7 +73,7 @@ fn saved_measurements_reproduce_the_full_analysis() -> Result<()> {
     let intervals = [
         Interval::new(0.5)?,
         Interval::new(0.8)?,
-        Interval::new(0.98)?,
+        Interval::new(0.9)?,
     ];
     let analysis = analyze_measurements(
         &output.join("measurements.csv"),
@@ -106,7 +114,7 @@ fn builtin_defaults_apply_without_a_configuration_file() -> Result<()> {
         "[default: 0]",
         "[default: 4]",
         "[default: 10000]",
-        "[default: 0.5 0.8 0.90]",
+        "[default: 0.5 0.8 0.9]",
     ] {
         assert!(help.contains(default), "{default} is missing from\n{help}");
     }
@@ -125,7 +133,7 @@ fn help_ignores_configuration_defaults() -> Result<()> {
         "[default: HEAD]",
         "[default: 0]",
         "[default: 10000]",
-        "[default: 0.5 0.8 0.90]",
+        "[default: 0.5 0.8 0.9]",
     ] {
         assert!(help.contains(default), "{default} is missing from\n{help}");
     }
@@ -156,24 +164,6 @@ fn arguments_override_the_configuration() -> Result<()> {
         error.contains("At least 10 repetitions are required."),
         "{error}"
     );
-
-    Ok(())
-}
-
-#[test]
-fn an_interval_wider_than_the_repetitions_support_is_rejected_at_startup() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-         candidate = 'HEAD'\n\
-         output-dir = 'bench'\n\
-         repetitions = 10\n\
-         interval = [0.8, 0.90]\n\
-         command = ['git', '--version']\n",
-    )?;
-    let error = failure(&project, &[])?;
-
-    assert!(error.contains("widest supported interval"), "{error}");
-    assert!(error.contains("80%"), "{error}");
 
     Ok(())
 }

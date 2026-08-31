@@ -1,4 +1,4 @@
-mod common;
+pub mod common;
 use anyhow::{Result, ensure};
 use common::*;
 use std::{fs, process::Command};
@@ -123,7 +123,6 @@ fn stale_outputs_are_removed_for_every_selected_benchmark() -> Result<()> {
             fs::write(output.join(artifact), "stale")?;
         }
     }
-    fs::write(bench.join("report_short.txt"), "stale")?;
 
     let error = failure(&project, &[])?;
     assert!(error.contains("The baseline startup failed."), "{error}");
@@ -143,7 +142,6 @@ fn stale_outputs_are_removed_for_every_selected_benchmark() -> Result<()> {
             );
         }
     }
-    assert!(!bench.join("report_short.txt").exists());
 
     Ok(())
 }

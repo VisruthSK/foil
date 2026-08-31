@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::{Result, ensure};
 use std::{fs, process::Command};
 use tempfile::{TempDir, tempdir};

@@ -9,7 +9,7 @@ NB: `foil` is currently experimental, the API may change without warning.
 ## Usage
 
 ```sh
-foil --baseline main --candidate HEAD --repetitions 30 --interval 0.5 0.8 0.90 --output-dir benchmark/ -- cargo bench
+foil --baseline main --candidate HEAD --repetitions 30 --interval 0.5 0.8 0.9 --output-dir benchmark/ -- cargo bench
 ```
 
 Run `foil --help` for the full set of options.
@@ -27,7 +27,7 @@ baseline = "main"
 candidate = "HEAD"
 repetitions = 30
 block-size = 4
-interval = [0.5, 0.8, 0.90]
+interval = [0.5, 0.8, 0.9]
 output-dir = "benchmark/"
 ```
 
@@ -89,12 +89,7 @@ Each run writes to its output directory:
 
 Library callers can pass `measurements.csv` to `analyze_measurements`; the same seed, draw count, shrinkage, and intervals reproduce the CLI posterior exactly.
 
-Running more than one benchmark also prints a one-line-per-benchmark summary and writes it to `report_short.txt` in `--output-dir`:
-
-```
-parse: 1.2s -> 554.0ms [-52.41%, -51.31%]
-render: 3.1s -> 3.0s [-4.02%, +1.15%]
-```
+Named benchmark reports are prefixed with the benchmark name when printed.
 
 ## License
 

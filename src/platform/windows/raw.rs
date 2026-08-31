@@ -4,8 +4,10 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::{
+    ffi::OsStr,
     io,
     mem::{size_of, zeroed},
+    os::windows::ffi::OsStrExt,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     os::windows::process::ExitStatusExt,
     process::ExitStatus,
@@ -18,6 +20,7 @@ use windows_sys::Win32::{
         FALSE, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, TRUE, WAIT_FAILED,
         WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
+    Globalization::CompareStringOrdinal,
     Security::SECURITY_ATTRIBUTES,
     Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -41,12 +44,12 @@ use windows_sys::Win32::{
 
 use crate::platform::Wait;
 
-/// A kill-on-close job object covering the whole workload.
+/// A kill-on-close Job Object covering the whole workload.
 pub(crate) struct Job(OwnedHandle);
 
 impl Job {
     pub(crate) fn new() -> io::Result<Self> {
-        // SAFETY: Both parameters are null, which requests an unnamed job object.
+        // SAFETY: Both parameters are null, requesting an unnamed job object.
         let raw = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
         owned(raw).map(Self)?.with_kill_on_close()
     }
@@ -105,6 +108,11 @@ impl Event {
 pub(crate) struct Child(OwnedHandle);
 
 impl Child {
+    pub(crate) fn terminate(&self) -> io::Result<()> {
+        // SAFETY: `self.0` is a valid process handle.
+        bool_result(unsafe { TerminateProcess(self.as_handle(), 1) })
+    }
+
     pub(crate) fn exit_status(&self) -> io::Result<ExitStatus> {
         let mut code = 0;
         // SAFETY: `self.0` is a valid process handle; `code` outlives the call.
@@ -112,16 +120,27 @@ impl Child {
         Ok(ExitStatus::from_raw(code))
     }
 
-    pub(crate) fn terminate(&self) -> io::Result<()> {
-        // SAFETY: `self.0` is a valid process handle.
-        bool_result(unsafe { TerminateProcess(self.as_handle(), 1) })
-    }
-
     /// Blocks until the child exits, whatever caused it to exit.
     pub(crate) fn reap(&self) -> io::Result<()> {
         // SAFETY: `self.0` is a valid process handle.
         match unsafe { WaitForSingleObject(self.as_handle(), INFINITE) } {
             WAIT_OBJECT_0 => Ok(()),
+            WAIT_FAILED => Err(io::Error::last_os_error()),
+            _ => Err(io::Error::other("Unexpected process wait result.")),
+        }
+    }
+
+    /// Waits for the child to exit and returns its exit status.
+    pub(crate) fn wait(&self) -> io::Result<ExitStatus> {
+        self.reap()?;
+        self.exit_status()
+    }
+
+    pub(crate) fn try_wait(&self) -> io::Result<Option<ExitStatus>> {
+        // SAFETY: `self.0` is a valid process handle.
+        match unsafe { WaitForSingleObject(self.as_handle(), 0) } {
+            WAIT_OBJECT_0 => self.exit_status().map(Some),
+            WAIT_TIMEOUT => Ok(None),
             WAIT_FAILED => Err(io::Error::last_os_error()),
             _ => Err(io::Error::other("Unexpected process wait result.")),
         }
@@ -279,7 +298,7 @@ pub(crate) fn spawn_process(
     // - The inherited stdio handles remain valid for the duration of the call.
     bool_result(unsafe {
         CreateProcessW(
-            application.as_ptr() as *mut u16,
+            application.as_ptr(),
             command_line.as_mut_ptr(),
             ptr::null(),
             ptr::null(),
@@ -303,7 +322,8 @@ pub(crate) fn spawn_process(
     Ok(child)
 }
 
-/// Waits for `child` to exit, `interrupt` to fire, or `timeout` to elapse.
+/// Direct exit wins when it and an interrupt become ready together; the
+/// interrupt is still consumed so it cannot poison the next workload.
 pub(crate) fn wait_for(
     child: &Child,
     interrupt: &Event,
@@ -318,7 +338,14 @@ pub(crate) fn wait_for(
         let result =
             unsafe { WaitForMultipleObjects(2, handles.as_ptr(), FALSE, milliseconds(remaining)) };
         match result {
-            WAIT_OBJECT_0 => return child.exit_status().map(Wait::Exited),
+            WAIT_OBJECT_0 => {
+                let interrupt_signaled =
+                    unsafe { WaitForSingleObject(interrupt.as_handle(), 0) == WAIT_OBJECT_0 };
+                if interrupt_signaled {
+                    interrupt.reset()?;
+                }
+                return Ok(Wait::Exited);
+            }
             value if value == WAIT_OBJECT_0 + 1 => {
                 interrupt.reset()?;
                 return Ok(Wait::Interrupted);
@@ -354,5 +381,27 @@ fn bool_result(result: i32) -> io::Result<()> {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+/// Windows environment keys compare case-insensitively.
+pub(crate) fn compare_ordinal(a: &OsStr, b: &OsStr) -> std::cmp::Ordering {
+    let a_wide: Vec<u16> = a.encode_wide().chain(Some(0)).collect();
+    let b_wide: Vec<u16> = b.encode_wide().chain(Some(0)).collect();
+    // SAFETY: Both slices are NUL-terminated and valid for the call.
+    let result = unsafe {
+        CompareStringOrdinal(
+            a_wide.as_ptr(),
+            a_wide.len() as i32 - 1,
+            b_wide.as_ptr(),
+            b_wide.len() as i32 - 1,
+            TRUE,
+        )
+    };
+    match result {
+        1 => std::cmp::Ordering::Less,
+        2 => std::cmp::Ordering::Equal,
+        3 => std::cmp::Ordering::Greater,
+        _ => a_wide.cmp(&b_wide),
     }
 }

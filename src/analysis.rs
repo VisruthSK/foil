@@ -1,4 +1,4 @@
-use crate::run::RunOutput;
+use crate::run::Measurement;
 use crate::{
     Interval, Pair, Posterior, Repetition, Repetitions, RunOrder, Shrinkage, Summary, Time,
 };
@@ -31,7 +31,7 @@ pub fn analyze_measurements(
 }
 
 pub(crate) fn analyze(
-    repetitions: &Repetitions,
+    repetitions: &Repetitions<Measurement>,
     seed: u64,
     draws: NonZeroUsize,
     shrinkage: Shrinkage,
@@ -42,7 +42,7 @@ pub(crate) fn analyze(
 
 /// Analyzes validated repetitions, checking for cancellation between draws.
 pub(crate) fn analyze_checked(
-    repetitions: &Repetitions,
+    repetitions: &Repetitions<Measurement>,
     seed: u64,
     draws: NonZeroUsize,
     shrinkage: Shrinkage,
@@ -61,7 +61,7 @@ pub(crate) fn analyze_checked(
     Ok(Analysis { posterior, summary })
 }
 
-fn read_measurements(path: &Path) -> Result<Repetitions> {
+fn read_measurements(path: &Path) -> Result<Repetitions<Measurement>> {
     let mut lines = BufReader::new(
         File::open(path).with_context(|| format!("Failed to read {}.", path.display()))?,
     )
@@ -96,16 +96,17 @@ fn read_measurements(path: &Path) -> Result<Repetitions> {
                 "candidate_first" => RunOrder::CandidateFirst,
                 order => anyhow::bail!("Unknown run order `{order}`."),
             };
-            let elapsed = |field: &str| -> Result<RunOutput> {
+            let elapsed = |field: &str| -> Result<Measurement> {
                 let seconds: f64 = field.parse()?;
                 ensure!(
                     seconds.is_finite() && seconds >= 0.0,
                     "Measurement must be finite and nonnegative."
                 );
-                Ok(RunOutput::measurement(
-                    Duration::try_from_secs_f64(seconds)
+                Ok(Measurement {
+                    elapsed: Duration::try_from_secs_f64(seconds)
                         .context("Measurement is too large to represent.")?,
-                ))
+                    peak_memory: None,
+                })
             };
             Ok(Repetition {
                 outputs: Pair {
@@ -126,12 +127,18 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    fn repetitions() -> Result<Repetitions> {
+    fn repetitions() -> Result<Repetitions<Measurement>> {
         (0..10)
             .map(|index| Repetition {
                 outputs: Pair {
-                    baseline: RunOutput::measurement(Duration::from_secs_f64(1.0 + index as f64)),
-                    candidate: RunOutput::measurement(Duration::from_secs_f64(1.1 + index as f64)),
+                    baseline: Measurement {
+                        elapsed: Duration::from_secs_f64(1.0 + index as f64),
+                        peak_memory: None,
+                    },
+                    candidate: Measurement {
+                        elapsed: Duration::from_secs_f64(1.1 + index as f64),
+                        peak_memory: None,
+                    },
                 },
                 order: if index % 2 == 0 {
                     RunOrder::BaselineFirst
@@ -156,7 +163,7 @@ mod tests {
         let intervals = [
             Interval::new(0.5)?,
             Interval::new(0.8)?,
-            Interval::new(0.98)?,
+            Interval::new(0.9)?,
         ];
         let draws = NonZeroUsize::new(1_000).unwrap();
 

@@ -1,4 +1,4 @@
-use crate::run::RunOutput;
+use crate::run::Measurement;
 
 use anyhow::{Context, Result};
 
@@ -18,7 +18,7 @@ pub trait Metric: Copy {
 }
 
 pub(crate) trait MeasuredMetric: Metric {
-    fn read(output: &RunOutput) -> Result<Self>;
+    fn read(output: &Measurement) -> Result<Self>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -59,7 +59,7 @@ impl Metric for Time {
 }
 
 impl MeasuredMetric for Time {
-    fn read(output: &RunOutput) -> Result<Self> {
+    fn read(output: &Measurement) -> Result<Self> {
         Ok(Self(output.elapsed().as_secs_f64()))
     }
 }
@@ -103,7 +103,7 @@ impl Metric for PeakMemory {
 }
 
 impl MeasuredMetric for PeakMemory {
-    fn read(output: &RunOutput) -> Result<Self> {
+    fn read(output: &Measurement) -> Result<Self> {
         Ok(Self(
             output
                 .peak_memory()

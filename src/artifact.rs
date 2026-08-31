@@ -1,3 +1,4 @@
+use crate::run::Measurement;
 use crate::{Interval, Metric, Pair, Posterior, Repetition, Revision, RunOrder, Shrinkage};
 
 use anyhow::{Context, Result};
@@ -154,7 +155,7 @@ impl MeasurementsCsv {
         Ok(Self { writer, rows: 0 })
     }
 
-    pub(crate) fn append(&mut self, repetition: &Repetition) -> Result<()> {
+    pub(crate) fn append(&mut self, repetition: &Repetition<Measurement>) -> Result<()> {
         let Pair {
             baseline,
             candidate,
@@ -198,19 +199,18 @@ pub(crate) fn write_posterior_csv<M: Metric>(path: &Path, posterior: &Posterior<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Bytes, Repetition, RunOutput};
-    use std::{fs::read_to_string, process::ExitStatus, time::Duration};
+    use crate::{Bytes, Measurement, Repetition};
+    use std::{fs::read_to_string, time::Duration};
     use tempfile::tempdir;
 
-    fn output(seconds: f64, bytes: u64) -> RunOutput {
-        RunOutput::new(
-            ExitStatus::default(),
-            Duration::from_secs_f64(seconds),
-            Some(Bytes::new(bytes)),
-        )
+    fn output(seconds: f64, bytes: u64) -> Measurement {
+        Measurement {
+            elapsed: Duration::from_secs_f64(seconds),
+            peak_memory: Some(Bytes::new(bytes)),
+        }
     }
 
-    fn repetition(index: usize) -> Repetition {
+    fn repetition(index: usize) -> Repetition<Measurement> {
         Repetition {
             outputs: Pair {
                 baseline: output(1.0, 1_000),

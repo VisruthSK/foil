@@ -2,10 +2,47 @@
 use std::process::{Command, Stdio};
 use std::{ffi::OsString, path::PathBuf, process::ExitStatus};
 
+#[cfg(unix)]
+use std::io;
+
 pub(crate) enum Wait {
-    Exited(ExitStatus),
+    Exited,
     Interrupted,
     TimedOut,
+}
+
+pub(crate) struct Finished {
+    pub(crate) status: std::io::Result<ExitStatus>,
+    pub(crate) peak_memory: Option<crate::Bytes>,
+    pub(crate) cleanup: std::io::Result<()>,
+}
+
+fn combine_errors(
+    primary: std::io::Result<()>,
+    secondary: std::io::Result<()>,
+) -> std::io::Result<()> {
+    match (primary, secondary) {
+        (Ok(()), result) | (result, Ok(())) => result,
+        (Err(primary), Err(secondary)) => Err(std::io::Error::new(
+            primary.kind(),
+            format!("{primary}; additionally: {secondary}"),
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn reap_after_kill(
+    child: &mut std::process::Child,
+    containment: &std::io::Result<()>,
+    fallback: Option<&std::io::Result<()>>,
+) -> std::io::Result<ExitStatus> {
+    if containment.is_ok() || fallback.is_some_and(Result::is_ok) {
+        child.wait()
+    } else {
+        child.try_wait()?.ok_or_else(|| {
+            std::io::Error::other("workload could not be terminated safely; refusing to wait")
+        })
+    }
 }
 
 /// A logical benchmark command: what to run, with which arguments, working
@@ -59,12 +96,15 @@ mod macos;
 mod windows;
 
 #[cfg(unix)]
-pub(crate) fn drain_interrupt(fd: &std::os::fd::OwnedFd) {
-    use rustix::io::read;
+pub(crate) fn drain_interrupt(fd: &std::os::fd::OwnedFd) -> io::Result<()> {
+    use rustix::io::{Errno, read};
     loop {
         match read(fd, &mut [0u8; 64]) {
-            Ok(n) if n > 0 => {}
-            _ => break,
+            Ok(0) => return Ok(()),
+            Ok(_) => continue,
+            Err(Errno::INTR) => continue,
+            Err(Errno::AGAIN) => return Ok(()),
+            Err(error) => return Err(io::Error::from(error)),
         }
     }
 }
@@ -81,10 +121,13 @@ mod tests {
     use super::*;
     use anyhow::{Context, Result, ensure};
     use std::{
-        env, fs, io, thread,
+        env, fs, thread,
         time::{Duration, Instant},
     };
     use tempfile::tempdir;
+
+    #[cfg(windows)]
+    use std::io;
 
     const MARKER: &str = "FOIL_PROCESS_TEST_MARKER";
 
@@ -107,6 +150,13 @@ mod tests {
             .context("spawn")
     }
 
+    fn finish(workload: Workload) -> Result<ExitStatus> {
+        let finished = workload.finish();
+        let status = finished.status?;
+        finished.cleanup?;
+        Ok(status)
+    }
+
     #[test]
     fn timeout_wakes_near_its_deadline_and_reaps_the_child() -> Result<()> {
         let interrupt = Interrupt::new()?;
@@ -126,7 +176,7 @@ mod tests {
             elapsed < Duration::from_millis(600),
             "woke after {elapsed:?}"
         );
-        workload.terminate()?;
+        let _ = finish(workload)?;
         Ok(())
     }
 
@@ -141,9 +191,16 @@ mod tests {
         interrupt.signal();
         ensure!(matches!(
             workload.wait(&interrupt, Some(Duration::from_secs(5)))?,
-            Wait::Exited(status) if status.success()
+            Wait::Exited
         ));
-        workload.terminate()?;
+        ensure!(finish(workload)?.success());
+
+        let mut next = spawn(&spec("platform::tests::slow_child", Vec::new())?)?;
+        ensure!(matches!(
+            next.wait(&interrupt, Some(Duration::from_millis(200)))?,
+            Wait::TimedOut
+        ));
+        let _ = finish(next)?;
         Ok(())
     }
 
@@ -162,7 +219,7 @@ mod tests {
             Wait::Interrupted
         ));
         ensure!(started.elapsed() < Duration::from_secs(2));
-        workload.terminate()?;
+        let _ = finish(workload)?;
         sender.join().expect("the signal thread does not panic");
         Ok(())
     }
@@ -181,7 +238,7 @@ mod tests {
             workload.wait(&interrupt, Some(Duration::from_millis(100)))?,
             Wait::TimedOut
         ));
-        workload.terminate()?;
+        let _ = finish(workload)?;
         thread::sleep(Duration::from_millis(800));
         ensure!(!marker.exists(), "the descendant survived termination");
         Ok(())
@@ -206,7 +263,7 @@ mod tests {
             workload.wait(&interrupt, Some(Duration::from_secs(30)))?,
             Wait::Interrupted
         ));
-        workload.terminate()?;
+        let _ = finish(workload)?;
         sender.join().expect("the signal thread does not panic");
         thread::sleep(Duration::from_millis(800));
         ensure!(!marker.exists(), "the descendant survived interruption");
@@ -227,9 +284,9 @@ mod tests {
             let mut workload = spawn(&command)?;
             ensure!(matches!(
                 workload.wait(&interrupt, Some(Duration::from_secs(2)))?,
-                Wait::Exited(status) if status.success()
+                Wait::Exited
             ));
-            workload.terminate()?;
+            ensure!(finish(workload)?.success());
         }
         ensure!(started.elapsed() < Duration::from_secs(1));
         thread::sleep(Duration::from_millis(800));
@@ -241,7 +298,8 @@ mod tests {
     #[test]
     fn windows_resolves_the_executable_from_the_child_path() -> Result<()> {
         let directory = tempdir()?;
-        let executable = directory.path().join("path-only-tool.exe");
+        let dir_path = directory.path().to_path_buf();
+        let executable = dir_path.join("path-only-tool.exe");
         fs::copy(env::current_exe()?, &executable)?;
         let command = CommandSpec::new(
             "path-only-tool".into(),
@@ -250,20 +308,20 @@ mod tests {
                 .map(OsString::from)
                 .collect(),
             env::current_dir()?,
-            vec![("PATH".into(), directory.path().as_os_str().to_owned())],
+            vec![("PATH".into(), dir_path.as_os_str().to_owned())],
         );
         let interrupt = Interrupt::new()?;
         let mut workload = spawn(&command)?;
         ensure!(matches!(
             workload.wait(&interrupt, Some(Duration::from_secs(2)))?,
-            Wait::Exited(status) if status.success()
+            Wait::Exited
         ));
-        workload.terminate()?;
+        ensure!(finish(workload)?.success());
         Ok(())
     }
 
     /// A benchmark `startup` may create the executable the benchmark command names,
-    /// so the spec must stay logical until spawn time. Spawning before the executable
+    /// so resolution happens at prepare time. Preparing before the executable
     /// exists fails; after startup "creates" it, the same spec runs.
     #[cfg(windows)]
     #[test]
@@ -281,18 +339,22 @@ mod tests {
         );
         let interrupt = Interrupt::new()?;
 
-        let missing = Workload::prepare(&command)
+        let prepare_error = Workload::prepare(&command)
             .err()
             .context("preparing a missing program should fail")?;
-        ensure!(missing.kind() == io::ErrorKind::NotFound, "{missing}");
+        ensure!(
+            prepare_error.kind() == io::ErrorKind::NotFound,
+            "expected NotFound, got: {}",
+            prepare_error
+        );
 
         fs::copy(env::current_exe()?, &executable)?;
         let mut workload = spawn(&command)?;
         ensure!(matches!(
             workload.wait(&interrupt, Some(Duration::from_secs(2)))?,
-            Wait::Exited(status) if status.success()
+            Wait::Exited
         ));
-        workload.terminate()?;
+        ensure!(finish(workload)?.success());
         Ok(())
     }
 
@@ -318,17 +380,15 @@ mod tests {
         let mut workload = spawn(&command)?;
         ensure!(matches!(
             workload.wait(&interrupt, Some(Duration::from_secs(2)))?,
-            Wait::Exited(status) if status.success()
+            Wait::Exited
         ));
-        workload.terminate()?;
+        ensure!(finish(workload)?.success());
         Ok(())
     }
 
-    /// Batch files are rejected outright rather than run with ordinary-executable
-    /// argument quoting, whether named by explicit path or found through the PATH.
     #[cfg(windows)]
     #[test]
-    fn batch_files_are_rejected_with_a_clear_error() -> Result<()> {
+    fn batch_files_are_rejected() -> Result<()> {
         let directory = tempdir()?;
         let script = directory.path().join("scripty.cmd");
         fs::write(&script, "@echo off\r\nexit /b 0\r\n")?;
@@ -343,13 +403,13 @@ mod tests {
         let error = Workload::prepare(&explicit)
             .err()
             .context("an explicit batch file should be rejected")?;
-        ensure!(error.to_string().contains("batch"), "{error}");
+        ensure!(error.to_string().contains("batch"), "{}", error);
 
         let bare = CommandSpec::new("scripty".into(), Vec::new(), env::current_dir()?, env);
         let error = Workload::prepare(&bare)
             .err()
             .context("a batch file found through PATH should be rejected")?;
-        ensure!(error.to_string().contains("batch"), "{error}");
+        ensure!(error.to_string().contains("batch"), "{}", error);
 
         Ok(())
     }
@@ -381,12 +441,9 @@ mod tests {
             let prepared = Workload::prepare(&command)?;
             let started = Instant::now();
             let mut workload = prepared.spawn()?;
-            ensure!(matches!(
-                workload.wait(&interrupt, None)?,
-                Wait::Exited(status) if status.success()
-            ));
+            ensure!(matches!(workload.wait(&interrupt, None)?, Wait::Exited));
+            ensure!(finish(workload)?.success());
             native += started.elapsed();
-            workload.terminate()?;
         }
         let overhead = (native.as_secs_f64() - raw.as_secs_f64()) * 1e6 / RUNS as f64;
         eprintln!("native runner overhead: {overhead:.1} us/run");
@@ -406,9 +463,9 @@ mod tests {
         let mut workload = spawn(&spec("platform::tests::failing_child", Vec::new())?)?;
         ensure!(matches!(
             workload.wait(&interrupt, Some(Duration::from_secs(5)))?,
-            Wait::Exited(status) if !status.success()
+            Wait::Exited
         ));
-        workload.terminate()?;
+        ensure!(!finish(workload)?.success());
         Ok(())
     }
 
@@ -424,14 +481,14 @@ mod tests {
             first.wait(&interrupt, Some(Duration::from_secs(5)))?,
             Wait::Interrupted
         ));
-        first.terminate()?;
+        let _ = finish(first)?;
 
         let mut second = spawn(&spec("platform::tests::noop_child", Vec::new())?)?;
         ensure!(matches!(
             second.wait(&interrupt, Some(Duration::from_secs(5)))?,
-            Wait::Exited(status) if status.success()
+            Wait::Exited
         ));
-        second.terminate()?;
+        ensure!(finish(second)?.success());
         Ok(())
     }
 

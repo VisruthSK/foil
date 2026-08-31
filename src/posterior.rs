@@ -1,5 +1,6 @@
 use crate::metric::{MeasuredMetric, Metric};
 use crate::repetition::Repetitions;
+use crate::run::Measurement;
 use crate::summary::{Interval, Summary};
 
 use anyhow::{Context, Result, ensure};
@@ -15,7 +16,7 @@ struct RegressionRow {
 }
 
 impl RegressionRow {
-    fn all<M: MeasuredMetric>(repetitions: &Repetitions) -> Result<Vec<Self>> {
+    fn all<M: MeasuredMetric>(repetitions: &Repetitions<Measurement>) -> Result<Vec<Self>> {
         let center = repetitions.center();
 
         repetitions
@@ -186,7 +187,7 @@ impl<M: Metric> Posterior<M> {
     /// Draws Bayesian-bootstrap samples of the adjusted mean baseline and candidate value.
     #[cfg(test)]
     pub(crate) fn bootstrap(
-        repetitions: &Repetitions,
+        repetitions: &Repetitions<Measurement>,
         draws: NonZeroUsize,
         shrinkage: Shrinkage,
         rng: &mut impl Rng,
@@ -199,7 +200,7 @@ impl<M: Metric> Posterior<M> {
 
     /// Draws Bayesian-bootstrap samples while checking for cancellation before each draw.
     pub(crate) fn bootstrap_checked(
-        repetitions: &Repetitions,
+        repetitions: &Repetitions<Measurement>,
         draws: NonZeroUsize,
         shrinkage: Shrinkage,
         rng: &mut impl Rng,
@@ -263,10 +264,9 @@ mod tests {
     use crate::artifact::write_posterior_csv;
     use crate::metric::{PeakMemory, Time};
     use crate::repetition::{Pair, Repetition, RunOrder};
-    use crate::run::{Bytes, RunOutput};
+    use crate::run::{Bytes, Measurement};
     use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
     use std::fs::read_to_string;
-    use std::process::ExitStatus;
     use std::time::Duration;
     use tempfile::tempdir;
 
@@ -275,7 +275,7 @@ mod tests {
     ///
     /// Memory is left at zero throughout, which is what lets a test detect a metric
     /// that reads the wrong field.
-    fn fixture() -> Result<Repetitions> {
+    fn fixture() -> Result<Repetitions<Measurement>> {
         let baseline = [1.00, 1.08, 1.13, 1.18, 1.27, 1.31, 1.39, 1.44, 1.53, 1.59];
         let candidate = [1.04, 1.06, 1.19, 1.17, 1.31, 1.30, 1.46, 1.41, 1.58, 1.61];
         let orders = [
@@ -291,13 +291,9 @@ mod tests {
             RunOrder::CandidateFirst,
         ];
 
-        // `ExitStatus::default()` is exit 0, so these read as successful runs.
-        let measure = |seconds: f64| {
-            RunOutput::new(
-                ExitStatus::default(),
-                Duration::from_secs_f64(seconds),
-                Some(Bytes::ZERO),
-            )
+        let measure = |seconds: f64| Measurement {
+            elapsed: Duration::from_secs_f64(seconds),
+            peak_memory: Some(Bytes::ZERO),
         };
 
         (0..baseline.len())

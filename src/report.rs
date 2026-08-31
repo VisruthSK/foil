@@ -27,12 +27,6 @@ fn bracket<M: Metric>(range: Range<M>) -> String {
     )
 }
 
-fn magnitude<M: Metric>(value: M) -> String {
-    let Unit { scale, symbol } = M::display_unit(value);
-
-    format!("{:.1}{symbol}", value.base() * scale)
-}
-
 fn thousands(count: usize) -> String {
     let digits = count.to_string();
     let mut grouped = String::new();
@@ -56,29 +50,6 @@ impl<M: Metric> Summary<M> {
             100.0 * self.probability_candidate_lower,
             thousands(below),
             thousands(total),
-        )
-    }
-}
-
-impl<M: Metric> Summary<M> {
-    /// A one-line summary for a report spanning several benchmarks, e.g. `1.2s -> 554.0ms [-52.41%, -51.31%]`.
-    pub(crate) fn compact(&self) -> String {
-        let bounds = self
-            .change
-            .intervals
-            .iter()
-            .max_by(|a, b| a.interval.percent().total_cmp(&b.interval.percent()))
-            .expect("At least one interval is always requested.");
-
-        let change = match bounds.relative {
-            Some(relative) => format!("[{:+.2}%, {:+.2}%]", relative.lower, relative.upper),
-            None => bracket(bounds.absolute),
-        };
-
-        format!(
-            "{} -> {} {change}",
-            magnitude(self.baseline),
-            magnitude(self.candidate)
         )
     }
 }
@@ -137,12 +108,11 @@ mod tests {
     use crate::metric::{MeasuredMetric, PeakMemory, Time};
     use crate::posterior::{Draw, Posterior, Shrinkage};
     use crate::repetition::{Pair, Repetition, Repetitions, RunOrder};
-    use crate::run::{Bytes, RunOutput};
+    use crate::run::{Bytes, Measurement};
     use crate::summary::{Interval, Quantiles, Summary};
     use anyhow::Result;
     use rand::{SeedableRng, rngs::Xoshiro256PlusPlus};
     use std::num::NonZeroUsize;
-    use std::process::ExitStatus;
     use std::time::Duration;
 
     /// Ten seconds a side, the candidate about 20ms slower, drifting upward, with
@@ -155,12 +125,9 @@ mod tests {
             10.023, 10.028, 10.036, 10.054, 10.057, 10.076, 10.074, 10.092, 10.097, 10.112,
         ];
 
-        let second = |seconds: f64| {
-            RunOutput::new(
-                ExitStatus::default(),
-                Duration::from_secs_f64(seconds),
-                Some(Bytes::ZERO),
-            )
+        let second = |seconds: f64| Measurement {
+            elapsed: Duration::from_secs_f64(seconds),
+            peak_memory: Some(Bytes::ZERO),
         };
 
         let repetitions = (0..baseline.len())
@@ -192,7 +159,7 @@ mod tests {
 
     /// The CLI's default widths, so the golden below is what a user sees.
     fn default_intervals() -> [Interval; 3] {
-        [0.5, 0.8, 0.90].map(|width| Interval::new(width).expect("These are valid widths."))
+        [0.5, 0.8, 0.9].map(|width| Interval::new(width).expect("These are valid widths."))
     }
 
     /// Pins everything the report prints: the units, the sign and precision of every
@@ -222,18 +189,6 @@ mod tests {
         Ok(())
     }
 
-    /// The compact line picks the widest requested interval, here 90%, regardless of
-    /// the order `--interval` was given in.
-    #[test]
-    fn compact_matches_golden() -> Result<()> {
-        let intervals = [0.90, 0.5, 0.8].map(|width| Interval::new(width).expect("Valid."));
-        let summary = tiny_change_on_large_totals::<Time>(500).summarize(&intervals)?;
-
-        assert_eq!(summary.compact(), "10.0s -> 10.1s [+0.19%, +0.21%]");
-
-        Ok(())
-    }
-
     #[test]
     fn a_zero_baseline_reports_without_percentages() -> Result<()> {
         const EXPECTED: &str = concat!(
@@ -251,16 +206,6 @@ mod tests {
 
         assert!(summary.change.relative_median.is_none());
         assert_eq!(summary.to_string(), EXPECTED);
-
-        Ok(())
-    }
-
-    #[test]
-    fn compact_falls_back_to_absolute_bounds_with_a_zero_baseline() -> Result<()> {
-        let half = [Interval::new(0.5)?];
-        let summary = tiny_change_on_large_totals::<PeakMemory>(500).summarize(&half)?;
-
-        assert_eq!(summary.compact(), "0.0B -> 0.0B [+0.0B, +0.0B]");
 
         Ok(())
     }
@@ -334,15 +279,6 @@ mod tests {
         );
 
         assert_eq!(summary.to_string(), EXPECTED);
-
-        Ok(())
-    }
-
-    #[test]
-    fn fixed_posterior_compact_matches_expected() -> Result<()> {
-        let summary = fixed_summary(&default_intervals())?;
-
-        assert_eq!(summary.compact(), "10.0s -> 10.1s [+0.04%, +1.05%]");
 
         Ok(())
     }

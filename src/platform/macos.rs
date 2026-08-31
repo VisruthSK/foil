@@ -1,4 +1,4 @@
-use super::{CommandSpec, Wait, drain_interrupt};
+use super::{CommandSpec, Finished, Wait, combine_errors, drain_interrupt, reap_after_kill};
 use std::{
     io,
     os::fd::{AsRawFd, OwnedFd},
@@ -43,7 +43,7 @@ pub(crate) struct Workload {
     child: Child,
     kqueue: OwnedFd,
     // Process groups do not contain descendants that call setsid() or setpgid().
-    pgid: i32,
+    pgid: Pid,
 }
 
 pub(crate) struct Prepared {
@@ -83,64 +83,78 @@ impl Workload {
             ),
         ];
 
-        let mut dummy = Vec::with_capacity(2);
-        // SAFETY: The child process and interrupt pipe fd are valid for the lifetime of this Workload.
-        let registered = unsafe {
-            kevent(
-                &self.kqueue,
-                &changes,
-                spare_capacity(&mut dummy),
-                Some(Duration::ZERO),
-            )
-        };
-        match registered {
-            Ok(_) => {}
-            Err(Errno::SRCH) => return self.child.wait().map(Wait::Exited),
-            Err(error) => return Err(error.into()),
+        let mut events = Vec::with_capacity(2);
+        loop {
+            events.clear();
+            // SAFETY: The child pid and interrupt fd stay valid for this Workload.
+            match unsafe {
+                kevent(
+                    &self.kqueue,
+                    &changes,
+                    spare_capacity(&mut events),
+                    Some(Duration::ZERO),
+                )
+            } {
+                Ok(_) => break,
+                Err(Errno::SRCH) => return Ok(Wait::Exited),
+                Err(Errno::INTR) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if let Some(outcome) = ready(&events, interrupt)? {
+            return Ok(outcome);
         }
 
         let started = Instant::now();
-        let mut eventlist = Vec::with_capacity(2);
         loop {
             let remaining = timeout.map(|limit| limit.saturating_sub(started.elapsed()));
-            eventlist.clear();
+            events.clear();
             // SAFETY: No changelist entries, so no fd validity requirements to uphold.
-            let n =
-                unsafe { kevent(&self.kqueue, &[], spare_capacity(&mut eventlist), remaining)? };
+            let n = unsafe {
+                match kevent(&self.kqueue, &[], spare_capacity(&mut events), remaining) {
+                    Ok(n) => n,
+                    Err(Errno::INTR) => continue,
+                    Err(e) => return Err(e.into()),
+                }
+            };
             if n == 0 {
                 return Ok(Wait::TimedOut);
             }
-            if eventlist
-                .iter()
-                .any(|ev| matches!(ev.filter(), EventFilter::Proc { .. }))
-            {
-                return self.child.wait().map(Wait::Exited);
+            if let Some(outcome) = ready(&events, interrupt)? {
+                return Ok(outcome);
             }
-            drain_interrupt(&interrupt.read);
-            return Ok(Wait::Interrupted);
         }
     }
 
-    pub(crate) fn terminate(&mut self) -> io::Result<()> {
-        let pgid = Pid::from_raw(self.pgid).expect("child pgid is positive");
+    pub(crate) fn finish(self) -> Finished {
+        let Workload {
+            mut child,
+            kqueue: _,
+            pgid,
+        } = self;
         let terminated = match kill_process_group(pgid, Signal::KILL) {
             Ok(()) => Ok(()),
-            // The group already exited on its own.
             Err(Errno::SRCH) => Ok(()),
             Err(error) => Err(error.into()),
         };
-        if terminated.is_err() {
-            let _ = self.child.kill();
+        let fallback = terminated.as_ref().err().map(|_| child.kill());
+        let status = reap_after_kill(&mut child, &terminated, fallback.as_ref());
+        let cleanup = match fallback {
+            Some(fallback) => combine_errors(terminated, fallback),
+            None => terminated,
+        };
+        Finished {
+            status,
+            peak_memory: None,
+            cleanup,
         }
-        let reaped = self.child.wait().map(drop);
-        terminated.and(reaped)
     }
 }
 
 impl Prepared {
     pub(crate) fn spawn(mut self) -> io::Result<Workload> {
         let child = self.command.spawn()?;
-        let pgid = child.id() as i32;
+        let pgid = Pid::from_child(&child);
         Ok(Workload {
             child,
             kqueue: self.kqueue,
@@ -149,9 +163,21 @@ impl Prepared {
     }
 }
 
-impl Drop for Workload {
-    fn drop(&mut self) {
-        let pgid = Pid::from_raw(self.pgid).expect("child pgid is positive");
-        let _ = kill_process_group(pgid, Signal::KILL);
+fn ready(events: &[Event], interrupt: &Interrupt) -> io::Result<Option<Wait>> {
+    let exited = events
+        .iter()
+        .any(|event| matches!(event.filter(), EventFilter::Proc { .. }));
+    let interrupted = events
+        .iter()
+        .any(|event| matches!(event.filter(), EventFilter::Read(_)));
+    if interrupted {
+        drain_interrupt(&interrupt.read)?;
     }
+    Ok(if exited {
+        Some(Wait::Exited)
+    } else if interrupted {
+        Some(Wait::Interrupted)
+    } else {
+        None
+    })
 }

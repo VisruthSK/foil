@@ -1,7 +1,6 @@
-mod common;
+pub mod common;
 use anyhow::{Result, ensure};
 use common::*;
-use std::fs;
 
 const SUITE: &str = "baseline = 'HEAD'\n\
     candidate = 'HEAD'\n\
@@ -42,12 +41,6 @@ fn every_named_benchmark_runs_by_default() -> Result<()> {
         );
     }
 
-    let short = fs::read_to_string(project.path().join("bench").join("report_short.txt"))?;
-    for name in ["first", "second", "third"] {
-        assert!(short.contains(&format!("{name}: ")), "{short}");
-    }
-    assert!(short.contains("->"), "{short}");
-
     Ok(())
 }
 
@@ -62,16 +55,11 @@ fn a_single_benchmark_argument_selects_a_subset() -> Result<()> {
     assert!(bench.join("third").join("report.txt").is_file());
     assert!(!bench.join("second").exists());
 
-    let short = fs::read_to_string(bench.join("report_short.txt"))?;
-    assert!(short.contains("first:"), "{short}");
-    assert!(short.contains("third:"), "{short}");
-    assert!(!short.contains("second:"), "{short}");
-
     Ok(())
 }
 
 #[test]
-fn a_lone_benchmark_skips_the_short_report() -> Result<()> {
+fn a_lone_benchmark_prints_full_report() -> Result<()> {
     let project = repository(&format!(
         "{PREAMBLE}\n\
         [benchmarks.parse]\n\
@@ -80,17 +68,16 @@ fn a_lone_benchmark_skips_the_short_report() -> Result<()> {
     let (succeeded, stdout, stderr) = run(&project, &[])?;
     ensure!(succeeded, "foil failed with {stderr}");
 
-    assert!(!stdout.contains("parse: Comparing candidate"), "{stdout}");
+    assert!(stdout.contains("parse: Comparing candidate"), "{stdout}");
 
     let bench = project.path().join("bench");
     assert!(bench.join("parse").join("report.txt").is_file());
-    assert!(!bench.join("report_short.txt").exists());
 
     Ok(())
 }
 
 #[test]
-fn report_short_uses_the_top_level_output_directory() -> Result<()> {
+fn report_uses_the_top_level_output_directory() -> Result<()> {
     let project = repository(&format!(
         "{PREAMBLE}\n\
         [benchmarks.a]\n\
@@ -107,7 +94,8 @@ fn report_short_uses_the_top_level_output_directory() -> Result<()> {
         project
             .path()
             .join("bench")
-            .join("report_short.txt")
+            .join("b")
+            .join("report.txt")
             .is_file()
     );
     assert!(
@@ -123,7 +111,7 @@ fn report_short_uses_the_top_level_output_directory() -> Result<()> {
 }
 
 #[test]
-fn an_output_dir_argument_relocates_the_short_report_too() -> Result<()> {
+fn an_output_dir_argument_relocates_the_report() -> Result<()> {
     let project = repository(SUITE)?;
     let (succeeded, _, stderr) = run(&project, &["--output-dir", "elsewhere"])?;
     ensure!(succeeded, "foil failed with {stderr}");
@@ -131,7 +119,6 @@ fn an_output_dir_argument_relocates_the_short_report_too() -> Result<()> {
     assert!(!project.path().join("bench").exists());
 
     let elsewhere = project.path().join("elsewhere");
-    assert!(elsewhere.join("report_short.txt").is_file());
     for name in ["first", "second", "third"] {
         assert!(elsewhere.join(name).join("report.txt").is_file());
     }

@@ -1,6 +1,6 @@
 use crate::{
     Side,
-    platform::{CommandSpec, Interrupt, Wait, Workload},
+    platform::{CommandSpec, Finished, Interrupt, Wait, Workload},
 };
 use anyhow::{Context, Result, bail};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -58,25 +58,37 @@ pub(crate) fn run_unmeasured(spec: &CommandSpec, interrupt: &Interrupt) -> Resul
         .context("Failed to prepare workload containment.")?
         .spawn()?;
     let outcome = workload.wait(interrupt, None);
-    let cleanup = workload.terminate();
+    let finished = workload.finish();
     match outcome {
-        Ok(Wait::Exited(status)) if status.success() => {
-            cleanup?;
-            Ok(())
-        }
-        Ok(Wait::Exited(status)) => {
-            report_secondary(cleanup, "Cleanup");
-            bail!("{:?} failed with {status}.", spec.program);
+        Ok(Wait::Exited) => {
+            let status = match finished.status {
+                Ok(status) => status,
+                Err(error) => {
+                    report_secondary(finished.cleanup, "Cleanup");
+                    return Err(error).context("Failed to reap the workload.");
+                }
+            };
+            if status.success() {
+                finished
+                    .cleanup
+                    .context("Failed to clean up workload containment.")
+            } else {
+                report_secondary(finished.cleanup, "Cleanup");
+                bail!("{:?} failed with {status}.", spec.program);
+            }
         }
         Ok(Wait::Interrupted) => {
-            report_secondary(cleanup, "Cleanup");
+            report_finished(finished);
             bail!("Interrupted.");
         }
-        Ok(Wait::TimedOut) => Err(anyhow::anyhow!(
-            "the platform reported a timeout without a timeout"
-        )),
+        Ok(Wait::TimedOut) => {
+            report_finished(finished);
+            Err(anyhow::anyhow!(
+                "the platform reported a timeout without a timeout"
+            ))
+        }
         Err(error) => {
-            report_secondary(cleanup, "Cleanup");
+            report_finished(finished);
             Err(error).with_context(|| format!("Failed to wait for {:?}.", spec.program))
         }
     }
@@ -98,41 +110,14 @@ impl Bytes {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct RunOutput {
-    exit_status: ExitStatus,
-    elapsed_time: Duration,
-    peak_memory: Option<Bytes>,
+pub(crate) struct Measurement {
+    pub(crate) elapsed: Duration,
+    pub(crate) peak_memory: Option<Bytes>,
 }
 
-impl RunOutput {
-    pub(crate) fn measurement(elapsed_time: Duration) -> Self {
-        Self {
-            exit_status: ExitStatus::default(),
-            elapsed_time,
-            peak_memory: None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new(
-        exit_status: ExitStatus,
-        elapsed_time: Duration,
-        peak_memory: Option<Bytes>,
-    ) -> Self {
-        Self {
-            exit_status,
-            elapsed_time,
-            peak_memory,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn exit_status(&self) -> ExitStatus {
-        self.exit_status
-    }
-
+impl Measurement {
     pub(crate) fn elapsed(&self) -> Duration {
-        self.elapsed_time
+        self.elapsed
     }
 
     pub(crate) fn peak_memory(&self) -> Option<Bytes> {
@@ -147,6 +132,7 @@ pub(crate) struct BenchmarkLog<W> {
     started: Instant,
     progress: ProgressBar,
     interactive: bool,
+    benchmark_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -161,7 +147,7 @@ struct BenchmarkEntry<'a> {
 }
 
 impl<W: Write> BenchmarkLog<W> {
-    pub(crate) fn new(writer: W, runs: usize) -> Self {
+    pub(crate) fn new(writer: W, runs: usize, benchmark_name: Option<String>) -> Self {
         let interactive = io::stderr().is_terminal();
         let progress = if interactive {
             ProgressBar::new(runs as u64).with_style(
@@ -171,6 +157,9 @@ impl<W: Write> BenchmarkLog<W> {
         } else {
             ProgressBar::hidden()
         };
+        if let Some(name) = &benchmark_name {
+            progress.set_prefix(name.clone());
+        }
         Self {
             writer,
             run: 0,
@@ -178,6 +167,7 @@ impl<W: Write> BenchmarkLog<W> {
             started: Instant::now(),
             progress,
             interactive,
+            benchmark_name,
         }
     }
 
@@ -187,7 +177,7 @@ impl<W: Write> BenchmarkLog<W> {
         interrupt: &Interrupt,
         timeout: Option<Duration>,
         side: Side,
-    ) -> Result<RunOutput> {
+    ) -> Result<Measurement> {
         self.starting(side);
         let prepared =
             Workload::prepare(command).context("Failed to prepare workload containment.")?;
@@ -199,40 +189,50 @@ impl<W: Write> BenchmarkLog<W> {
         let outcome = match workload.wait(interrupt, remaining) {
             Ok(outcome) => outcome,
             Err(error) => {
-                if let Err(cleanup) = workload.terminate() {
-                    eprintln!("Cleanup also failed: {cleanup}");
-                }
+                report_finished(workload.finish());
                 return Err(error)
                     .with_context(|| format!("Failed to wait for {:?}.", command.program));
             }
         };
         let elapsed = started.elapsed();
         match outcome {
-            Wait::Exited(status) => {
-                let output = RunOutput {
-                    exit_status: status,
-                    elapsed_time: elapsed,
-                    peak_memory: None,
+            Wait::Exited => {
+                let finished = workload.finish();
+                let status = match finished.status {
+                    Ok(status) => status,
+                    Err(error) => {
+                        report_secondary(finished.cleanup, "Cleanup");
+                        return Err(error).context("Failed to reap the benchmark workload.");
+                    }
                 };
-                let cleanup = workload.terminate();
-                let logging = self.append(side, elapsed, Some(status), None, false, false);
+                let logging = self.append(
+                    side,
+                    elapsed,
+                    Some(status),
+                    finished.peak_memory,
+                    false,
+                    false,
+                );
                 if !status.success() {
-                    report_secondary(cleanup, "Cleanup");
+                    report_secondary(finished.cleanup, "Cleanup");
                     report_secondary(logging, "Logging");
                     bail!("The {side} benchmark failed with {status}.");
                 }
-                if let Err(error) = cleanup {
+                if let Err(error) = finished.cleanup {
                     report_secondary(logging, "Logging");
-                    return Err(error).context("Failed to clean up the workload.");
+                    return Err(error).context("Failed to clean up benchmark containment.");
                 }
                 logging?;
-                Ok(output)
+                Ok(Measurement {
+                    elapsed,
+                    peak_memory: finished.peak_memory,
+                })
             }
             outcome @ (Wait::Interrupted | Wait::TimedOut) => {
-                let cleanup = workload.terminate();
+                let finished = workload.finish();
                 let timed_out = matches!(outcome, Wait::TimedOut);
                 let logging = self.append(side, elapsed, None, None, timed_out, !timed_out);
-                report_secondary(cleanup, "Cleanup");
+                report_finished(finished);
                 report_secondary(logging, "Logging");
                 if !timed_out {
                     bail!("Interrupted.");
@@ -249,6 +249,8 @@ impl<W: Write> BenchmarkLog<W> {
     fn starting(&self, side: Side) {
         if self.interactive {
             self.set_phase(side, self.run + 1, &format!("benchmark{}", self.eta()));
+        } else if let Some(name) = &self.benchmark_name {
+            eprintln!("{name}: {side} {}/{} benchmark", self.run + 1, self.runs);
         } else {
             eprintln!("{side} {}/{} benchmark", self.run + 1, self.runs);
         }
@@ -302,20 +304,31 @@ impl<W: Write> BenchmarkLog<W> {
     pub(crate) fn phase(&self, side: Side, phase: &'static str) {
         if self.interactive {
             self.set_phase(side, self.run + 1, phase);
+        } else if let Some(name) = &self.benchmark_name {
+            eprintln!("{name}: {side} {}/{} {}", self.run + 1, self.runs, phase);
         }
     }
 
     fn set_phase(&self, side: Side, run: usize, phase: &str) {
-        self.progress
-            .set_prefix(format!("{side} {run}/{}", self.runs));
+        let prefix = if let Some(name) = &self.benchmark_name {
+            format!("{name} {side} {run}/{}", self.runs)
+        } else {
+            format!("{side} {run}/{}", self.runs)
+        };
+        self.progress.set_prefix(prefix);
         self.progress.set_message(phase.to_owned());
     }
 }
 
-fn report_secondary<E: std::fmt::Display>(result: std::result::Result<(), E>, label: &str) {
+fn report_secondary<T, E: std::fmt::Display>(result: std::result::Result<T, E>, label: &str) {
     if let Err(error) = result {
         eprintln!("{label} also failed: {error}");
     }
+}
+
+fn report_finished(finished: Finished) {
+    report_secondary(finished.status, "Reaping");
+    report_secondary(finished.cleanup, "Cleanup");
 }
 
 impl<W> Drop for BenchmarkLog<W> {
@@ -329,35 +342,23 @@ mod tests {
     use super::*;
     use std::process::ExitStatus;
 
-    fn output() -> RunOutput {
-        RunOutput::new(ExitStatus::default(), Duration::from_secs_f64(1.5), None)
-    }
-
-    #[test]
-    fn new_preserves_what_it_is_given() {
-        let output = output();
-        assert!(output.exit_status().success());
-        assert_eq!(output.elapsed(), Duration::from_secs_f64(1.5));
-        assert_eq!(output.peak_memory(), None);
-    }
-
     #[test]
     fn the_log_matches_golden() -> Result<()> {
         let mut buffer = Vec::new();
         {
-            let mut log = BenchmarkLog::new(&mut buffer, 2);
+            let mut log = BenchmarkLog::new(&mut buffer, 2, None);
             log.append(
                 Side::Baseline,
-                output().elapsed(),
-                Some(output().exit_status()),
+                Duration::from_secs_f64(1.5),
+                Some(ExitStatus::default()),
                 None,
                 false,
                 false,
             )?;
             log.append(
                 Side::Candidate,
-                output().elapsed(),
-                Some(output().exit_status()),
+                Duration::from_secs_f64(1.5),
+                Some(ExitStatus::default()),
                 None,
                 false,
                 false,

@@ -1,5 +1,3 @@
-use crate::run::RunOutput;
-
 use anyhow::{Result, ensure};
 use rand::{Rng, RngExt, seq::SliceRandom};
 use std::{fmt, num::NonZeroUsize};
@@ -106,31 +104,33 @@ impl RunOrder {
 
 /// Baseline and candidate measured back to back, in a known order.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Repetition {
-    pub(crate) outputs: Pair<RunOutput>,
+pub(crate) struct Repetition<T> {
+    pub(crate) outputs: Pair<T>,
     pub(crate) order: RunOrder,
 }
 
 /// A validated set of paired repetitions.
-pub(crate) struct Repetitions(Vec<Repetition>);
+pub(crate) struct Repetitions<T> {
+    values: Vec<Repetition<T>>,
+}
 
-impl Repetitions {
+impl<T> Repetitions<T> {
     pub(crate) const MINIMUM: usize = 10;
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Repetition> {
-        self.0.iter()
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Repetition<T>> {
+        self.values.iter()
     }
 
     /// Mean run position, the point the model's drift term is centered on.
     pub(crate) fn center(&self) -> f64 {
-        (self.0.len() - 1) as f64 / 2.0
+        (self.values.len() - 1) as f64 / 2.0
     }
 }
 
-impl TryFrom<Vec<Repetition>> for Repetitions {
+impl<T> TryFrom<Vec<Repetition<T>>> for Repetitions<T> {
     type Error = anyhow::Error;
 
-    fn try_from(repetitions: Vec<Repetition>) -> Result<Self> {
+    fn try_from(repetitions: Vec<Repetition<T>>) -> Result<Self> {
         ensure!(
             repetitions.len() >= Self::MINIMUM,
             "At least {} repetitions are required, got {}.",
@@ -138,13 +138,15 @@ impl TryFrom<Vec<Repetition>> for Repetitions {
             repetitions.len()
         );
 
-        let seen = |wanted| repetitions.iter().any(|it| it.order == wanted);
+        let seen = |wanted: RunOrder| repetitions.iter().any(|it| it.order == wanted);
         ensure!(
             seen(RunOrder::BaselineFirst) && seen(RunOrder::CandidateFirst),
             "Both run orders are required."
         );
 
-        Ok(Self(repetitions))
+        Ok(Self {
+            values: repetitions,
+        })
     }
 }
 
@@ -181,7 +183,7 @@ mod tests {
 
     #[test]
     fn schedules_are_balanced() {
-        for repetitions in [Repetitions::MINIMUM, Repetitions::MINIMUM + 1] {
+        for repetitions in [Repetitions::<()>::MINIMUM, Repetitions::<()>::MINIMUM + 1] {
             let orders = schedule(repetitions, 4, 0);
             let first = baseline_firsts(&orders);
             assert_eq!(orders.len(), repetitions);
@@ -212,7 +214,7 @@ mod tests {
     #[test]
     fn the_odd_repetition_falls_on_either_side() {
         let counts: Vec<_> = (0..16)
-            .map(|seed| baseline_firsts(&schedule(Repetitions::MINIMUM + 1, 4, seed)))
+            .map(|seed| baseline_firsts(&schedule(Repetitions::<()>::MINIMUM + 1, 4, seed)))
             .collect();
         assert!(counts.contains(&5) && counts.contains(&6));
     }

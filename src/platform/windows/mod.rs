@@ -1,22 +1,25 @@
-use super::{CommandSpec, Wait};
+use super::{CommandSpec, Finished, Wait, combine_errors};
 use std::{
     ffi::{OsStr, OsString},
     io,
-    os::windows::{ffi::OsStrExt, io::OwnedHandle},
+    os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
-use windows_sys::Win32::{Foundation::TRUE, Globalization::CompareStringOrdinal};
 
 mod raw;
+use raw::{
+    AttributeList, Child, Event, Job, compare_ordinal, null_stdio_handles, spawn_process, wait_for,
+};
+use std::os::windows::io::OwnedHandle;
 
 #[derive(Clone)]
-pub(crate) struct Interrupt(Arc<raw::Event>);
+pub(crate) struct Interrupt(Arc<Event>);
 
 impl Interrupt {
     pub(crate) fn new() -> io::Result<Self> {
-        raw::Event::new().map(Arc::new).map(Self)
+        Event::new().map(Arc::new).map(Self)
     }
 
     pub(crate) fn signal(&self) {
@@ -24,15 +27,10 @@ impl Interrupt {
     }
 }
 
-pub(crate) struct Workload {
-    child: raw::Child,
-    job: raw::Job,
-}
-
 /// Everything computable before the timed interval begins.
 pub(crate) struct Prepared {
-    job: raw::Job,
-    attribute_list: raw::AttributeList,
+    job: Job,
+    attribute_list: AttributeList,
     input: OwnedHandle,
     output: OwnedHandle,
     application: Vec<u16>,
@@ -41,20 +39,24 @@ pub(crate) struct Prepared {
     cwd: Vec<u16>,
 }
 
+pub(crate) struct Workload {
+    child: Child,
+    job: Job,
+}
+
 impl Workload {
     pub(crate) fn prepare(spec: &CommandSpec) -> io::Result<Prepared> {
         reject_embedded_nuls(spec)?;
 
-        // Resolution happens here rather than when the benchmark is configured, so a
-        // `startup` command can create the executable this command names.
+        // Preparation follows startup, which may create the executable.
         let application = wide(resolve_application(spec)?.as_os_str());
         let command_line = command_line(spec);
         let environment = environment_block(&spec.env);
         let cwd = wide(spec.cwd.as_os_str());
 
-        let job = raw::Job::new()?;
-        let (input, output) = raw::null_stdio_handles()?;
-        let attribute_list = raw::AttributeList::new()?
+        let job = Job::new()?;
+        let (input, output) = null_stdio_handles()?;
+        let attribute_list = AttributeList::new()?
             .with_job(&job)?
             .with_inherited_handles(&[&input, &output])?;
         Ok(Prepared {
@@ -74,23 +76,36 @@ impl Workload {
         interrupt: &Interrupt,
         timeout: Option<Duration>,
     ) -> io::Result<Wait> {
-        raw::wait_for(&self.child, &interrupt.0, timeout)
+        wait_for(&self.child, &interrupt.0, timeout)
     }
 
-    pub(crate) fn terminate(&mut self) -> io::Result<()> {
-        let terminate = self.job.terminate();
-        if terminate.is_err() {
-            // Fall back to killing the child directly.
-            let _ = self.child.terminate();
+    pub(crate) fn finish(self) -> Finished {
+        let terminated = self.job.terminate();
+        let fallback = terminated.as_ref().err().map(|_| self.child.terminate());
+        let status = if terminated.is_ok() || fallback.as_ref().is_some_and(Result::is_ok) {
+            self.child.wait()
+        } else {
+            self.child.try_wait().and_then(|status| {
+                status.ok_or_else(|| {
+                    io::Error::other("workload could not be terminated safely; refusing to wait")
+                })
+            })
+        };
+        let cleanup = match fallback {
+            Some(fallback) => combine_errors(terminated, fallback),
+            None => terminated,
+        };
+        Finished {
+            status,
+            peak_memory: None,
+            cleanup,
         }
-        let reap = self.child.reap();
-        terminate.and(reap)
     }
 }
 
 impl Prepared {
     pub(crate) fn spawn(mut self) -> io::Result<Workload> {
-        let child = raw::spawn_process(
+        let child = spawn_process(
             &self.application,
             &mut self.command_line,
             self.environment.as_deref_mut(),
@@ -105,6 +120,29 @@ impl Prepared {
     }
 }
 
+fn reject_embedded_nuls(spec: &CommandSpec) -> io::Result<()> {
+    fn reject(value: &OsStr, what: &str) -> io::Result<()> {
+        if value.encode_wide().any(|unit| unit == 0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{what} contains an embedded NUL"),
+            ));
+        }
+        Ok(())
+    }
+
+    reject(&spec.program, "program")?;
+    for argument in &spec.args {
+        reject(argument, "argument")?;
+    }
+    reject(spec.cwd.as_os_str(), "working directory")?;
+    for (key, value) in &spec.env {
+        reject(key, "environment key")?;
+        reject(value, "environment value")?;
+    }
+    Ok(())
+}
+
 enum Kind {
     Binary,
     Batch,
@@ -115,8 +153,8 @@ fn kind(path: &Path) -> Kind {
     if !path.is_file() {
         return Kind::Missing;
     }
-    match path.extension().map(|e| e.to_string_lossy().to_lowercase()) {
-        Some(extension) if extension == "bat" || extension == "cmd" => Kind::Batch,
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(e) if e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd") => Kind::Batch,
         _ => Kind::Binary,
     }
 }
@@ -132,35 +170,7 @@ fn executable_forms(path: &Path) -> Vec<PathBuf> {
     vec![with_exe, path.to_owned()]
 }
 
-fn batch_rejected(script: &Path) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
-        format!(
-            "`{}` is a batch file; foil cannot run `.bat` or `.cmd` programs directly \
-             because their argument quoting differs from ordinary executables. \
-             Invoke it through the shell instead, e.g. `-- cmd /c {} ...`.",
-            script.display(),
-            script.display()
-        ),
-    )
-}
-
-fn not_found(program: &OsString, attempted: &[PathBuf]) -> io::Error {
-    let tried = attempted
-        .iter()
-        .map(|path| format!("`{}`", path.display()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    io::Error::new(
-        io::ErrorKind::NotFound,
-        format!(
-            "Could not find the benchmark program `{}`. Tried: {tried}.",
-            program.to_string_lossy()
-        ),
-    )
-}
-
-/// Resolves the logical program to an executable at spawn time.
+/// Resolves the logical program to an executable at prepare time.
 ///
 /// An explicit relative path resolves against the effective child working directory.
 /// A bare name searches the effective child environment's `PATH`, then the foil
@@ -217,7 +227,7 @@ fn resolve_bare(spec: &CommandSpec) -> io::Result<PathBuf> {
         directories.push(root.join("System32"));
         directories.push(root);
     }
-    if let Ok(parent_path) = std::env::var("PATH") {
+    if let Some(parent_path) = std::env::var_os("PATH") {
         directories.extend(
             std::env::split_paths(&parent_path).filter(|path| !path.as_os_str().is_empty()),
         );
@@ -254,13 +264,39 @@ fn resolve_bare(spec: &CommandSpec) -> io::Result<PathBuf> {
     }
 }
 
-fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
+fn batch_rejected(script: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "`{}` is a batch file; foil cannot run `.bat` or `.cmd` programs directly \
+             because their argument quoting differs from ordinary executables. \
+             Invoke it through the shell instead, e.g. `-- cmd /c {} ...`.",
+            script.display(),
+            script.display()
+        ),
+    )
+}
+
+fn not_found(program: &OsString, attempted: &[PathBuf]) -> io::Error {
+    let tried = attempted
+        .iter()
+        .map(|path| format!("`{}`", path.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "Could not find the benchmark program `{}`. Tried: {tried}.",
+            program.to_string_lossy()
+        ),
+    )
+}
+
+fn wide(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(Some(0)).collect()
 }
 
 fn command_line(spec: &CommandSpec) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
     let mut line = Vec::new();
     for argument in
         std::iter::once(spec.program.as_os_str()).chain(spec.args.iter().map(OsString::as_os_str))
@@ -309,38 +345,13 @@ fn environment_block(overrides: &[(OsString, OsString)]) -> Option<Vec<u16>> {
         return None;
     }
 
-    /// Case-insensitive comparison using Windows' CompareStringOrdinal.
-    fn cmp_ordinal(a: &OsStr, b: &OsStr) -> std::cmp::Ordering {
-        let a_wide: Vec<u16> = a.encode_wide().chain(Some(0)).collect();
-        let b_wide: Vec<u16> = b.encode_wide().chain(Some(0)).collect();
-        // SAFETY: both slices are NUL-terminated and valid for the call.
-        let result = unsafe {
-            CompareStringOrdinal(
-                a_wide.as_ptr(),
-                a_wide.len() as i32 - 1,
-                b_wide.as_ptr(),
-                b_wide.len() as i32 - 1,
-                TRUE,
-            )
-        };
-        // CompareStringOrdinal returns 0 on error, 1 if a < b, 2 if a == b, 3 if a > b.
-        match result {
-            1 => std::cmp::Ordering::Less,
-            2 => std::cmp::Ordering::Equal,
-            3 => std::cmp::Ordering::Greater,
-            _ => {
-                // On error, fall back to byte comparison.
-                a_wide.cmp(&b_wide)
-            }
-        }
-    }
-
     let mut variables: Vec<_> = std::env::vars_os().collect();
     for (key, value) in overrides {
-        variables.retain(|(existing, _)| cmp_ordinal(existing, key) != std::cmp::Ordering::Equal);
+        variables
+            .retain(|(existing, _)| compare_ordinal(existing, key) != std::cmp::Ordering::Equal);
         variables.push((key.clone(), value.clone()));
     }
-    variables.sort_by(|(a, _), (b, _)| cmp_ordinal(a, b));
+    variables.sort_by(|(a, _), (b, _)| compare_ordinal(a, b));
 
     let mut block = Vec::new();
     for (key, value) in variables {
@@ -351,28 +362,4 @@ fn environment_block(overrides: &[(OsString, OsString)]) -> Option<Vec<u16>> {
     }
     block.push(0);
     Some(block)
-}
-
-/// Interior NULs would silently truncate the strings Win32 reads.
-fn reject_embedded_nuls(spec: &CommandSpec) -> io::Result<()> {
-    fn reject(value: &OsStr, what: &str) -> io::Result<()> {
-        if value.encode_wide().any(|unit| unit == 0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{what} contains an embedded NUL"),
-            ));
-        }
-        Ok(())
-    }
-
-    reject(&spec.program, "program")?;
-    for argument in &spec.args {
-        reject(argument, "argument")?;
-    }
-    reject(spec.cwd.as_os_str(), "working directory")?;
-    for (key, value) in &spec.env {
-        reject(key, "environment key")?;
-        reject(value, "environment value")?;
-    }
-    Ok(())
 }

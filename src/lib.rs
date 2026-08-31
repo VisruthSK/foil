@@ -20,7 +20,7 @@ pub use metric::{Metric, PeakMemory, Time, Unit};
 pub use posterior::{Draw, Posterior, Shrinkage};
 pub(crate) use repetition::{Pair, Repetition, Repetitions, RunOrder, Side};
 pub use run::Bytes;
-pub(crate) use run::{BenchmarkLog, CommandTemplate, RunOutput, run_unmeasured};
+pub(crate) use run::{BenchmarkLog, CommandTemplate, Measurement, run_unmeasured};
 pub use summary::{Change, ChangeBounds, Interval, Range, Summary};
 pub(crate) use worktree::{Revision, Worktree, working_tree_has_modified_tracked_files};
 

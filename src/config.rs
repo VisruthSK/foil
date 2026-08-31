@@ -18,8 +18,6 @@ use toml::{Table, Value};
 const MIN_DRAWS: usize = 1_000;
 const DEFAULT_CONFIG: &str = "foil.toml";
 const BENCHMARKS: &str = "benchmarks";
-const OUTPUT_DIR: &str = "output-dir";
-const OUTPUT_DIR_ID: &str = "output_dir";
 const ENV: &str = "env";
 const ENV_ID: &str = "envs";
 const STARTUP: &str = "startup";
@@ -143,7 +141,7 @@ pub(crate) struct RunConfig {
     pub(crate) timeout: Option<NonZeroU64>,
 
     /// Central credible interval widths.
-    #[arg(long = "interval", default_values = ["0.5", "0.8", "0.90"])]
+    #[arg(long = "interval", default_values = ["0.5", "0.8", "0.9"])]
     pub(crate) intervals: Vec<Interval>,
 
     /// Working directory for the benchmark and lifecycle commands, relative to the worktree root.
@@ -174,7 +172,6 @@ struct Configuration {
 pub(crate) struct Suite {
     pub(crate) config: ResolvedSuiteConfig,
     pub(crate) lifecycle: Lifecycle,
-    pub(crate) output_dir: PathBuf,
     pub(crate) runs: Vec<(Option<String>, RunConfig)>,
 }
 
@@ -187,7 +184,6 @@ pub(crate) struct ResolvedSuiteConfig {
 struct ResolvedCli {
     cli: Cli,
     benchmark_lifecycle: Lifecycle,
-    output_from_command_line: bool,
 }
 
 impl Cli {
@@ -230,15 +226,6 @@ impl Cli {
                 .collect::<Result<_>>()?
         };
         let (_, first) = runs.first().expect("At least one run is always produced.");
-        let output_dir = if first.output_from_command_line {
-            first.cli.run.output_dir.clone()
-        } else {
-            match configuration.top.get(OUTPUT_DIR) {
-                Some(Value::String(text)) => Some(text.into()),
-                _ => None,
-            }
-            .unwrap_or_else(|| first.cli.run.output_dir.clone())
-        };
         let baseline = Revision::resolve(first.cli.suite.baseline.clone())?;
         let candidate = Revision::resolve(first.cli.suite.candidate.clone())?;
         let seed = first.cli.suite.seed.unwrap_or_else(rand::random);
@@ -255,17 +242,6 @@ impl Cli {
             })
             .collect::<Vec<(Option<String>, RunConfig)>>();
 
-        for (name, run) in &runs {
-            for interval in &run.intervals {
-                interval
-                    .validate_for_pairs(run.repetitions.get())
-                    .with_context(|| match name {
-                        Some(name) => format!("Benchmark `{name}`"),
-                        None => "The benchmark".to_owned(),
-                    })?;
-            }
-        }
-
         Ok(Suite {
             config: ResolvedSuiteConfig {
                 baseline,
@@ -273,7 +249,6 @@ impl Cli {
                 seed,
             },
             lifecycle: suite_lifecycle,
-            output_dir,
             runs,
         })
     }
@@ -415,8 +390,6 @@ fn resolve(
 
     let command = configure(Cli::command(), &config.path, &values)?;
     let mut matches = command.get_matches_from(arguments);
-    let output_from_command_line =
-        matches.value_source(OUTPUT_DIR_ID) == Some(ValueSource::CommandLine);
     if let Some(name) = benchmark {
         for (id, key) in PER_BENCHMARK {
             ensure!(
@@ -430,7 +403,6 @@ fn resolve(
     Ok(ResolvedCli {
         cli,
         benchmark_lifecycle,
-        output_from_command_line,
     })
 }
 
@@ -561,9 +533,9 @@ fn parse_repetitions(text: &str) -> Result<NonZeroUsize> {
         .with_context(|| format!("`{text}` is not a positive integer."))?;
 
     ensure!(
-        repetitions.get() >= Repetitions::MINIMUM,
+        repetitions.get() >= Repetitions::<()>::MINIMUM,
         "At least {} repetitions are required.",
-        Repetitions::MINIMUM
+        Repetitions::<()>::MINIMUM
     );
 
     Ok(repetitions)
