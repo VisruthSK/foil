@@ -42,6 +42,7 @@ impl Interrupt {
 pub(crate) struct Workload {
     child: Child,
     kqueue: OwnedFd,
+    events: Vec<Event>,
     // Process groups do not contain descendants that call setsid() or setpgid().
     pgid: Pid,
     cleaned: bool,
@@ -49,6 +50,7 @@ pub(crate) struct Workload {
 
 pub(crate) struct Prepared {
     kqueue: OwnedFd,
+    events: Vec<Event>,
     command: Command,
 }
 
@@ -65,6 +67,7 @@ impl Session {
         command.process_group(0);
         Ok(Prepared {
             kqueue: kqueue()?,
+            events: Vec::with_capacity(2),
             command,
         })
     }
@@ -96,15 +99,14 @@ impl Workload {
             ),
         ];
 
-        let mut events = Vec::with_capacity(2);
         loop {
-            events.clear();
+            self.events.clear();
             // SAFETY: The child pid and interrupt fd stay valid for this Workload.
             match unsafe {
                 kevent(
                     &self.kqueue,
                     &changes,
-                    spare_capacity(&mut events),
+                    spare_capacity(&mut self.events),
                     Some(Duration::ZERO),
                 )
             } {
@@ -117,17 +119,22 @@ impl Workload {
                 Err(error) => return Err(error.into()),
             }
         }
-        if let Some(outcome) = ready(&events, interrupt)? {
+        if let Some(outcome) = ready(&self.events, interrupt)? {
             return Ok(outcome);
         }
 
         let started = Instant::now();
         loop {
             let remaining = timeout.map(|limit| limit.saturating_sub(started.elapsed()));
-            events.clear();
+            self.events.clear();
             // SAFETY: No changelist entries, so no fd validity requirements to uphold.
             let n = unsafe {
-                match kevent(&self.kqueue, &[], spare_capacity(&mut events), remaining) {
+                match kevent(
+                    &self.kqueue,
+                    &[],
+                    spare_capacity(&mut self.events),
+                    remaining,
+                ) {
                     Ok(n) => n,
                     Err(Errno::INTR) => continue,
                     Err(e) => return Err(e.into()),
@@ -136,24 +143,14 @@ impl Workload {
             if n == 0 {
                 return Ok(Wait::TimedOut);
             }
-            if let Some(outcome) = ready(&events, interrupt)? {
+            if let Some(outcome) = ready(&self.events, interrupt)? {
                 return Ok(outcome);
             }
         }
     }
 
     pub(crate) fn finish(mut self) -> Finished {
-        let terminated = match kill_process_group(self.pgid, Signal::KILL) {
-            Ok(()) => Ok(()),
-            Err(Errno::SRCH) => Ok(()),
-            Err(error) => Err(error.into()),
-        };
-        let fallback = terminated.as_ref().err().map(|_| self.child.kill());
-        let status = reap_after_kill(&mut self.child, &terminated, fallback.as_ref());
-        let cleanup = match fallback {
-            Some(fallback) => combine_errors(terminated, fallback),
-            None => terminated,
-        };
+        let (status, cleanup) = finish_process_group(&mut self.child, self.pgid);
         self.cleaned = cleanup.is_ok();
         Finished {
             status,
@@ -170,6 +167,7 @@ impl Prepared {
         Ok(Workload {
             child,
             kqueue: self.kqueue,
+            events: self.events,
             pgid,
             cleaned: false,
         })
@@ -181,12 +179,46 @@ impl Drop for Workload {
         if self.cleaned {
             return;
         }
-        let terminated = match kill_process_group(self.pgid, Signal::KILL) {
-            Ok(()) | Err(Errno::SRCH) => Ok(()),
-            Err(error) => Err(error.into()),
-        };
-        let fallback = terminated.as_ref().err().map(|_| self.child.kill());
-        let _ = reap_after_kill(&mut self.child, &terminated, fallback.as_ref());
+        let _ = finish_process_group(&mut self.child, self.pgid);
+    }
+}
+
+fn finish_process_group(
+    child: &mut Child,
+    pgid: Pid,
+) -> (io::Result<std::process::ExitStatus>, io::Result<()>) {
+    if let Ok(Some(status)) = child.try_wait() {
+        return (Ok(status), terminate_process_group(pgid));
+    }
+
+    let terminated = match kill_process_group(pgid, Signal::KILL) {
+        Ok(()) => Ok(()),
+        Err(Errno::PERM) => match child.try_wait() {
+            Ok(Some(status)) => return (Ok(status), terminate_process_group(pgid)),
+            _ => Err(io::Error::from(Errno::PERM)),
+        },
+        Err(Errno::SRCH) => match child.try_wait() {
+            Ok(Some(status)) => return (Ok(status), Ok(())),
+            _ => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "process group disappeared while its child was still running",
+            )),
+        },
+        Err(error) => Err(error.into()),
+    };
+    let fallback = terminated.as_ref().err().map(|_| child.kill());
+    let status = reap_after_kill(child, &terminated, fallback.as_ref());
+    let cleanup = match fallback {
+        Some(fallback) => combine_errors(terminated, fallback),
+        None => terminated,
+    };
+    (status, cleanup)
+}
+
+fn terminate_process_group(pgid: Pid) -> io::Result<()> {
+    match kill_process_group(pgid, Signal::KILL) {
+        Ok(()) | Err(Errno::SRCH) => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -247,6 +279,25 @@ mod tests {
             Wait::TimedOut
         ));
         ensure!(next.finish().cleanup.is_ok());
+        session.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
+    fn fast_natural_exits_do_not_fail_group_cleanup() -> Result<()> {
+        let mut session = Session::new()?;
+        let interrupt = Interrupt::new()?;
+
+        for _ in 0..100 {
+            let mut workload = session
+                .prepare(&spec("platform::macos::tests::fast_child")?)?
+                .spawn()?;
+            ensure!(matches!(workload.wait(&interrupt, None)?, Wait::Exited));
+            let finished = workload.finish();
+            ensure!(finished.status?.success());
+            finished.cleanup?;
+        }
+
         session.shutdown()?;
         Ok(())
     }

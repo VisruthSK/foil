@@ -252,8 +252,7 @@ mod tests {
     fn an_interrupt_does_not_poison_later_workloads() -> Result<()> {
         let interrupt = Interrupt::new()?;
         interrupt.signal();
-        thread::sleep(Duration::from_millis(100));
-        let mut first = spawn(&spec("platform::tests::noop_child", Vec::new())?)?;
+        let mut first = spawn(&spec("platform::tests::slow_child", Vec::new())?)?;
         ensure!(matches!(
             first.wait(&interrupt, Some(Duration::from_secs(5)))?,
             Wait::Interrupted
