@@ -141,7 +141,11 @@ pub(crate) struct RunConfig {
     pub(crate) timeout: Option<NonZeroU64>,
 
     /// Central credible interval widths.
-    #[arg(long = "interval", default_values = ["0.5", "0.8", "0.9"])]
+    #[arg(
+        long = "interval",
+        num_args = 1..,
+        default_values = ["0.5", "0.8", "0.9"]
+    )]
     pub(crate) intervals: Vec<Interval>,
 
     /// Working directory for the benchmark and lifecycle commands, relative to the worktree root.

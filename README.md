@@ -48,7 +48,7 @@ startup = ["cargo", "build", "--release"]
 command = ["./target/release/parse", "corpus/"]
 ```
 
-Benchmark lifecycle commands share the benchmark's `working-directory` and `env`. Their stdout and stderr are discarded, like measured commands'; redirect explicitly if the output matters. The first Ctrl-C interrupts a lifecycle command: its whole workload is terminated and reaped, and teardown still unwinds afterward. Teardown is also attempted after startup, benchmark, or timeout failures; the original error remains primary and additional cleanup errors are reported alongside it.
+Benchmark lifecycle commands share the benchmark's `working-directory` and `env`. Their stdout and stderr are discarded, like measured commands'; redirect explicitly if the output matters. The first Ctrl-C interrupts active startup or benchmark work, then teardown unwinds on a protected cleanup wait. A second Ctrl-C exits immediately. Teardown is also attempted after startup, benchmark, or timeout failures; the original error remains primary and additional cleanup errors are reported alongside it. On macOS, containment uses a process group, which a descendant can deliberately escape with `setsid` or `setpgid`.
 
 A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override ordinary options, and anything it leaves unset, including `command`, is inherited from the top level. Lifecycle commands are not inherited: suite and benchmark lifecycles remain distinct and compose. Its `env` table is merged with the top-level one, variable by variable, with the benchmark's values winning on conflicts:
 

@@ -213,6 +213,22 @@ fn arguments_override_the_configuration() -> Result<()> {
 }
 
 #[test]
+fn adjacent_interval_values_are_one_cli_argument_group() -> Result<()> {
+    let project = repository(&format!("{PREAMBLE}command = ['git', '--version']\n"))?;
+    let (succeeded, _, stderr) = run(
+        &project,
+        &["--interval", "0.5", "0.8", "0.9", "--", "git", "--version"],
+    )?;
+    ensure!(succeeded, "foil failed with {stderr}");
+
+    let config: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+        project.path().join("bench/config.json"),
+    )?)?;
+    assert_eq!(config["intervals"], serde_json::json!([0.5, 0.8, 0.9]));
+    Ok(())
+}
+
+#[test]
 fn an_unnamed_command_override_keeps_configured_options() -> Result<()> {
     let project = repository(&format!(
         "{PREAMBLE}command = ['git', 'cat-file', '-p', 'absent-object']\n"

@@ -109,12 +109,18 @@ pub(crate) fn drain_interrupt(fd: &std::os::fd::OwnedFd) -> io::Result<()> {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use linux::Workload;
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{Interrupt, Workload};
+pub(crate) use linux::{Interrupt, Session};
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use macos::Workload;
 #[cfg(target_os = "macos")]
-pub(crate) use macos::{Interrupt, Workload};
+pub(crate) use macos::{Interrupt, Session};
+#[cfg(all(test, windows))]
+pub(crate) use windows::Workload;
 #[cfg(windows)]
-pub(crate) use windows::{Interrupt, Workload};
+pub(crate) use windows::{Interrupt, Session};
 
 #[cfg(test)]
 mod tests {
@@ -140,17 +146,36 @@ mod tests {
         ))
     }
 
-    fn spawn(spec: &CommandSpec) -> Result<Workload> {
-        Workload::prepare(spec)
-            .context("prepare")?
-            .spawn()
-            .context("spawn")
+    struct TestWorkload {
+        session: Session,
+        workload: Workload,
     }
 
-    fn finish(workload: Workload) -> Result<ExitStatus> {
-        let finished = workload.finish();
+    impl TestWorkload {
+        fn wait(
+            &mut self,
+            interrupt: &Interrupt,
+            timeout: Option<Duration>,
+        ) -> std::io::Result<Wait> {
+            self.workload.wait(interrupt, timeout)
+        }
+    }
+
+    fn spawn(spec: &CommandSpec) -> Result<TestWorkload> {
+        let mut session = Session::new().context("session")?;
+        let workload = session
+            .prepare(spec)
+            .context("prepare")?
+            .spawn()
+            .context("spawn")?;
+        Ok(TestWorkload { session, workload })
+    }
+
+    fn finish(workload: TestWorkload) -> Result<ExitStatus> {
+        let finished = workload.workload.finish();
         let status = finished.status?;
         finished.cleanup?;
+        workload.session.shutdown()?;
         Ok(status)
     }
 
@@ -174,30 +199,6 @@ mod tests {
             "woke after {elapsed:?}"
         );
         let _ = finish(workload)?;
-        Ok(())
-    }
-
-    /// Direct exit wins over simultaneous interrupt and timeout readiness.
-    #[test]
-    fn direct_exit_wins_over_simultaneous_interrupt_and_timeout() -> Result<()> {
-        let interrupt = Interrupt::new()?;
-        // The child exits before the interrupt fires, so by the time wait runs,
-        // the exited-child handle and the event are ready at the same instant.
-        let mut workload = spawn(&spec("platform::tests::noop_child", Vec::new())?)?;
-        thread::sleep(Duration::from_millis(200));
-        interrupt.signal();
-        ensure!(matches!(
-            workload.wait(&interrupt, Some(Duration::from_secs(5)))?,
-            Wait::Exited
-        ));
-        ensure!(finish(workload)?.success());
-
-        let mut next = spawn(&spec("platform::tests::slow_child", Vec::new())?)?;
-        ensure!(matches!(
-            next.wait(&interrupt, Some(Duration::from_millis(200)))?,
-            Wait::TimedOut
-        ));
-        let _ = finish(next)?;
         Ok(())
     }
 

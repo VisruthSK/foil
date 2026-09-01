@@ -44,8 +44,14 @@ pub(crate) struct Workload {
     job: Job,
 }
 
-impl Workload {
-    pub(crate) fn prepare(spec: &CommandSpec) -> io::Result<Prepared> {
+pub(crate) struct Session;
+
+impl Session {
+    pub(crate) fn new() -> io::Result<Self> {
+        Ok(Self)
+    }
+
+    pub(crate) fn prepare(&mut self, spec: &CommandSpec) -> io::Result<Prepared> {
         reject_embedded_nuls(spec)?;
 
         // Preparation follows startup, which may create the executable.
@@ -71,6 +77,12 @@ impl Workload {
         })
     }
 
+    pub(crate) fn shutdown(self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Workload {
     pub(crate) fn wait(
         &mut self,
         interrupt: &Interrupt,
@@ -362,4 +374,56 @@ fn environment_block(overrides: &[(OsString, OsString)]) -> Option<Vec<u16>> {
     }
     block.push(0);
     Some(block)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::{Result, ensure};
+
+    fn spec(test: &str) -> Result<CommandSpec> {
+        Ok(CommandSpec::new(
+            std::env::current_exe()?.into_os_string(),
+            ["--exact", test, "--ignored"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+            std::env::current_dir()?,
+            Vec::new(),
+        ))
+    }
+
+    #[test]
+    fn direct_exit_wins_and_consumes_a_pending_interrupt() -> Result<()> {
+        let mut session = Session::new()?;
+        let interrupt = Interrupt::new()?;
+        let mut exited = session
+            .prepare(&spec("platform::windows::tests::fast_child")?)?
+            .spawn()?;
+        ensure!(exited.child.wait()?.success());
+        interrupt.signal();
+        ensure!(matches!(exited.wait(&interrupt, None)?, Wait::Exited));
+        ensure!(exited.finish().cleanup.is_ok());
+
+        let mut next = session
+            .prepare(&spec("platform::windows::tests::slow_child")?)?
+            .spawn()?;
+        ensure!(matches!(
+            next.wait(&interrupt, Some(Duration::ZERO))?,
+            Wait::TimedOut
+        ));
+        ensure!(next.finish().cleanup.is_ok());
+        session.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn fast_child() {}
+
+    #[test]
+    #[ignore]
+    fn slow_child() {
+        std::thread::sleep(Duration::from_secs(30));
+    }
 }

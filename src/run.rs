@@ -1,6 +1,6 @@
 use crate::{
     Side,
-    platform::{CommandSpec, Finished, Interrupt, Wait, Workload},
+    platform::{CommandSpec, Finished, Interrupt, Session, Wait},
 };
 use anyhow::{Context, Result, bail};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -52,9 +52,13 @@ impl CommandTemplate {
 }
 
 /// Runs a command outside any measured interval: no timeout, no records.
-/// The first Ctrl+C interrupts it like any other workload; cleanup still runs.
-pub(crate) fn run_unmeasured(spec: &CommandSpec, interrupt: &Interrupt) -> Result<()> {
-    let mut workload = Workload::prepare(spec)
+pub(crate) fn run_unmeasured(
+    session: &mut Session,
+    spec: &CommandSpec,
+    interrupt: &Interrupt,
+) -> Result<()> {
+    let mut workload = session
+        .prepare(spec)
         .context("Failed to prepare workload containment.")?
         .spawn()?;
     let outcome = workload.wait(interrupt, None);
@@ -161,14 +165,16 @@ impl<W: Write> BenchmarkLog<W> {
 
     pub(crate) fn measure(
         &mut self,
+        session: &mut Session,
         command: &CommandSpec,
         interrupt: &Interrupt,
         timeout: Option<Duration>,
         side: Side,
     ) -> Result<Measurement> {
         self.starting(side);
-        let prepared =
-            Workload::prepare(command).context("Failed to prepare workload containment.")?;
+        let prepared = session
+            .prepare(command)
+            .context("Failed to prepare workload containment.")?;
         let started = Instant::now();
         let mut workload = prepared
             .spawn()

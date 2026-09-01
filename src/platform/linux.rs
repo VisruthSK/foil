@@ -4,9 +4,12 @@ use std::{
     fs::OpenOptions,
     io::{self, Read, Seek, Write},
     os::{fd::OwnedFd, unix::process::CommandExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command},
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -15,7 +18,7 @@ use rustix::io::{Errno, write};
 use rustix::pipe::{PipeFlags, pipe_with};
 use rustix::process::{Pid, PidfdFlags, pidfd_open};
 
-static CGROUP_ROOT: OnceLock<PathBuf> = OnceLock::new();
+static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub(crate) struct Interrupt {
@@ -37,88 +40,50 @@ impl Interrupt {
     }
 }
 
-struct Cgroup {
-    path: PathBuf,
+pub(crate) struct Session {
+    parent: PathBuf,
+    ordinary: PathBuf,
+    closed: bool,
 }
 
-impl Cgroup {
-    fn new() -> io::Result<Self> {
-        let root = cgroup_root()?;
-        let path = root.join(format!("foil-{}", std::process::id()));
-        fs::create_dir(&path).map_err(|error| {
-            if error.kind() == io::ErrorKind::AlreadyExists {
-                io::Error::new(
+impl Session {
+    pub(crate) fn new() -> io::Result<Self> {
+        Self::create(&cgroup_root()?, &NEXT_SESSION)
+    }
+
+    fn create(root: &Path, counter: &AtomicU64) -> io::Result<Self> {
+        let parent = loop {
+            let id = counter.fetch_add(1, Ordering::Relaxed);
+            let candidate = root.join(format!("foil-{}-{id}", std::process::id()));
+            match fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        };
+        // Processes enter this leaf; the parent stays empty so controllers can be delegated.
+        let ordinary = parent.join("ordinary");
+        if let Err(error) = fs::create_dir(&ordinary) {
+            return match fs::remove_dir(&parent) {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(io::Error::new(
                     error.kind(),
-                    format!(
-                        "stale foil cgroup exists: {}; remove it or set FOIL_CGROUP_ROOT",
-                        path.display()
-                    ),
-                )
-            } else {
-                error
-            }
-        })?;
-        Ok(Self { path })
-    }
-
-    fn open_procs(&self) -> io::Result<fs::File> {
-        OpenOptions::new()
-            .write(true)
-            .open(self.path.join("cgroup.procs"))
-    }
-
-    fn kill(&self) -> io::Result<()> {
-        OpenOptions::new()
-            .write(true)
-            .open(self.path.join("cgroup.kill"))?
-            .write_all(b"1")
-    }
-
-    fn wait_empty_and_remove(self) -> io::Result<()> {
-        let mut events = OpenOptions::new()
-            .read(true)
-            .open(self.path.join("cgroup.events"))?;
-        let mut state = String::with_capacity(64);
-        loop {
-            events.rewind()?;
-            state.clear();
-            events.read_to_string(&mut state)?;
-            if state.lines().any(|line| line == "populated 0") {
-                return fs::remove_dir(&self.path);
-            }
-            let mut fds = [PollFd::new(&events, PollFlags::PRI | PollFlags::ERR)];
-            match poll(&mut fds, None) {
-                Ok(_) => {}
-                Err(Errno::INTR) => continue,
-                Err(error) => return Err(error.into()),
-            }
+                    format!("{error}; parent cleanup also failed: {cleanup}"),
+                )),
+            };
         }
+        Ok(Self {
+            parent,
+            ordinary,
+            closed: false,
+        })
     }
-}
 
-impl Drop for Cgroup {
-    fn drop(&mut self) {
-        let _ = self.kill();
-        let _ = fs::remove_dir(&self.path);
-    }
-}
-
-pub(crate) struct Workload {
-    child: Child,
-    cgroup: Cgroup,
-    pidfd: OwnedFd,
-}
-
-pub(crate) struct Prepared {
-    command: Command,
-    cgroup: Option<Cgroup>,
-}
-
-impl Workload {
-    pub(crate) fn prepare(spec: &CommandSpec) -> io::Result<Prepared> {
-        let cgroup = Cgroup::new()?;
-        let procs = cgroup.open_procs()?;
-
+    pub(crate) fn prepare(&mut self, spec: &CommandSpec) -> io::Result<Prepared> {
+        ensure_empty(&self.ordinary)?;
+        let procs = OpenOptions::new()
+            .write(true)
+            .open(self.ordinary.join("cgroup.procs"))?;
         let mut command = spec.command();
         unsafe {
             // SAFETY: After fork this closure only invokes async-signal-safe write(2)
@@ -129,13 +94,50 @@ impl Workload {
                 Err(error) => Err(io::Error::from_raw_os_error(error.raw_os_error())),
             });
         }
-
         Ok(Prepared {
             command,
-            cgroup: Some(cgroup),
+            ordinary: self.ordinary.clone(),
         })
     }
 
+    pub(crate) fn shutdown(mut self) -> io::Result<()> {
+        let (cleanup, empty) = clean_leaf(&self.ordinary);
+        let removal = if empty {
+            remove_tree(&self.ordinary, &self.parent)
+        } else {
+            Ok(())
+        };
+        if removal.is_ok() && empty {
+            self.closed = true;
+        }
+        combine_errors(cleanup, removal)
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if self.closed {
+            return;
+        }
+        let _ = kill(&self.ordinary);
+        let _ = fs::remove_dir(&self.ordinary);
+        let _ = fs::remove_dir(&self.parent);
+    }
+}
+
+pub(crate) struct Workload {
+    child: Child,
+    ordinary: PathBuf,
+    pidfd: OwnedFd,
+    cleaned: bool,
+}
+
+pub(crate) struct Prepared {
+    command: Command,
+    ordinary: PathBuf,
+}
+
+impl Workload {
     pub(crate) fn wait(
         &mut self,
         interrupt: &Interrupt,
@@ -172,21 +174,14 @@ impl Workload {
         }
     }
 
-    pub(crate) fn finish(self) -> Finished {
-        let Workload {
-            mut child,
-            cgroup,
-            pidfd: _,
-        } = self;
-        let killed = cgroup.kill();
-        let fallback = killed.as_ref().err().map(|_| child.kill());
-        let status = reap_after_kill(&mut child, &killed, fallback.as_ref());
-        let removed = if killed.is_ok() {
-            cgroup.wait_empty_and_remove()
-        } else {
-            fs::remove_dir(&cgroup.path)
-        };
-        let cleanup = combine_cleanup(killed, fallback, removed);
+    pub(crate) fn finish(mut self) -> Finished {
+        let killed = kill(&self.ordinary);
+        let fallback = killed.as_ref().err().map(|_| self.child.kill());
+        let terminated = killed.is_ok() || fallback.as_ref().is_some_and(Result::is_ok);
+        let status = reap_after_kill(&mut self.child, &killed, fallback.as_ref());
+        let emptied = wait_after_kill(&self.ordinary, terminated);
+        let cleanup = combine_cleanup(killed, fallback, emptied);
+        self.cleaned = cleanup.is_ok();
 
         Finished {
             status,
@@ -198,34 +193,115 @@ impl Workload {
 
 impl Prepared {
     pub(crate) fn spawn(mut self) -> io::Result<Workload> {
-        let cgroup = self.cgroup.take().expect("prepared cgroup is available");
-        let mut child = match self.command.spawn() {
-            Ok(child) => child,
-            Err(error) => return Err(error),
-        };
+        let mut child = self.command.spawn()?;
         let pid = Pid::from_child(&child);
         let pidfd = match pidfd_open(pid, PidfdFlags::empty()) {
             Ok(pidfd) => pidfd,
             Err(error) => {
-                let killed = cgroup.kill();
+                let killed = kill(&self.ordinary);
                 let fallback = killed.as_ref().err().map(|_| child.kill());
+                let terminated = killed.is_ok() || fallback.as_ref().is_some_and(Result::is_ok);
                 let reaped = reap_after_kill(&mut child, &killed, fallback.as_ref()).map(drop);
-                let removed = if killed.is_ok() {
-                    cgroup.wait_empty_and_remove()
-                } else {
-                    fs::remove_dir(&cgroup.path)
-                };
-                report_secondary(combine_cleanup(killed, fallback, reaped), "cgroup cleanup");
-                report_secondary(removed, "cgroup removal");
+                let emptied = wait_after_kill(&self.ordinary, terminated);
+                report_secondary(
+                    combine_cleanup(killed, fallback, combine_errors(reaped, emptied)),
+                    "cgroup cleanup",
+                );
                 return Err(io::Error::from(error));
             }
         };
         Ok(Workload {
             child,
-            cgroup,
+            ordinary: self.ordinary,
             pidfd,
+            cleaned: false,
         })
     }
+}
+
+impl Drop for Workload {
+    fn drop(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        let killed = kill(&self.ordinary);
+        let fallback = killed.as_ref().err().map(|_| self.child.kill());
+        let _ = reap_after_kill(&mut self.child, &killed, fallback.as_ref());
+    }
+}
+
+fn clean_leaf(path: &Path) -> (io::Result<()>, bool) {
+    let killed = kill(path);
+    let emptied = wait_after_kill(path, killed.is_ok());
+    let empty = emptied.is_ok();
+    (combine_errors(killed, emptied), empty)
+}
+
+fn kill(path: &Path) -> io::Result<()> {
+    OpenOptions::new()
+        .write(true)
+        .open(path.join("cgroup.kill"))?
+        .write_all(b"1")
+}
+
+fn populated(path: &Path) -> io::Result<bool> {
+    let state = fs::read_to_string(path.join("cgroup.events"))?;
+    let value = state
+        .lines()
+        .find_map(|line| line.strip_prefix("populated "))
+        .ok_or_else(|| io::Error::other("cgroup.events has no populated field"))?;
+    match value {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(io::Error::other(
+            "cgroup.events has an invalid populated field",
+        )),
+    }
+}
+
+fn ensure_empty(path: &Path) -> io::Result<()> {
+    if populated(path)? {
+        Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "ordinary cgroup is still populated",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn wait_after_kill(path: &Path, terminated: bool) -> io::Result<()> {
+    if terminated {
+        wait_empty(path)
+    } else {
+        ensure_empty(path)
+    }
+}
+
+fn wait_empty(path: &Path) -> io::Result<()> {
+    let mut events = OpenOptions::new()
+        .read(true)
+        .open(path.join("cgroup.events"))?;
+    let mut state = String::with_capacity(64);
+    loop {
+        events.rewind()?;
+        state.clear();
+        events.read_to_string(&mut state)?;
+        if state.lines().any(|line| line == "populated 0") {
+            return Ok(());
+        }
+        let mut fds = [PollFd::new(&events, PollFlags::PRI | PollFlags::ERR)];
+        match poll(&mut fds, None) {
+            Ok(_) => {}
+            Err(Errno::INTR) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn remove_tree(ordinary: &Path, parent: &Path) -> io::Result<()> {
+    fs::remove_dir(ordinary)?;
+    fs::remove_dir(parent)
 }
 
 fn combine_cleanup(
@@ -246,16 +322,11 @@ fn report_secondary(result: io::Result<()>, label: &str) {
     }
 }
 
-fn cgroup_root() -> io::Result<&'static PathBuf> {
-    if let Some(root) = CGROUP_ROOT.get() {
-        return Ok(root);
+fn cgroup_root() -> io::Result<PathBuf> {
+    match env::var_os("FOIL_CGROUP_ROOT") {
+        Some(root) => Ok(PathBuf::from(root)),
+        None => current_cgroup(),
     }
-    let root = match env::var_os("FOIL_CGROUP_ROOT") {
-        Some(root) => PathBuf::from(root),
-        None => current_cgroup()?,
-    };
-    let _ = CGROUP_ROOT.set(root);
-    Ok(CGROUP_ROOT.get().expect("the cgroup root was initialized"))
 }
 
 fn current_cgroup() -> io::Result<PathBuf> {
@@ -265,4 +336,187 @@ fn current_cgroup() -> io::Result<PathBuf> {
         .find_map(|line| line.strip_prefix("0::"))
         .ok_or_else(|| io::Error::other("cgroup v2 is unavailable"))?;
     Ok(PathBuf::from("/sys/fs/cgroup").join(path.trim_start_matches('/')))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::{Context, Result, ensure};
+    use std::{ffi::OsString, thread};
+
+    fn spec(test: &str) -> Result<CommandSpec> {
+        Ok(CommandSpec::new(
+            std::env::current_exe()?.into_os_string(),
+            ["--exact", test, "--ignored"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+            std::env::current_dir()?,
+            Vec::new(),
+        ))
+    }
+
+    fn run(session: &mut Session) -> Result<()> {
+        let interrupt = Interrupt::new()?;
+        let mut workload = session
+            .prepare(&spec("platform::tests::noop_child")?)?
+            .spawn()?;
+        ensure!(
+            fs::read_to_string(session.parent.join("cgroup.procs"))?
+                .trim()
+                .is_empty()
+        );
+        ensure!(matches!(workload.wait(&interrupt, None)?, Wait::Exited));
+        let finished = workload.finish();
+        ensure!(finished.status?.success());
+        finished.cleanup?;
+        ensure!(
+            fs::read_to_string(session.parent.join("cgroup.procs"))?
+                .trim()
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sessions_are_unique_and_parents_remain_process_free() -> Result<()> {
+        let first = Session::new()?;
+        let second = Session::new()?;
+
+        ensure!(first.parent != second.parent);
+        ensure!(first.ordinary == first.parent.join("ordinary"));
+        ensure!(second.ordinary == second.parent.join("ordinary"));
+        ensure!(
+            fs::read_to_string(first.parent.join("cgroup.procs"))?
+                .trim()
+                .is_empty()
+        );
+        ensure!(
+            fs::read_to_string(second.parent.join("cgroup.procs"))?
+                .trim()
+                .is_empty()
+        );
+
+        first.shutdown()?;
+        second.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
+    fn sequential_workloads_reuse_the_ordinary_leaf() -> Result<()> {
+        let mut session = Session::new()?;
+        let parent = session.parent.clone();
+        let ordinary = session.ordinary.clone();
+
+        run(&mut session)?;
+        ensure!(ordinary.is_dir());
+        run(&mut session)?;
+        ensure!(session.ordinary == ordinary);
+
+        session.shutdown()?;
+        ensure!(!ordinary.exists());
+        ensure!(!parent.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn direct_exit_wins_and_consumes_a_pending_interrupt() -> Result<()> {
+        let mut session = Session::new()?;
+        let interrupt = Interrupt::new()?;
+        let mut exited = session
+            .prepare(&spec("platform::tests::noop_child")?)?
+            .spawn()?;
+        ensure!(exited.child.wait()?.success());
+        interrupt.signal();
+        ensure!(matches!(exited.wait(&interrupt, None)?, Wait::Exited));
+        ensure!(exited.finish().cleanup.is_ok());
+
+        let mut next = session
+            .prepare(&spec("platform::tests::slow_child")?)?
+            .spawn()?;
+        ensure!(matches!(
+            next.wait(&interrupt, Some(Duration::ZERO))?,
+            Wait::TimedOut
+        ));
+        ensure!(next.finish().cleanup.is_ok());
+        session.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_candidate_names_are_skipped() -> Result<()> {
+        let root = cgroup_root()?;
+        let first = u64::MAX - 1;
+        let counter = AtomicU64::new(first);
+        let stale = root.join(format!("foil-{}-{first}", std::process::id()));
+        fs::create_dir(&stale)?;
+
+        let session = Session::create(&root, &counter)?;
+        ensure!(session.parent != stale);
+        ensure!(
+            session
+                .parent
+                .ends_with(format!("foil-{}-{}", std::process::id(), u64::MAX))
+        );
+
+        session.shutdown()?;
+        fs::remove_dir(stale)?;
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_sessions_do_not_collide() -> Result<()> {
+        let sessions = (0..8)
+            .map(|_| thread::spawn(Session::new))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().expect("session thread does not panic"))
+            .collect::<io::Result<Vec<_>>>()?;
+        let mut paths = sessions
+            .iter()
+            .map(|session| session.parent.clone())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        ensure!(paths.len() == sessions.len());
+
+        for session in sessions {
+            session.shutdown()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shutdown_failures_are_returned() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let counter = AtomicU64::new(0);
+        let session = Session::create(root.path(), &counter)?;
+
+        let error = session
+            .shutdown()
+            .err()
+            .context("a non-cgroup hierarchy should fail cleanup")?;
+        ensure!(
+            matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::Other),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workload_cleanup_failure_propagates_without_poisoning_the_session() -> Result<()> {
+        let mut session = Session::new()?;
+        let mut workload = session
+            .prepare(&spec("platform::tests::slow_child")?)?
+            .spawn()?;
+        workload.ordinary = session.parent.join("missing");
+
+        let finished = workload.finish();
+        ensure!(finished.status.is_ok());
+        ensure!(finished.cleanup.is_err());
+
+        run(&mut session)?;
+        session.shutdown()?;
+        Ok(())
+    }
 }

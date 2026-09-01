@@ -44,6 +44,7 @@ pub(crate) struct Workload {
     kqueue: OwnedFd,
     // Process groups do not contain descendants that call setsid() or setpgid().
     pgid: Pid,
+    cleaned: bool,
 }
 
 pub(crate) struct Prepared {
@@ -51,8 +52,14 @@ pub(crate) struct Prepared {
     command: Command,
 }
 
-impl Workload {
-    pub(crate) fn prepare(spec: &CommandSpec) -> io::Result<Prepared> {
+pub(crate) struct Session;
+
+impl Session {
+    pub(crate) fn new() -> io::Result<Self> {
+        Ok(Self)
+    }
+
+    pub(crate) fn prepare(&mut self, spec: &CommandSpec) -> io::Result<Prepared> {
         use std::os::unix::process::CommandExt;
         let mut command = spec.command();
         command.process_group(0);
@@ -62,6 +69,12 @@ impl Workload {
         })
     }
 
+    pub(crate) fn shutdown(self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Workload {
     pub(crate) fn wait(
         &mut self,
         interrupt: &Interrupt,
@@ -96,7 +109,10 @@ impl Workload {
                 )
             } {
                 Ok(_) => break,
-                Err(Errno::SRCH) => return Ok(Wait::Exited),
+                Err(Errno::SRCH) => {
+                    drain_interrupt(&interrupt.read)?;
+                    return Ok(Wait::Exited);
+                }
                 Err(Errno::INTR) => continue,
                 Err(error) => return Err(error.into()),
             }
@@ -126,23 +142,19 @@ impl Workload {
         }
     }
 
-    pub(crate) fn finish(self) -> Finished {
-        let Workload {
-            mut child,
-            kqueue: _,
-            pgid,
-        } = self;
-        let terminated = match kill_process_group(pgid, Signal::KILL) {
+    pub(crate) fn finish(mut self) -> Finished {
+        let terminated = match kill_process_group(self.pgid, Signal::KILL) {
             Ok(()) => Ok(()),
             Err(Errno::SRCH) => Ok(()),
             Err(error) => Err(error.into()),
         };
-        let fallback = terminated.as_ref().err().map(|_| child.kill());
-        let status = reap_after_kill(&mut child, &terminated, fallback.as_ref());
+        let fallback = terminated.as_ref().err().map(|_| self.child.kill());
+        let status = reap_after_kill(&mut self.child, &terminated, fallback.as_ref());
         let cleanup = match fallback {
             Some(fallback) => combine_errors(terminated, fallback),
             None => terminated,
         };
+        self.cleaned = cleanup.is_ok();
         Finished {
             status,
             peak_memory: None,
@@ -159,7 +171,22 @@ impl Prepared {
             child,
             kqueue: self.kqueue,
             pgid,
+            cleaned: false,
         })
+    }
+}
+
+impl Drop for Workload {
+    fn drop(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        let terminated = match kill_process_group(self.pgid, Signal::KILL) {
+            Ok(()) | Err(Errno::SRCH) => Ok(()),
+            Err(error) => Err(error.into()),
+        };
+        let fallback = terminated.as_ref().err().map(|_| self.child.kill());
+        let _ = reap_after_kill(&mut self.child, &terminated, fallback.as_ref());
     }
 }
 
@@ -180,4 +207,57 @@ fn ready(events: &[Event], interrupt: &Interrupt) -> io::Result<Option<Wait>> {
     } else {
         None
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::{Result, ensure};
+    use std::{ffi::OsString, time::Duration};
+
+    fn spec(test: &str) -> Result<CommandSpec> {
+        Ok(CommandSpec::new(
+            std::env::current_exe()?.into_os_string(),
+            ["--exact", test, "--ignored"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+            std::env::current_dir()?,
+            Vec::new(),
+        ))
+    }
+
+    #[test]
+    fn esrch_exit_consumes_a_pending_interrupt() -> Result<()> {
+        let mut session = Session::new()?;
+        let interrupt = Interrupt::new()?;
+        let mut exited = session
+            .prepare(&spec("platform::macos::tests::fast_child")?)?
+            .spawn()?;
+        ensure!(exited.child.wait()?.success());
+        interrupt.signal();
+        ensure!(matches!(exited.wait(&interrupt, None)?, Wait::Exited));
+        ensure!(exited.finish().cleanup.is_ok());
+
+        let mut next = session
+            .prepare(&spec("platform::macos::tests::slow_child")?)?
+            .spawn()?;
+        ensure!(matches!(
+            next.wait(&interrupt, Some(Duration::ZERO))?,
+            Wait::TimedOut
+        ));
+        ensure!(next.finish().cleanup.is_ok());
+        session.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn fast_child() {}
+
+    #[test]
+    #[ignore]
+    fn slow_child() {
+        std::thread::sleep(Duration::from_secs(30));
+    }
 }
