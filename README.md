@@ -35,22 +35,24 @@ With that file, the run above is `foil -- cargo bench`. Arguments override the f
 
 Run order uses small-block randomization. The default `block-size = 4` gives each full block two baseline-first and two candidate-first pairs; `block-size = 1` is the minimum.
 
-Lifecycle commands surround the suite, each benchmark, or every measured run. Top-level `startup` and `teardown` run once in the original checkout around the whole suite. The same keys in a benchmark run once in each revision worktree around that benchmark. `startup-each-run` and `teardown-each-run` run outside every timed interval; suite and benchmark commands compose, with teardown unwinding in reverse order.
+Lifecycle names identify their execution scope. `suite-startup` runs once in the original checkout before revision worktrees are created; `suite-teardown` runs there after every worktree has been removed. `worktree-startup` and `worktree-teardown` run once in each newly created baseline or candidate worktree. Benchmark-local `startup` and `teardown` run once per benchmark on each side, while `startup-each-run` and `teardown-each-run` surround every measured command outside its timed interval.
 
 ```toml
-startup = ["docker", "compose", "up", "-d"]
-startup-each-run = ["reset-database"]
-teardown-each-run = ["collect-logs"]
-teardown = ["docker", "compose", "down"]
+suite-startup = ["docker", "compose", "up", "-d"]
+suite-teardown = ["docker", "compose", "down"]
+worktree-startup = ["git", "submodule", "update", "--init"]
+worktree-teardown = ["git", "clean", "-fdx"]
 
 [benchmarks.parse]
 startup = ["cargo", "build", "--release"]
+startup-each-run = ["reset-database"]
+teardown-each-run = ["collect-logs"]
 command = ["./target/release/parse", "corpus/"]
 ```
 
 Benchmark lifecycle commands share the benchmark's `working-directory` and `env`. Their stdout and stderr are discarded, like measured commands'; redirect explicitly if the output matters. The first Ctrl-C interrupts active startup or benchmark work, then teardown unwinds on a protected cleanup wait. A second Ctrl-C exits immediately. Teardown is also attempted after startup, benchmark, or timeout failures; the original error remains primary and additional cleanup errors are reported alongside it. On macOS, containment uses a process group, which a descendant can deliberately escape with `setsid` or `setpgid`.
 
-A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override ordinary options, and anything it leaves unset, including `command`, is inherited from the top level. Lifecycle commands are not inherited: suite and benchmark lifecycles remain distinct and compose. Its `env` table is merged with the top-level one, variable by variable, with the benchmark's values winning on conflicts:
+A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override ordinary options, and anything it leaves unset, including `command`, is inherited from the top level. Benchmark lifecycle commands are local to that benchmark. Its `env` table is merged with the top-level one, variable by variable, with the benchmark's values winning on conflicts:
 
 ```toml
 repetitions = 10
@@ -68,7 +70,7 @@ command = ["cargo", "run", "--release", "--", "render"]
 RAYON_NUM_THREADS = "1"
 ```
 
-`foil --benchmark render` runs with 50 repetitions in `benchmarks/render`; `foil --benchmark parse` runs with the top-level 10. An explicit argument still overrides a benchmark's setting, except for `command`, `working-directory`, and `env`. Those define what a benchmark is, so one argument cannot sensibly stand in for all of the selected benchmarks, and passing one alongside a benchmark is an error. Lifecycle arguments apply to the suite.
+`foil --benchmark render` runs with 50 repetitions in `benchmarks/render`; `foil --benchmark parse` runs with the top-level 10. An explicit argument still overrides a benchmark's setting, except for `command`, `working-directory`, and `env`. Those define what a benchmark is, so one argument cannot sensibly stand in for all of the selected benchmarks, and passing one alongside a benchmark is an error. Suite and worktree lifecycle options may be passed on the command line; benchmark lifecycle commands belong in their benchmark table.
 `working-directory` must be a relative path within the worktree; absolute paths and `..` are rejected.
 
 With no `--benchmark`, every benchmark in the table runs in declaration order, each in its own `--output-dir` subdirectory named after it. Pass `--benchmark render parse` to run only some of them in the order given. A configuration with no `[benchmarks]` table always runs a single, unnamed command, exactly as with no configuration file at all.

@@ -45,6 +45,23 @@ fn a_complete_configuration_runs_without_any_arguments() -> Result<()> {
     assert_eq!(config["foil_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(config["command"], serde_json::json!(["git", "--version"]));
     assert_eq!(config["intervals"], serde_json::json!([0.5, 0.8, 0.9]));
+    assert_eq!(
+        config["suite_lifecycle"],
+        serde_json::json!({"startup": [], "teardown": []})
+    );
+    assert_eq!(
+        config["worktree_lifecycle"],
+        serde_json::json!({"startup": [], "teardown": []})
+    );
+    assert_eq!(
+        config["benchmark_lifecycle"],
+        serde_json::json!({
+            "startup": [],
+            "startup_each_run": [],
+            "teardown_each_run": [],
+            "teardown": []
+        })
+    );
 
     let report = fs::read_to_string(project.path().join("benchmark/report.txt"))?;
     for interval in ["50% CrI", "80% CrI", "90% CrI"] {
@@ -163,6 +180,18 @@ fn builtin_defaults_apply_without_a_configuration_file() -> Result<()> {
         assert!(help.contains(default), "{default} is missing from\n{help}");
     }
     assert!(help.contains(BUILTIN_USAGE), "{help}");
+    for lifecycle in [
+        "--suite-startup",
+        "--suite-teardown",
+        "--worktree-startup",
+        "--worktree-teardown",
+    ] {
+        assert!(
+            help.contains(lifecycle),
+            "{lifecycle} is missing from\n{help}"
+        );
+    }
+    assert!(!help.contains("--startup <"), "{help}");
 
     Ok(())
 }

@@ -74,7 +74,6 @@ impl CommandSpec {
     }
 
     #[cfg(not(windows))]
-    /// Builds the child's command with null stdio.
     pub(crate) fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
         command

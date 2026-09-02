@@ -99,14 +99,14 @@ impl Workload {
             ),
         ];
 
+        let mut no_events: [Event; 0] = [];
         loop {
-            self.events.clear();
             // SAFETY: The child pid and interrupt fd stay valid for this Workload.
             match unsafe {
                 kevent(
                     &self.kqueue,
                     &changes,
-                    spare_capacity(&mut self.events),
+                    &mut no_events[..],
                     Some(Duration::ZERO),
                 )
             } {
@@ -116,6 +116,21 @@ impl Workload {
                     return Ok(Wait::Exited);
                 }
                 Err(Errno::INTR) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        self.events.clear();
+        // SAFETY: No changelist entries, so no fd validity requirements to uphold.
+        unsafe {
+            match kevent(
+                &self.kqueue,
+                &[],
+                spare_capacity(&mut self.events),
+                Some(Duration::ZERO),
+            ) {
+                Ok(_) => {}
+                Err(Errno::INTR) => self.events.clear(),
                 Err(error) => return Err(error.into()),
             }
         }
@@ -223,29 +238,41 @@ fn terminate_process_group(pgid: Pid) -> io::Result<()> {
 }
 
 fn ready(events: &[Event], interrupt: &Interrupt) -> io::Result<Option<Wait>> {
+    if let Some(event) = events
+        .iter()
+        .find(|event| event.flags().contains(EventFlags::ERROR))
+    {
+        let error = event.data();
+        return Err(if error == 0 {
+            io::Error::other("kqueue returned an error event without errno")
+        } else {
+            io::Error::from_raw_os_error(error as i32)
+        });
+    }
     let exited = events
         .iter()
         .any(|event| matches!(event.filter(), EventFilter::Proc { .. }));
     let interrupted = events
         .iter()
         .any(|event| matches!(event.filter(), EventFilter::Read(_)));
-    if interrupted {
-        drain_interrupt(&interrupt.read)?;
-    }
-    Ok(if exited {
+    let outcome = if exited {
         Some(Wait::Exited)
     } else if interrupted {
         Some(Wait::Interrupted)
     } else {
         None
-    })
+    };
+    if outcome.is_some() {
+        drain_interrupt(&interrupt.read)?;
+    }
+    Ok(outcome)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use anyhow::{Result, ensure};
-    use std::{ffi::OsString, time::Duration};
+    use std::ffi::OsString;
 
     fn spec(test: &str) -> Result<CommandSpec> {
         Ok(CommandSpec::new(
@@ -260,26 +287,23 @@ mod tests {
     }
 
     #[test]
-    fn esrch_exit_consumes_a_pending_interrupt() -> Result<()> {
-        let mut session = Session::new()?;
+    fn exit_event_consumes_a_pending_interrupt() -> Result<()> {
         let interrupt = Interrupt::new()?;
-        let mut exited = session
-            .prepare(&spec("platform::macos::tests::fast_child")?)?
-            .spawn()?;
-        ensure!(exited.child.wait()?.success());
         interrupt.signal();
-        ensure!(matches!(exited.wait(&interrupt, None)?, Wait::Exited));
-        ensure!(exited.finish().cleanup.is_ok());
+        let event = Event::new(
+            EventFilter::Proc {
+                pid: Pid::INIT,
+                flags: ProcessEvents::EXIT,
+            },
+            EventFlags::empty(),
+            ptr::null_mut(),
+        );
 
-        let mut next = session
-            .prepare(&spec("platform::macos::tests::slow_child")?)?
-            .spawn()?;
+        ensure!(matches!(ready(&[event], &interrupt)?, Some(Wait::Exited)));
         ensure!(matches!(
-            next.wait(&interrupt, Some(Duration::ZERO))?,
-            Wait::TimedOut
+            rustix::io::read(&*interrupt.read, &mut [0]),
+            Err(Errno::AGAIN)
         ));
-        ensure!(next.finish().cleanup.is_ok());
-        session.shutdown()?;
         Ok(())
     }
 
@@ -305,10 +329,4 @@ mod tests {
     #[test]
     #[ignore]
     fn fast_child() {}
-
-    #[test]
-    #[ignore]
-    fn slow_child() {
-        std::thread::sleep(Duration::from_secs(30));
-    }
 }

@@ -1,10 +1,14 @@
 use crate::analysis::analyze_checked;
-use crate::config::{Cli, Lifecycle, ResolvedSuiteConfig, RunConfig, Suite};
+use crate::config::{
+    Benchmark, BenchmarkLifecycle, Cli, ResolvedSuiteConfig, RunConfig, Suite, SuiteLifecycle,
+    WorktreeLifecycle,
+};
 use crate::platform::{CommandSpec, Interrupt, Session};
 use crate::{
-    BenchmarkLog, CommandTemplate, Config, LifecycleConfig, Measurement, MeasurementsCsv, Pair,
-    Repetition, Repetitions, Revision, RunOrder, Side, Summary, Time, Worktree, run_unmeasured,
-    working_tree_has_modified_tracked_files, write_config_json, write_posterior_csv,
+    BenchmarkLifecycleConfig, BenchmarkLog, CommandTemplate, Config, Measurement, MeasurementsCsv,
+    Pair, Repetition, Repetitions, Revision, RunOrder, Side, SuiteLifecycleConfig, Summary, Time,
+    Worktree, WorktreeLifecycleConfig, run_unmeasured, working_tree_has_modified_tracked_files,
+    write_config_json, write_posterior_csv,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -24,6 +28,7 @@ use tempfile::{TempDir, tempdir};
 struct Worktrees {
     pair: Pair<Worktree>,
     _directory: TempDir,
+    teardown: Option<Pair<CommandSpec>>,
 }
 
 struct EachRunCommands {
@@ -71,11 +76,12 @@ pub(crate) fn run() -> Result<()> {
     let Suite {
         config: suite,
         lifecycle,
+        worktree_lifecycle,
         runs,
     } = Cli::suite()?;
 
     clear_outputs(&runs)?;
-    write_configs(&suite, &lifecycle, &runs)?;
+    write_configs(&suite, &lifecycle, &worktree_lifecycle, &runs)?;
     let mut session = Session::new().context("Failed to create the platform session.")?;
 
     let startup = build_command(&lifecycle.startup, None, &[]);
@@ -91,7 +97,7 @@ pub(crate) fn run() -> Result<()> {
                 "suite startup",
             )
         },
-        |session| execute_suite(&suite, &lifecycle, runs, &interrupts, session),
+        |session| execute_suite(&suite, &worktree_lifecycle, runs, &interrupts, session),
         |session| {
             run_at(
                 session,
@@ -115,8 +121,8 @@ pub(crate) fn run() -> Result<()> {
 
 fn execute_suite(
     suite: &ResolvedSuiteConfig,
-    lifecycle: &Lifecycle,
-    runs: Vec<(Option<String>, RunConfig)>,
+    worktree_lifecycle: &WorktreeLifecycle,
+    runs: Vec<(Option<String>, Benchmark)>,
     interrupts: &Interrupts,
     session: &mut Session,
 ) -> Result<()> {
@@ -129,32 +135,54 @@ fn execute_suite(
         baseline: suite.baseline.clone(),
         candidate: suite.candidate.clone(),
     };
-    let shared = create_worktrees(&revisions)?;
+    let mut shared = runs
+        .iter()
+        .any(|(_, benchmark)| !benchmark.config.isolate)
+        .then(|| create_worktrees(&revisions, worktree_lifecycle, interrupts, session))
+        .transpose()?;
 
-    for (name, config) in runs {
-        ensure!(!interrupted(), "Interrupted.");
-        let heading = name.as_deref();
-        let isolated = config
-            .isolate
-            .then(|| create_worktrees(&revisions))
-            .transpose()?;
-        let worktrees = isolated.as_ref().unwrap_or(&shared);
+    let result = (|| {
+        for (name, benchmark) in runs {
+            ensure!(!interrupted(), "Interrupted.");
+            let heading = name.as_deref();
+            if benchmark.config.isolate {
+                let worktrees =
+                    create_worktrees(&revisions, worktree_lifecycle, interrupts, session)?;
+                let result = compare(
+                    suite,
+                    benchmark,
+                    &worktrees.pair,
+                    heading,
+                    interrupts,
+                    session,
+                );
+                combine(result, worktrees.shutdown(session, &interrupts.cleanup))?;
+            } else {
+                compare(
+                    suite,
+                    benchmark,
+                    &shared.as_ref().expect("shared worktrees were created").pair,
+                    heading,
+                    interrupts,
+                    session,
+                )?;
+            }
+        }
+        Ok(())
+    })();
 
-        compare(
-            suite,
-            lifecycle,
-            config,
-            &worktrees.pair,
-            heading,
-            interrupts,
-            session,
-        )?;
-    }
-
-    Ok(())
+    let cleanup = shared.take().map_or(Ok(()), |worktrees| {
+        worktrees.shutdown(session, &interrupts.cleanup)
+    });
+    combine(result, cleanup)
 }
 
-fn create_worktrees(revisions: &Pair<Revision>) -> Result<Worktrees> {
+fn create_worktrees(
+    revisions: &Pair<Revision>,
+    lifecycle: &WorktreeLifecycle,
+    interrupts: &Interrupts,
+    session: &mut Session,
+) -> Result<Worktrees> {
     let directory = tempdir().context("Failed to create temporary directory.")?;
     let pair = Pair {
         baseline: Worktree::create(
@@ -166,21 +194,49 @@ fn create_worktrees(revisions: &Pair<Revision>) -> Result<Worktrees> {
             revisions.candidate.clone(),
         )?,
     };
-
-    Ok(Worktrees {
+    let startup = bind_command(&lifecycle.startup, None, &[], &pair);
+    let teardown = bind_command(&lifecycle.teardown, None, &[], &pair);
+    let worktrees = Worktrees {
         _directory: directory,
         pair,
-    })
+        teardown,
+    };
+    let started = run_startup_both(
+        session,
+        startup.as_ref(),
+        &interrupts.work,
+        "worktree startup",
+    );
+    match started {
+        Ok(()) => Ok(worktrees),
+        Err(error) => Err(combine::<()>(
+            Err(error),
+            worktrees.shutdown(session, &interrupts.cleanup),
+        )
+        .unwrap_err()),
+    }
 }
 
-fn output_directory(name: Option<&str>, config: &RunConfig) -> std::path::PathBuf {
+impl Worktrees {
+    fn shutdown(self, session: &mut Session, interrupt: &Interrupt) -> Result<()> {
+        run_teardown_both(
+            session,
+            self.teardown.as_ref(),
+            interrupt,
+            "worktree teardown",
+        )
+    }
+}
+
+fn output_directory(name: Option<&str>, benchmark: &Benchmark) -> PathBuf {
+    let config = &benchmark.config;
     name.map_or_else(
         || config.output_dir.clone(),
         |name| config.output_dir.join(name),
     )
 }
 
-fn clear_outputs(runs: &[(Option<String>, RunConfig)]) -> Result<()> {
+fn clear_outputs(runs: &[(Option<String>, Benchmark)]) -> Result<()> {
     let mut result = Ok(());
     for (name, config) in runs {
         let output_dir = output_directory(name.as_deref(), config);
@@ -207,11 +263,13 @@ fn remove_generated(path: &Path) -> Result<()> {
 
 fn write_configs(
     suite: &ResolvedSuiteConfig,
-    suite_lifecycle: &Lifecycle,
-    runs: &[(Option<String>, RunConfig)],
+    suite_lifecycle: &SuiteLifecycle,
+    worktree_lifecycle: &WorktreeLifecycle,
+    runs: &[(Option<String>, Benchmark)],
 ) -> Result<()> {
-    for (name, config) in runs {
-        let output_dir = output_directory(name.as_deref(), config);
+    for (name, benchmark) in runs {
+        let config = &benchmark.config;
+        let output_dir = output_directory(name.as_deref(), benchmark);
         fs::create_dir_all(&output_dir)
             .with_context(|| format!("Failed to create {}.", output_dir.display()))?;
         let path = output_dir.join("config.json");
@@ -229,8 +287,9 @@ fn write_configs(
                 working_directory: config.working_directory.as_deref(),
                 baseline: &suite.baseline,
                 candidate: &suite.candidate,
-                suite_lifecycle: lifecycle_config(suite_lifecycle),
-                benchmark_lifecycle: lifecycle_config(&config.lifecycle),
+                suite_lifecycle: suite_lifecycle_config(suite_lifecycle),
+                worktree_lifecycle: worktree_lifecycle_config(worktree_lifecycle),
+                benchmark_lifecycle: benchmark_lifecycle_config(&benchmark.lifecycle),
                 command: &config.command,
             },
         )
@@ -241,14 +300,14 @@ fn write_configs(
 
 fn compare(
     suite: &ResolvedSuiteConfig,
-    suite_lifecycle: &Lifecycle,
-    config: RunConfig,
+    benchmark_config: Benchmark,
     worktrees: &Pair<Worktree>,
     heading: Option<&str>,
     interrupts: &Interrupts,
     session: &mut Session,
 ) -> Result<Summary<Time>> {
-    let output_dir = output_directory(heading, &config);
+    let output_dir = output_directory(heading, &benchmark_config);
+    let Benchmark { config, lifecycle } = benchmark_config;
     let RunConfig {
         isolate: _,
         shrinkage,
@@ -260,26 +319,11 @@ fn compare(
         intervals,
         working_directory,
         envs,
-        lifecycle,
         command,
     } = config;
 
     let mut schedule_rng = Xoshiro256PlusPlus::seed_from_u64(crate::seed::schedule(suite.seed));
 
-    let suite_commands = EachRunCommands {
-        startup: bind_command(
-            &suite_lifecycle.startup_each_run,
-            working_directory.clone(),
-            &envs,
-            worktrees,
-        ),
-        teardown: bind_command(
-            &suite_lifecycle.teardown_each_run,
-            working_directory.clone(),
-            &envs,
-            worktrees,
-        ),
-    };
     let benchmark_commands = EachRunCommands {
         startup: bind_command(
             &lifecycle.startup_each_run,
@@ -330,7 +374,6 @@ fn compare(
             ensure!(!interrupted(), "Interrupted.");
             let context = MeasurementContext {
                 benchmark: &benchmark,
-                suite: &suite_commands,
                 benchmark_lifecycle: &benchmark_commands,
                 interrupts,
                 session,
@@ -385,7 +428,6 @@ fn compare(
 
 struct MeasurementContext<'a> {
     benchmark: &'a Pair<CommandSpec>,
-    suite: &'a EachRunCommands,
     benchmark_lifecycle: &'a EachRunCommands,
     interrupts: &'a Interrupts,
     session: &'a mut Session,
@@ -442,72 +484,43 @@ fn measure_one<W: std::io::Write>(
     log: &mut BenchmarkLog<W>,
     side: Side,
 ) -> Result<Measurement> {
-    log.phase(side, "suite startup");
-    let suite_start = run_in(
+    log.phase(side, "benchmark startup");
+    let benchmark_start = run_in(
         context.session,
         context
-            .suite
+            .benchmark_lifecycle
             .startup
             .as_ref()
             .map(|commands| commands.get(side)),
         &context.interrupts.work,
         side,
-        "suite startup-each-run",
+        "benchmark startup-each-run",
     );
-    let body = suite_start.and_then(|()| {
-        log.phase(side, "benchmark startup");
-        let benchmark_start = run_in(
+    let measured = benchmark_start.and_then(|()| {
+        ensure!(!interrupted(), "Interrupted.");
+        let output = log.measure(
             context.session,
-            context
-                .benchmark_lifecycle
-                .startup
-                .as_ref()
-                .map(|commands| commands.get(side)),
+            context.benchmark.get(side),
             &context.interrupts.work,
+            context.timeout,
             side,
-            "benchmark startup-each-run",
-        );
-        let measured = benchmark_start.and_then(|()| {
-            ensure!(!interrupted(), "Interrupted.");
-            let output = log.measure(
-                context.session,
-                context.benchmark.get(side),
-                &context.interrupts.work,
-                context.timeout,
-                side,
-            )?;
-            ensure!(!interrupted(), "Interrupted.");
-            Ok(output)
-        });
-        log.phase(side, "benchmark teardown");
-        combine(
-            measured,
-            run_in(
-                context.session,
-                context
-                    .benchmark_lifecycle
-                    .teardown
-                    .as_ref()
-                    .map(|commands| commands.get(side)),
-                &context.interrupts.cleanup,
-                side,
-                "benchmark teardown-each-run",
-            ),
-        )
+        )?;
+        ensure!(!interrupted(), "Interrupted.");
+        Ok(output)
     });
-    log.phase(side, "suite teardown");
+    log.phase(side, "benchmark teardown");
     combine(
-        body,
+        measured,
         run_in(
             context.session,
             context
-                .suite
+                .benchmark_lifecycle
                 .teardown
                 .as_ref()
                 .map(|commands| commands.get(side)),
             &context.interrupts.cleanup,
             side,
-            "suite teardown-each-run",
+            "benchmark teardown-each-run",
         ),
     )
 }
@@ -560,8 +573,22 @@ fn bind_command(
     })
 }
 
-fn lifecycle_config(lifecycle: &Lifecycle) -> LifecycleConfig<'_> {
-    LifecycleConfig {
+fn suite_lifecycle_config(lifecycle: &SuiteLifecycle) -> SuiteLifecycleConfig<'_> {
+    SuiteLifecycleConfig {
+        startup: &lifecycle.startup,
+        teardown: &lifecycle.teardown,
+    }
+}
+
+fn worktree_lifecycle_config(lifecycle: &WorktreeLifecycle) -> WorktreeLifecycleConfig<'_> {
+    WorktreeLifecycleConfig {
+        startup: &lifecycle.startup,
+        teardown: &lifecycle.teardown,
+    }
+}
+
+fn benchmark_lifecycle_config(lifecycle: &BenchmarkLifecycle) -> BenchmarkLifecycleConfig<'_> {
+    BenchmarkLifecycleConfig {
         startup: &lifecycle.startup,
         startup_each_run: &lifecycle.startup_each_run,
         teardown_each_run: &lifecycle.teardown_each_run,

@@ -1,7 +1,21 @@
 pub mod common;
 use anyhow::{Result, ensure};
 use common::*;
-use std::{fs, process::Command};
+use std::{env, fs, fs::OpenOptions, io::Write, path::Path, process::Command};
+
+fn lifecycle_command(path: &Path, phase: &str) -> String {
+    [
+        env::current_exe().unwrap().to_string_lossy().into_owned(),
+        "--exact".to_owned(),
+        "lifecycle_marker".to_owned(),
+        "--ignored".to_owned(),
+        "--".to_owned(),
+        path.to_string_lossy().into_owned(),
+        phase.to_owned(),
+    ]
+    .map(|part| toml::Value::String(part).to_string())
+    .join(", ")
+}
 
 #[test]
 fn benchmark_startup_runs_in_each_worktree_before_the_measured_runs() -> Result<()> {
@@ -239,8 +253,10 @@ fn candidate_teardown_runs_after_baseline_teardown_fails() -> Result<()> {
 #[test]
 fn successful_lifecycle_output_is_suppressed() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}startup = ['git', '--version']\n\
-         teardown = ['git', '--version']\n\
+        "{PREAMBLE}suite-startup = ['git', '--version']\n\
+         suite-teardown = ['git', '--version']\n\
+         worktree-startup = ['git', '--version']\n\
+         worktree-teardown = ['git', '--version']\n\
          [benchmarks.test]\n\
          startup = ['git', '--version']\n\
          teardown = ['git', '--version']\n\
@@ -252,15 +268,24 @@ fn successful_lifecycle_output_is_suppressed() -> Result<()> {
     assert!(!stdout.contains("git version"), "{stdout}");
     assert!(!stderr.contains("git version"), "{stderr}");
 
+    let config: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+        project.path().join("bench/test/config.json"),
+    )?)?;
+    assert_eq!(config["suite_lifecycle"]["startup"][0], "git");
+    assert_eq!(config["suite_lifecycle"]["teardown"][0], "git");
+    assert_eq!(config["worktree_lifecycle"]["startup"][0], "git");
+    assert_eq!(config["worktree_lifecycle"]["teardown"][0], "git");
+    assert_eq!(config["benchmark_lifecycle"]["startup"][0], "git");
+    assert_eq!(config["benchmark_lifecycle"]["teardown"][0], "git");
+
     Ok(())
 }
 
 #[test]
-fn suite_and_benchmark_each_run_startups_compose() -> Result<()> {
+fn benchmark_each_run_startup_runs_before_each_measurement() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}startup-each-run = ['git', 'config', '--file', 'marker.txt', 'suite.ran', 'yes']\n\
-         [benchmarks.test]\n\
-         startup-each-run = ['git', 'config', '--file', 'marker.txt', '--rename-section', 'suite', 'benchmark']\n\
+        "{PREAMBLE}[benchmarks.test]\n\
+         startup-each-run = ['git', 'config', '--file', 'marker.txt', 'benchmark.ran', 'yes']\n\
          command = ['git', 'config', '--file', 'marker.txt', '--get-regexp', '^benchmark.ran$', '^yes$']\n"
     ))?;
 
@@ -270,10 +295,9 @@ fn suite_and_benchmark_each_run_startups_compose() -> Result<()> {
 }
 
 #[test]
-fn each_run_teardowns_run_after_a_failed_benchmark() -> Result<()> {
+fn benchmark_each_run_teardown_runs_after_a_failed_benchmark() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}teardown-each-run = ['git', 'tag', '--force', 'suite-each-run-torn-down']\n\
-         [benchmarks.test]\n\
+        "{PREAMBLE}[benchmarks.test]\n\
          teardown-each-run = ['git', 'tag', '--force', 'benchmark-each-run-torn-down']\n\
          command = ['git', 'cat-file', '-p', 'absent-object']\n"
     ))?;
@@ -281,19 +305,28 @@ fn each_run_teardowns_run_after_a_failed_benchmark() -> Result<()> {
     let (succeeded, stdout, stderr) = run(&project, &[])?;
     assert!(!succeeded, "foil unexpectedly succeeded with {stdout}");
     assert!(stderr.contains("benchmark failed"), "{stderr}");
-    for tag in [
-        "refs/tags/suite-each-run-torn-down",
-        "refs/tags/benchmark-each-run-torn-down",
-    ] {
-        git(&project, &["rev-parse", "--verify", tag])?;
-    }
+    git(
+        &project,
+        &[
+            "rev-parse",
+            "--verify",
+            "refs/tags/benchmark-each-run-torn-down",
+        ],
+    )?;
 
     Ok(())
 }
 
 #[test]
 fn removed_lifecycle_names_are_rejected() -> Result<()> {
-    for key in ["setup", "prepare"] {
+    for key in [
+        "setup",
+        "prepare",
+        "startup",
+        "teardown",
+        "startup-each-run",
+        "teardown-each-run",
+    ] {
         let project = project(&[("foil.toml", &format!("{REQUIRED}{key} = ['git']\n"))])?;
         let error = failure(&project, &[])?;
         assert!(
@@ -443,8 +476,8 @@ fn a_benchmark_inherits_the_top_level_command() -> Result<()> {
 #[test]
 fn suite_and_benchmark_lifecycles_remain_distinct() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}startup = ['git', '--version']\n\
-        teardown = ['git', '--version']\n\
+        "{PREAMBLE}suite-startup = ['git', '--version']\n\
+        suite-teardown = ['git', '--version']\n\
         \n\
         [benchmarks.parse]\n\
         startup = ['git', 'config', '--file', 'marker.txt', 'startup.ran', 'benchmark-startup']\n\
@@ -462,8 +495,8 @@ fn suite_and_benchmark_lifecycles_remain_distinct() -> Result<()> {
 #[test]
 fn an_empty_benchmark_lifecycle_does_not_clear_the_suite_lifecycle() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}startup = ['git', 'cat-file', '-p', 'absent-object']\n\
-        teardown = ['git', 'tag', 'suite-cleaned-up']\n\
+        "{PREAMBLE}suite-startup = ['git', 'cat-file', '-p', 'absent-object']\n\
+        suite-teardown = ['git', 'tag', 'suite-cleaned-up']\n\
         \n\
         [benchmarks.standalone]\n\
         startup = []\n\
@@ -484,5 +517,121 @@ fn an_empty_benchmark_lifecycle_does_not_clear_the_suite_lifecycle() -> Result<(
         &["rev-parse", "--verify", "refs/tags/suite-cleaned-up"],
     )?;
 
+    Ok(())
+}
+
+#[test]
+fn lifecycle_scopes_run_in_ownership_order() -> Result<()> {
+    let project = repository("")?;
+    let marker = project.path().join("lifecycle-order");
+    let command = |phase| lifecycle_command(&marker, phase);
+    fs::write(
+        project.path().join("foil.toml"),
+        format!(
+            "{PREAMBLE}\
+             suite-startup = [{}]\n\
+             suite-teardown = [{}]\n\
+             worktree-startup = [{}]\n\
+             worktree-teardown = [{}]\n\
+             [benchmarks.test]\n\
+             startup = [{}]\n\
+             teardown = [{}]\n\
+             command = [{}]\n",
+            command("suite-startup"),
+            command("suite-teardown"),
+            command("worktree-startup"),
+            command("worktree-teardown"),
+            command("benchmark-startup"),
+            command("benchmark-teardown"),
+            command("benchmark-work"),
+        ),
+    )?;
+
+    let (succeeded, _, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "foil failed with {stderr}");
+
+    let mut expected = vec!["suite-startup"];
+    expected.extend(["worktree-startup"; 2]);
+    expected.extend(["benchmark-startup"; 2]);
+    expected.extend(["benchmark-work"; 20]);
+    expected.extend(["benchmark-teardown"; 2]);
+    expected.extend(["worktree-teardown"; 2]);
+    expected.push("suite-teardown");
+    assert_eq!(
+        fs::read_to_string(marker)?.lines().collect::<Vec<_>>(),
+        expected
+    );
+    Ok(())
+}
+
+#[test]
+fn worktree_hooks_follow_shared_and_isolated_ownership() -> Result<()> {
+    for (isolated, expected) in [(false, 2), (true, 4)] {
+        let project = repository("")?;
+        let marker = project.path().join("worktree-hooks");
+        let startup = lifecycle_command(&marker, "startup");
+        let teardown = lifecycle_command(&marker, "teardown");
+        fs::write(
+            project.path().join("foil.toml"),
+            format!(
+                "{PREAMBLE}\
+                 worktree-startup = [{startup}]\n\
+                 worktree-teardown = [{teardown}]\n\
+                 [benchmarks.first]\n\
+                 isolate = {isolated}\n\
+                 command = ['git', '--version']\n\
+                 [benchmarks.second]\n\
+                 isolate = {isolated}\n\
+                 command = ['git', '--version']\n"
+            ),
+        )?;
+
+        let (succeeded, _, stderr) = run(&project, &[])?;
+        ensure!(succeeded, "foil failed with {stderr}");
+        let phases = fs::read_to_string(marker)?;
+        assert_eq!(
+            phases.lines().filter(|line| *line == "startup").count(),
+            expected
+        );
+        assert_eq!(
+            phases.lines().filter(|line| *line == "teardown").count(),
+            expected
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn worktree_teardown_runs_after_benchmark_failure() -> Result<()> {
+    let project = repository("")?;
+    let marker = project.path().join("worktree-teardown");
+    let teardown = lifecycle_command(&marker, "teardown");
+    fs::write(
+        project.path().join("foil.toml"),
+        format!(
+            "{PREAMBLE}\
+             worktree-teardown = [{teardown}]\n\
+             command = ['git', 'cat-file', '-p', 'absent-object']\n"
+        ),
+    )?;
+
+    let error = failure(&project, &[])?;
+    assert!(error.contains("benchmark failed"), "{error}");
+    assert_eq!(fs::read_to_string(marker)?.lines().count(), 2);
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn lifecycle_marker() -> Result<()> {
+    let arguments = env::args_os().collect::<Vec<_>>();
+    let [.., path, phase] = arguments.as_slice() else {
+        anyhow::bail!("missing lifecycle marker arguments");
+    };
+    writeln!(
+        OpenOptions::new().create(true).append(true).open(path)?,
+        "{}",
+        phase.to_string_lossy()
+    )?;
     Ok(())
 }

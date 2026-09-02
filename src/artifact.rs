@@ -22,12 +22,23 @@ pub(crate) struct Config<'a> {
     pub(crate) working_directory: Option<&'a Path>,
     pub(crate) baseline: &'a Revision,
     pub(crate) candidate: &'a Revision,
-    pub(crate) suite_lifecycle: LifecycleConfig<'a>,
-    pub(crate) benchmark_lifecycle: LifecycleConfig<'a>,
+    pub(crate) suite_lifecycle: SuiteLifecycleConfig<'a>,
+    pub(crate) worktree_lifecycle: WorktreeLifecycleConfig<'a>,
+    pub(crate) benchmark_lifecycle: BenchmarkLifecycleConfig<'a>,
     pub(crate) command: &'a [OsString],
 }
 
-pub(crate) struct LifecycleConfig<'a> {
+pub(crate) struct SuiteLifecycleConfig<'a> {
+    pub(crate) startup: &'a [OsString],
+    pub(crate) teardown: &'a [OsString],
+}
+
+pub(crate) struct WorktreeLifecycleConfig<'a> {
+    pub(crate) startup: &'a [OsString],
+    pub(crate) teardown: &'a [OsString],
+}
+
+pub(crate) struct BenchmarkLifecycleConfig<'a> {
     pub(crate) startup: &'a [OsString],
     pub(crate) startup_each_run: &'a [OsString],
     pub(crate) teardown_each_run: &'a [OsString],
@@ -52,7 +63,19 @@ struct RevisionDto {
 }
 
 #[derive(Serialize)]
-struct LifecycleDto {
+struct SuiteLifecycleDto {
+    startup: Vec<String>,
+    teardown: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct WorktreeLifecycleDto {
+    startup: Vec<String>,
+    teardown: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct BenchmarkLifecycleDto {
     startup: Vec<String>,
     startup_each_run: Vec<String>,
     teardown_each_run: Vec<String>,
@@ -73,8 +96,9 @@ struct ConfigDto<'a> {
     foil_version: &'static str,
     baseline: RevisionDto,
     candidate: RevisionDto,
-    suite_lifecycle: LifecycleDto,
-    benchmark_lifecycle: LifecycleDto,
+    suite_lifecycle: SuiteLifecycleDto,
+    worktree_lifecycle: WorktreeLifecycleDto,
+    benchmark_lifecycle: BenchmarkLifecycleDto,
     command: Vec<String>,
 }
 
@@ -102,19 +126,15 @@ pub(crate) fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> 
             revision: config.candidate.name().to_owned(),
             hash: config.candidate.hash().to_owned(),
         },
-        suite_lifecycle: LifecycleDto {
+        suite_lifecycle: SuiteLifecycleDto {
             startup: utf8("suite startup", config.suite_lifecycle.startup)?,
-            startup_each_run: utf8(
-                "suite startup-each-run",
-                config.suite_lifecycle.startup_each_run,
-            )?,
-            teardown_each_run: utf8(
-                "suite teardown-each-run",
-                config.suite_lifecycle.teardown_each_run,
-            )?,
             teardown: utf8("suite teardown", config.suite_lifecycle.teardown)?,
         },
-        benchmark_lifecycle: LifecycleDto {
+        worktree_lifecycle: WorktreeLifecycleDto {
+            startup: utf8("worktree startup", config.worktree_lifecycle.startup)?,
+            teardown: utf8("worktree teardown", config.worktree_lifecycle.teardown)?,
+        },
+        benchmark_lifecycle: BenchmarkLifecycleDto {
             startup: utf8("benchmark startup", config.benchmark_lifecycle.startup)?,
             startup_each_run: utf8(
                 "benchmark startup-each-run",

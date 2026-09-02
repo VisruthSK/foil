@@ -14,7 +14,8 @@ mod worktree;
 
 pub use analysis::{Analysis, analyze_measurements};
 pub(crate) use artifact::{
-    Config, LifecycleConfig, MeasurementsCsv, write_config_json, write_posterior_csv,
+    BenchmarkLifecycleConfig, Config, MeasurementsCsv, SuiteLifecycleConfig,
+    WorktreeLifecycleConfig, write_config_json, write_posterior_csv,
 };
 pub use metric::{Metric, PeakMemory, Time, Unit};
 pub use posterior::{Draw, Posterior, Shrinkage};
