@@ -516,7 +516,9 @@ fn measure_one<W: std::io::Write>(
     log: &mut BenchmarkLog<W>,
     side: Side,
 ) -> Result<Measurement> {
-    log.phase(side, "suite startup");
+    if context.suite.startup.is_some() {
+        log.phase(side, "suite startup-each-run");
+    }
     let suite_start = run_in(
         context.session,
         context
@@ -569,7 +571,9 @@ fn measure_one<W: std::io::Write>(
             ),
         )
     });
-    log.phase(side, "suite teardown");
+    if context.suite.teardown.is_some() {
+        log.phase(side, "suite teardown-each-run");
+    }
     combine(
         body,
         run_in(

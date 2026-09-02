@@ -155,11 +155,13 @@ pub(crate) struct RunConfig {
     )]
     pub(crate) intervals: Vec<Interval>,
 
-    /// Working directory for the benchmark and lifecycle commands, relative to the worktree root.
+    /// Working directory for the benchmark command and lifecycle hooks that run within a benchmark,
+    /// relative to the worktree root.
     #[arg(long, value_name = "DIR", value_parser = parse_working_directory)]
     pub(crate) working_directory: Option<PathBuf>,
 
-    /// Environment variable for the benchmark and lifecycle commands, as `KEY=VALUE`.
+    /// Environment variable for the benchmark command and lifecycle hooks that run within a benchmark,
+    /// as `KEY=VALUE`.
     ///
     /// May be repeated. In a configuration file, may instead be given as a table.
     #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env)]
