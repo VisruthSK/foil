@@ -18,10 +18,12 @@ use toml::{Table, Value};
 const MIN_DRAWS: usize = 1_000;
 const DEFAULT_CONFIG: &str = "foil.toml";
 const BENCHMARKS: &str = "benchmarks";
-const OUTPUT_DIR: &str = "output-dir";
-const OUTPUT_DIR_ID: &str = "output_dir";
 const ENV: &str = "env";
 const ENV_ID: &str = "envs";
+const SUITE_STARTUP: &str = "suite-startup";
+const SUITE_TEARDOWN: &str = "suite-teardown";
+const WORKTREE_STARTUP: &str = "worktree-startup";
+const WORKTREE_TEARDOWN: &str = "worktree-teardown";
 const STARTUP: &str = "startup";
 const STARTUP_EACH_RUN: &str = "startup-each-run";
 const TEARDOWN_EACH_RUN: &str = "teardown-each-run";
@@ -35,22 +37,25 @@ const PER_BENCHMARK: [(&str, &str); 3] = [
     (ENV_ID, ENV),
 ];
 
-#[derive(Args, Default)]
-pub(crate) struct Lifecycle {
-    /// Command run once before this scope, e.g. `--startup make`.
-    #[arg(long, value_name = "COMMAND", num_args = 1..)]
+#[derive(Default)]
+pub(crate) struct SuiteLifecycle {
     pub(crate) startup: Vec<OsString>,
-
-    /// Command run before every measured command, outside its timed interval.
-    #[arg(long, value_name = "COMMAND", num_args = 1..)]
     pub(crate) startup_each_run: Vec<OsString>,
-
-    /// Command run after every measured command, outside its timed interval.
-    #[arg(long, value_name = "COMMAND", num_args = 1..)]
     pub(crate) teardown_each_run: Vec<OsString>,
+    pub(crate) teardown: Vec<OsString>,
+}
 
-    /// Command run once after this scope.
-    #[arg(long, value_name = "COMMAND", num_args = 1..)]
+#[derive(Default)]
+pub(crate) struct WorktreeLifecycle {
+    pub(crate) startup: Vec<OsString>,
+    pub(crate) teardown: Vec<OsString>,
+}
+
+#[derive(Default)]
+pub(crate) struct BenchmarkLifecycle {
+    pub(crate) startup: Vec<OsString>,
+    pub(crate) startup_each_run: Vec<OsString>,
+    pub(crate) teardown_each_run: Vec<OsString>,
     pub(crate) teardown: Vec<OsString>,
 }
 
@@ -71,7 +76,7 @@ pub(crate) struct Cli {
 
 #[derive(Args)]
 struct Selectors {
-    /// TOML file whose keys are the long names of the options above, or `command`.
+    /// TOML configuration file. May also define lifecycle hooks and named benchmarks.
     ///
     /// Defaults to `foil.toml`, which is read when present.
     #[arg(long, value_name = "FILE")]
@@ -143,21 +148,25 @@ pub(crate) struct RunConfig {
     pub(crate) timeout: Option<NonZeroU64>,
 
     /// Central credible interval widths.
-    #[arg(long = "interval", default_values = ["0.5", "0.8", "0.98"])]
+    #[arg(
+        long = "interval",
+        num_args = 1..,
+        default_values = ["0.5", "0.8", "0.9"]
+    )]
     pub(crate) intervals: Vec<Interval>,
 
-    /// Working directory for the benchmark and lifecycle commands, relative to the worktree root.
+    /// Working directory for the benchmark command and lifecycle hooks that run within a benchmark,
+    /// relative to the worktree root.
     #[arg(long, value_name = "DIR", value_parser = parse_working_directory)]
     pub(crate) working_directory: Option<PathBuf>,
 
-    /// Environment variable for the benchmark and lifecycle commands, as `KEY=VALUE`.
+    /// Environment variable for the benchmark command and lifecycle hooks that run within a benchmark,
+    /// as `KEY=VALUE`.
     ///
     /// May be repeated. In a configuration file, may instead be given as a table.
     #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env)]
     pub(crate) envs: Vec<(String, String)>,
 
-    #[command(flatten)]
-    pub(crate) lifecycle: Lifecycle,
     /// Benchmark program and arguments.
     ///
     /// Place the command after `--`, for example: `foil --output-dir benchmark/ --repetitions 10 -- Rscript benchmark.R`.
@@ -167,15 +176,22 @@ pub(crate) struct RunConfig {
 
 struct Configuration {
     path: PathBuf,
+    suite_lifecycle: SuiteLifecycle,
+    worktree_lifecycle: WorktreeLifecycle,
     top: Table,
     benchmarks: Table,
 }
 
 pub(crate) struct Suite {
     pub(crate) config: ResolvedSuiteConfig,
-    pub(crate) lifecycle: Lifecycle,
-    pub(crate) output_dir: PathBuf,
-    pub(crate) runs: Vec<(Option<String>, RunConfig)>,
+    pub(crate) lifecycle: SuiteLifecycle,
+    pub(crate) worktree_lifecycle: WorktreeLifecycle,
+    pub(crate) runs: Vec<(Option<String>, Benchmark)>,
+}
+
+pub(crate) struct Benchmark {
+    pub(crate) config: RunConfig,
+    pub(crate) lifecycle: BenchmarkLifecycle,
 }
 
 pub(crate) struct ResolvedSuiteConfig {
@@ -185,9 +201,9 @@ pub(crate) struct ResolvedSuiteConfig {
 }
 
 struct ResolvedCli {
-    cli: Cli,
-    benchmark_lifecycle: Lifecycle,
-    output_from_command_line: bool,
+    suite: SuiteConfig,
+    run: RunConfig,
+    benchmark_lifecycle: BenchmarkLifecycle,
 }
 
 impl Cli {
@@ -230,28 +246,19 @@ impl Cli {
                 .collect::<Result<_>>()?
         };
         let (_, first) = runs.first().expect("At least one run is always produced.");
-        let output_dir = if first.output_from_command_line {
-            first.cli.run.output_dir.clone()
-        } else {
-            match configuration.top.get(OUTPUT_DIR) {
-                Some(Value::String(text)) => Some(text.into()),
-                _ => None,
-            }
-            .unwrap_or_else(|| first.cli.run.output_dir.clone())
-        };
-        let baseline = Revision::resolve(first.cli.suite.baseline.clone())?;
-        let candidate = Revision::resolve(first.cli.suite.candidate.clone())?;
-        let seed = first.cli.suite.seed.unwrap_or_else(rand::random);
-        let mut suite_lifecycle = Lifecycle::default();
+        let baseline = Revision::resolve(first.suite.baseline.clone())?;
+        let candidate = Revision::resolve(first.suite.candidate.clone())?;
+        let seed = first.suite.seed.unwrap_or_else(rand::random);
         let runs = runs
             .into_iter()
-            .enumerate()
-            .map(|(index, (name, mut resolved))| {
-                if index == 0 {
-                    suite_lifecycle = std::mem::take(&mut resolved.cli.run.lifecycle);
-                }
-                resolved.cli.run.lifecycle = resolved.benchmark_lifecycle;
-                (name, resolved.cli.run)
+            .map(|(name, resolved)| {
+                (
+                    name,
+                    Benchmark {
+                        config: resolved.run,
+                        lifecycle: resolved.benchmark_lifecycle,
+                    },
+                )
             })
             .collect();
 
@@ -261,8 +268,8 @@ impl Cli {
                 candidate,
                 seed,
             },
-            lifecycle: suite_lifecycle,
-            output_dir,
+            lifecycle: configuration.suite_lifecycle,
+            worktree_lifecycle: configuration.worktree_lifecycle,
             runs,
         })
     }
@@ -339,9 +346,21 @@ fn read_config(path: Option<PathBuf>) -> Result<Configuration> {
         Some(Value::Table(benchmarks)) => benchmarks,
         Some(_) => bail!("{} must set `{BENCHMARKS}` to a table.", path.display()),
     };
+    let suite_lifecycle = SuiteLifecycle {
+        startup: take_command(&mut top, SUITE_STARTUP)?,
+        startup_each_run: take_command(&mut top, STARTUP_EACH_RUN)?,
+        teardown_each_run: take_command(&mut top, TEARDOWN_EACH_RUN)?,
+        teardown: take_command(&mut top, SUITE_TEARDOWN)?,
+    };
+    let worktree_lifecycle = WorktreeLifecycle {
+        startup: take_command(&mut top, WORKTREE_STARTUP)?,
+        teardown: take_command(&mut top, WORKTREE_TEARDOWN)?,
+    };
 
     Ok(Configuration {
         path,
+        suite_lifecycle,
+        worktree_lifecycle,
         top,
         benchmarks,
     })
@@ -351,22 +370,33 @@ fn validate_config(config: &Configuration) -> Result<()> {
     configure(Cli::command(), &config.path, &config.top)?;
 
     for (name, value) in &config.benchmarks {
-        let table = value.as_table().with_context(|| {
+        let mut table = value.as_table().cloned().with_context(|| {
             format!(
                 "{} must set benchmark `{name}` to a table.",
                 config.path.display()
             )
         })?;
-        if let Some(key) = table.keys().find(|key| option_in::<SuiteConfig>(key)) {
+        if let Some(key) = table
+            .keys()
+            .find(|key| option_in::<SuiteConfig>(key) || is_top_lifecycle_key(key))
+        {
             bail!(
                 "{} benchmark `{name}` cannot set suite-level `{key}`.",
                 config.path.display()
             );
         }
-        configure(Cli::command(), &config.path, table)?;
+        take_benchmark_lifecycle(&mut table)?;
+        configure(Cli::command(), &config.path, &table)?;
     }
 
     Ok(())
+}
+
+fn is_top_lifecycle_key(key: &str) -> bool {
+    matches!(
+        key,
+        SUITE_STARTUP | SUITE_TEARDOWN | WORKTREE_STARTUP | WORKTREE_TEARDOWN
+    )
 }
 
 fn option_in<A: Args>(key: &str) -> bool {
@@ -381,7 +411,7 @@ fn resolve(
     arguments: &[OsString],
 ) -> Result<ResolvedCli> {
     let mut values = config.top.clone();
-    let mut benchmark_lifecycle = Lifecycle::default();
+    let mut benchmark_lifecycle = BenchmarkLifecycle::default();
     if let Some(name) = benchmark {
         let mut overrides = config
             .benchmarks
@@ -391,7 +421,7 @@ fn resolve(
             .with_context(|| {
                 format!("{} has no benchmark named `{name}`.", config.path.display())
             })?;
-        benchmark_lifecycle = take_lifecycle(&mut overrides)?;
+        benchmark_lifecycle = take_benchmark_lifecycle(&mut overrides)?;
         if let (Some(Value::Table(base)), Some(Value::Table(over))) =
             (values.get(ENV), overrides.get(ENV))
         {
@@ -404,8 +434,6 @@ fn resolve(
 
     let command = configure(Cli::command(), &config.path, &values)?;
     let mut matches = command.get_matches_from(arguments);
-    let output_from_command_line =
-        matches.value_source(OUTPUT_DIR_ID) == Some(ValueSource::CommandLine);
     if let Some(name) = benchmark {
         for (id, key) in PER_BENCHMARK {
             ensure!(
@@ -415,32 +443,37 @@ fn resolve(
         }
     }
     let cli = Cli::from_arg_matches_mut(&mut matches).map_err(|error| error.exit())?;
+    let Cli {
+        suite,
+        run,
+        selectors: _,
+    } = cli;
 
     Ok(ResolvedCli {
-        cli,
+        suite,
+        run,
         benchmark_lifecycle,
-        output_from_command_line,
     })
 }
 
-fn take_lifecycle(table: &mut Table) -> Result<Lifecycle> {
-    fn command(table: &mut Table, key: &str) -> Result<Vec<OsString>> {
-        let Some(value) = table.remove(key) else {
-            return Ok(Vec::new());
-        };
-        let values = defaults(&value).with_context(|| format!("`{key}` is not a command list."))?;
-        Ok(values
-            .into_iter()
-            .map(|value| value.to_string().into())
-            .collect())
-    }
-
-    Ok(Lifecycle {
-        startup: command(table, STARTUP)?,
-        startup_each_run: command(table, STARTUP_EACH_RUN)?,
-        teardown_each_run: command(table, TEARDOWN_EACH_RUN)?,
-        teardown: command(table, TEARDOWN)?,
+fn take_benchmark_lifecycle(table: &mut Table) -> Result<BenchmarkLifecycle> {
+    Ok(BenchmarkLifecycle {
+        startup: take_command(table, STARTUP)?,
+        startup_each_run: take_command(table, STARTUP_EACH_RUN)?,
+        teardown_each_run: take_command(table, TEARDOWN_EACH_RUN)?,
+        teardown: take_command(table, TEARDOWN)?,
     })
+}
+
+fn take_command(table: &mut Table, key: &str) -> Result<Vec<OsString>> {
+    let Some(value) = table.remove(key) else {
+        return Ok(Vec::new());
+    };
+    let values = defaults(&value).with_context(|| format!("`{key}` is not a command list."))?;
+    Ok(values
+        .into_iter()
+        .map(|value| value.to_string().into())
+        .collect())
 }
 
 fn configure(mut command: Command, path: &Path, config: &Table) -> Result<Command> {
@@ -471,17 +504,11 @@ fn configure_value(command: Command, path: &Path, key: &str, value: &Value) -> R
             path.display()
         )
     })?;
-    if defaults.is_empty() {
-        ensure!(
-            matches!(
-                key,
-                STARTUP | STARTUP_EACH_RUN | TEARDOWN_EACH_RUN | TEARDOWN
-            ),
-            "{} sets `{key}` to an empty list.",
-            path.display()
-        );
-        return Ok(command);
-    }
+    ensure!(
+        !defaults.is_empty(),
+        "{} sets `{key}` to an empty list.",
+        path.display()
+    );
     ensure!(
         repeatable || defaults.len() == 1,
         "{} sets `{key}` to {} values, but it takes only one.",
@@ -550,9 +577,9 @@ fn parse_repetitions(text: &str) -> Result<NonZeroUsize> {
         .with_context(|| format!("`{text}` is not a positive integer."))?;
 
     ensure!(
-        repetitions.get() >= Repetitions::MINIMUM,
+        repetitions.get() >= Repetitions::<()>::MINIMUM,
         "At least {} repetitions are required.",
-        Repetitions::MINIMUM
+        Repetitions::<()>::MINIMUM
     );
 
     Ok(repetitions)

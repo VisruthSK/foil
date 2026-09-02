@@ -9,7 +9,7 @@ NB: `foil` is currently experimental, the API may change without warning.
 ## Usage
 
 ```sh
-foil --baseline main --candidate HEAD --repetitions 30 --interval 0.5 0.8 0.98 --output-dir benchmark/ -- cargo bench
+foil --baseline main --candidate HEAD --repetitions 30 --interval 0.5 0.8 0.9 --output-dir benchmark/ -- cargo bench
 ```
 
 Run `foil --help` for the full set of options.
@@ -27,7 +27,7 @@ baseline = "main"
 candidate = "HEAD"
 repetitions = 30
 block-size = 4
-interval = [0.5, 0.8, 0.98]
+interval = [0.5, 0.8, 0.9]
 output-dir = "benchmark/"
 ```
 
@@ -35,22 +35,26 @@ With that file, the run above is `foil -- cargo bench`. Arguments override the f
 
 Run order uses small-block randomization. The default `block-size = 4` gives each full block two baseline-first and two candidate-first pairs; `block-size = 1` is the minimum.
 
-Lifecycle commands surround the suite, each benchmark, or every measured run. Top-level `startup` and `teardown` run once in the original checkout around the whole suite. The same keys in a benchmark run once in each revision worktree around that benchmark. `startup-each-run` and `teardown-each-run` run outside every timed interval; suite and benchmark commands compose, with teardown unwinding in reverse order.
+Lifecycle hooks are configured only in TOML. `suite-startup` runs once in the original checkout before revision worktrees are created; `suite-teardown` runs there after every worktree has been removed. `worktree-startup` and `worktree-teardown` run once in each newly created baseline or candidate worktree. Top-level `startup-each-run` and `teardown-each-run` surround every measured command, while benchmark-local lifecycle hooks apply only to that benchmark.
 
 ```toml
-startup = ["docker", "compose", "up", "-d"]
-startup-each-run = ["reset-database"]
-teardown-each-run = ["collect-logs"]
-teardown = ["docker", "compose", "down"]
+suite-startup = ["docker", "compose", "up", "-d"]
+suite-teardown = ["docker", "compose", "down"]
+worktree-startup = ["git", "submodule", "update", "--init"]
+worktree-teardown = ["git", "clean", "-fdx"]
+startup-each-run = ["reset-global-state"]
+teardown-each-run = ["collect-global-state"]
 
 [benchmarks.parse]
 startup = ["cargo", "build", "--release"]
+startup-each-run = ["reset-database"]
+teardown-each-run = ["collect-logs"]
 command = ["./target/release/parse", "corpus/"]
 ```
 
-Benchmark lifecycle commands share the benchmark's `working-directory` and `env`. Successful lifecycle output is suppressed; failures report both nonempty streams under explicit labels. `foil` discards stdout and stderr from measured commands. If output is part of the workload, redirect it explicitly in the benchmark command. Teardown is still attempted after startup, benchmark, timeout, or interruption failures; the original error remains primary and additional cleanup errors are also reported.
+Benchmark lifecycle commands share the benchmark's `working-directory` and `env`. Their stdout and stderr are discarded, like measured commands'; redirect explicitly if the output matters. The first Ctrl-C interrupts active startup or benchmark work, then teardown unwinds on a protected cleanup wait. A second Ctrl-C exits immediately. Teardown is also attempted after startup, benchmark, or timeout failures; the original error remains primary and additional cleanup errors are reported alongside it. On macOS, containment uses a process group, which a descendant can deliberately escape with `setsid` or `setpgid`.
 
-A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override ordinary options, and anything it leaves unset, including `command`, is inherited from the top level. Lifecycle commands are not inherited: suite and benchmark lifecycles remain distinct and compose. Its `env` table is merged with the top-level one, variable by variable, with the benchmark's values winning on conflicts:
+A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override ordinary options, and anything it leaves unset, including `command`, is inherited from the top level. Benchmark lifecycle commands are local to that benchmark. Its `env` table is merged with the top-level one, variable by variable, with the benchmark's values winning on conflicts:
 
 ```toml
 repetitions = 10
@@ -68,7 +72,7 @@ command = ["cargo", "run", "--release", "--", "render"]
 RAYON_NUM_THREADS = "1"
 ```
 
-`foil --benchmark render` runs with 50 repetitions in `benchmarks/render`; `foil --benchmark parse` runs with the top-level 10. An explicit argument still overrides a benchmark's setting, except for `command`, `working-directory`, and `env`. Those define what a benchmark is, so one argument cannot sensibly stand in for all of the selected benchmarks, and passing one alongside a benchmark is an error. Lifecycle arguments apply to the suite.
+`foil --benchmark render` runs with 50 repetitions in `benchmarks/render`; `foil --benchmark parse` runs with the top-level 10. An explicit argument still overrides a benchmark's setting, except for `command`, `working-directory`, and `env`. Those define what a benchmark is, so one argument cannot sensibly stand in for all of the selected benchmarks, and passing one alongside a benchmark is an error. Lifecycle hooks are TOML-only.
 `working-directory` must be a relative path within the worktree; absolute paths and `..` are rejected.
 
 With no `--benchmark`, every benchmark in the table runs in declaration order, each in its own `--output-dir` subdirectory named after it. Pass `--benchmark render parse` to run only some of them in the order given. A configuration with no `[benchmarks]` table always runs a single, unnamed command, exactly as with no configuration file at all.
@@ -89,12 +93,7 @@ Each run writes to its output directory:
 
 Library callers can pass `measurements.csv` to `analyze_measurements`; the same seed, draw count, shrinkage, and intervals reproduce the CLI posterior exactly.
 
-Running more than one benchmark also prints a one-line-per-benchmark summary and writes it to `report_short.txt` in `--output-dir`:
-
-```
-parse: 1.2s -> 554.0ms [-52.41%, -51.31%]
-render: 3.1s -> 3.0s [-4.02%, +1.15%]
-```
+Named benchmark reports are prefixed with the benchmark name when printed.
 
 ## License
 

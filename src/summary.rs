@@ -74,6 +74,7 @@ pub struct Summary<M> {
     pub candidate: M,
     pub change: Change<M>,
     pub probability_candidate_lower: f64,
+    pub draws: usize,
 }
 
 impl<M: Metric> Summary<M> {
@@ -93,6 +94,7 @@ impl<M: Metric> Summary<M> {
             baseline: M::from_base(baseline.median()),
             candidate: M::from_base(candidate.median()),
             probability_candidate_lower: absolute.fraction_below(0.0),
+            draws: draws.len(),
             change: Change {
                 absolute_median: M::from_base(absolute.median()),
                 relative_median: relative.as_ref().map(Quantiles::median),
@@ -115,10 +117,11 @@ impl<M: Metric> Summary<M> {
 /// so `len() - 1` cannot underflow and every index is in range. NaN is rejected rather
 /// than sorted, because it would sit at one end under `total_cmp` while failing every
 /// comparison [`Self::fraction_below`] partitions on.
-struct Quantiles(Vec<f64>);
+pub(crate) struct Quantiles(Vec<f64>);
 
 impl Quantiles {
-    fn new(mut values: Vec<f64>) -> Result<Self> {
+    pub(crate) fn new(mut values: Vec<f64>) -> Result<Self> {
+        ensure!(!values.is_empty(), "Posterior is empty.");
         ensure!(
             !values.iter().any(|value| value.is_nan()),
             "Posterior contains NaN."
@@ -129,8 +132,17 @@ impl Quantiles {
         Ok(Self(values))
     }
 
-    fn at(&self, probability: f64) -> f64 {
-        self.0[((self.0.len() - 1) as f64 * probability).round() as usize]
+    pub(crate) fn at(&self, probability: f64) -> f64 {
+        debug_assert!((0.0..=1.0).contains(&probability));
+        let values = &self.0;
+        let h = (values.len() - 1) as f64 * probability;
+        let lo = h.floor() as usize;
+        let hi = h.ceil() as usize;
+        if lo == hi {
+            return values[lo];
+        }
+        let t = h - lo as f64;
+        values[lo] + t * (values[hi] - values[lo])
     }
 
     fn median(&self) -> f64 {
@@ -148,5 +160,27 @@ impl Quantiles {
 
     fn fraction_below(&self, threshold: f64) -> f64 {
         self.0.partition_point(|&value| value < threshold) as f64 / self.0.len() as f64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantiles_sort_and_interpolate() -> Result<()> {
+        let quantiles = Quantiles::new(vec![4.0, 1.0, 3.0, 2.0])?;
+
+        assert_eq!(quantiles.at(0.0), 1.0);
+        assert_eq!(quantiles.at(0.25), 1.75);
+        assert_eq!(quantiles.at(0.5), 2.5);
+        assert_eq!(quantiles.at(1.0), 4.0);
+        Ok(())
+    }
+
+    #[test]
+    fn quantiles_reject_empty_and_nan_inputs() {
+        assert!(Quantiles::new(Vec::new()).is_err());
+        assert!(Quantiles::new(vec![1.0, f64::NAN]).is_err());
     }
 }
