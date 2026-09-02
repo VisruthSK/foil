@@ -45,6 +45,7 @@ pub(crate) struct Workload {
     events: Vec<Event>,
     // Process groups do not contain descendants that call setsid() or setpgid().
     pgid: Pid,
+    exit_observed: bool,
     cleaned: bool,
 }
 
@@ -113,6 +114,7 @@ impl Workload {
                 Ok(_) => break,
                 Err(Errno::SRCH) => {
                     drain_interrupt(&interrupt.read)?;
+                    self.exit_observed = true;
                     return Ok(Wait::Exited);
                 }
                 Err(Errno::INTR) => continue,
@@ -135,6 +137,7 @@ impl Workload {
             }
         }
         if let Some(outcome) = ready(&self.events, interrupt)? {
+            self.exit_observed = matches!(outcome, Wait::Exited);
             return Ok(outcome);
         }
 
@@ -159,13 +162,15 @@ impl Workload {
                 return Ok(Wait::TimedOut);
             }
             if let Some(outcome) = ready(&self.events, interrupt)? {
+                self.exit_observed = matches!(outcome, Wait::Exited);
                 return Ok(outcome);
             }
         }
     }
 
     pub(crate) fn finish(mut self) -> Finished {
-        let (status, cleanup) = finish_process_group(&mut self.child, self.pgid);
+        let (status, cleanup) =
+            finish_process_group(&mut self.child, self.pgid, self.exit_observed);
         self.cleaned = cleanup.is_ok();
         Finished {
             status,
@@ -184,6 +189,7 @@ impl Prepared {
             kqueue: self.kqueue,
             events: self.events,
             pgid,
+            exit_observed: false,
             cleaned: false,
         })
     }
@@ -194,14 +200,18 @@ impl Drop for Workload {
         if self.cleaned {
             return;
         }
-        let _ = finish_process_group(&mut self.child, self.pgid);
+        let _ = finish_process_group(&mut self.child, self.pgid, self.exit_observed);
     }
 }
 
 fn finish_process_group(
     child: &mut Child,
     pgid: Pid,
+    exit_observed: bool,
 ) -> (io::Result<std::process::ExitStatus>, io::Result<()>) {
+    if exit_observed {
+        return (child.wait(), terminate_process_group(pgid));
+    }
     if let Ok(Some(status)) = child.try_wait() {
         return (Ok(status), terminate_process_group(pgid));
     }

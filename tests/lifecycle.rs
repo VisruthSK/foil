@@ -333,12 +333,7 @@ fn each_run_teardowns_run_after_a_failed_benchmark() -> Result<()> {
 
 #[test]
 fn removed_lifecycle_names_are_rejected() -> Result<()> {
-    for key in [
-        "setup",
-        "prepare",
-        "startup",
-        "teardown",
-    ] {
+    for key in ["setup", "prepare", "startup", "teardown"] {
         let project = project(&[("foil.toml", &format!("{REQUIRED}{key} = ['git']\n"))])?;
         let error = failure(&project, &[])?;
         assert!(

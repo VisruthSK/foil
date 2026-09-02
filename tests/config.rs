@@ -202,7 +202,10 @@ fn builtin_defaults_apply_without_a_configuration_file() -> Result<()> {
         "--teardown-each-run",
         "--teardown <",
     ] {
-        assert!(!help.contains(lifecycle), "{lifecycle} is present in\n{help}");
+        assert!(
+            !help.contains(lifecycle),
+            "{lifecycle} is present in\n{help}"
+        );
     }
 
     Ok(())

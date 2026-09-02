@@ -154,6 +154,9 @@ fn execute_suite(
     let result = (|| {
         for (index, (name, benchmark)) in runs.into_iter().enumerate() {
             ensure!(!interrupted(), "Interrupted.");
+            if index != 0 {
+                println!();
+            }
             let heading = name.as_deref();
             if benchmark.config.isolate {
                 let worktrees =
@@ -164,7 +167,6 @@ fn execute_suite(
                     benchmark,
                     &worktrees.pair,
                     heading,
-                    index != 0,
                     interrupts,
                     session,
                 );
@@ -176,7 +178,6 @@ fn execute_suite(
                     benchmark,
                     &shared.as_ref().expect("shared worktrees were created").pair,
                     heading,
-                    index != 0,
                     interrupts,
                     session,
                 )?;
@@ -318,7 +319,6 @@ fn compare(
     benchmark_config: Benchmark,
     worktrees: &Pair<Worktree>,
     heading: Option<&str>,
-    separate_report: bool,
     interrupts: &Interrupts,
     session: &mut Session,
 ) -> Result<Summary<Time>> {
@@ -448,9 +448,6 @@ fn compare(
         worktrees.baseline.revision().name(),
         draws.get(),
     );
-    if separate_report {
-        println!();
-    }
     print!("{report}");
 
     let report_path = output_dir.join("report.txt");
