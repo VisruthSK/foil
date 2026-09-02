@@ -35,13 +35,15 @@ With that file, the run above is `foil -- cargo bench`. Arguments override the f
 
 Run order uses small-block randomization. The default `block-size = 4` gives each full block two baseline-first and two candidate-first pairs; `block-size = 1` is the minimum.
 
-Lifecycle names identify their execution scope. `suite-startup` runs once in the original checkout before revision worktrees are created; `suite-teardown` runs there after every worktree has been removed. `worktree-startup` and `worktree-teardown` run once in each newly created baseline or candidate worktree. Benchmark-local `startup` and `teardown` run once per benchmark on each side, while `startup-each-run` and `teardown-each-run` surround every measured command outside its timed interval.
+Lifecycle hooks are configured only in TOML. `suite-startup` runs once in the original checkout before revision worktrees are created; `suite-teardown` runs there after every worktree has been removed. `worktree-startup` and `worktree-teardown` run once in each newly created baseline or candidate worktree. Top-level `startup-each-run` and `teardown-each-run` surround every measured command, while benchmark-local lifecycle hooks apply only to that benchmark.
 
 ```toml
 suite-startup = ["docker", "compose", "up", "-d"]
 suite-teardown = ["docker", "compose", "down"]
 worktree-startup = ["git", "submodule", "update", "--init"]
 worktree-teardown = ["git", "clean", "-fdx"]
+startup-each-run = ["reset-global-state"]
+teardown-each-run = ["collect-global-state"]
 
 [benchmarks.parse]
 startup = ["cargo", "build", "--release"]

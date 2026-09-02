@@ -257,6 +257,8 @@ fn successful_lifecycle_output_is_suppressed() -> Result<()> {
          suite-teardown = ['git', '--version']\n\
          worktree-startup = ['git', '--version']\n\
          worktree-teardown = ['git', '--version']\n\
+         startup-each-run = ['git', '--version']\n\
+         teardown-each-run = ['git', '--version']\n\
          [benchmarks.test]\n\
          startup = ['git', '--version']\n\
          teardown = ['git', '--version']\n\
@@ -272,6 +274,8 @@ fn successful_lifecycle_output_is_suppressed() -> Result<()> {
         project.path().join("bench/test/config.json"),
     )?)?;
     assert_eq!(config["suite_lifecycle"]["startup"][0], "git");
+    assert_eq!(config["suite_lifecycle"]["startup_each_run"][0], "git");
+    assert_eq!(config["suite_lifecycle"]["teardown_each_run"][0], "git");
     assert_eq!(config["suite_lifecycle"]["teardown"][0], "git");
     assert_eq!(config["worktree_lifecycle"]["startup"][0], "git");
     assert_eq!(config["worktree_lifecycle"]["teardown"][0], "git");
@@ -282,10 +286,11 @@ fn successful_lifecycle_output_is_suppressed() -> Result<()> {
 }
 
 #[test]
-fn benchmark_each_run_startup_runs_before_each_measurement() -> Result<()> {
+fn suite_and_benchmark_each_run_startups_compose() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}[benchmarks.test]\n\
-         startup-each-run = ['git', 'config', '--file', 'marker.txt', 'benchmark.ran', 'yes']\n\
+        "{PREAMBLE}startup-each-run = ['git', 'config', '--file', 'marker.txt', 'suite.ran', 'yes']\n\
+         [benchmarks.test]\n\
+         startup-each-run = ['git', 'config', '--file', 'marker.txt', '--rename-section', 'suite', 'benchmark']\n\
          command = ['git', 'config', '--file', 'marker.txt', '--get-regexp', '^benchmark.ran$', '^yes$']\n"
     ))?;
 
@@ -295,9 +300,10 @@ fn benchmark_each_run_startup_runs_before_each_measurement() -> Result<()> {
 }
 
 #[test]
-fn benchmark_each_run_teardown_runs_after_a_failed_benchmark() -> Result<()> {
+fn each_run_teardowns_run_after_a_failed_benchmark() -> Result<()> {
     let project = repository(&format!(
-        "{PREAMBLE}[benchmarks.test]\n\
+        "{PREAMBLE}teardown-each-run = ['git', 'tag', '--force', 'suite-each-run-torn-down']\n\
+         [benchmarks.test]\n\
          teardown-each-run = ['git', 'tag', '--force', 'benchmark-each-run-torn-down']\n\
          command = ['git', 'cat-file', '-p', 'absent-object']\n"
     ))?;
@@ -313,6 +319,14 @@ fn benchmark_each_run_teardown_runs_after_a_failed_benchmark() -> Result<()> {
             "refs/tags/benchmark-each-run-torn-down",
         ],
     )?;
+    git(
+        &project,
+        &[
+            "rev-parse",
+            "--verify",
+            "refs/tags/suite-each-run-torn-down",
+        ],
+    )?;
 
     Ok(())
 }
@@ -324,8 +338,6 @@ fn removed_lifecycle_names_are_rejected() -> Result<()> {
         "prepare",
         "startup",
         "teardown",
-        "startup-each-run",
-        "teardown-each-run",
     ] {
         let project = project(&[("foil.toml", &format!("{REQUIRED}{key} = ['git']\n"))])?;
         let error = failure(&project, &[])?;

@@ -2,9 +2,9 @@ repetitions = 30
 block-size = 4
 output-dir = "benchmark/results"
 timeout = 1800
+worktree-startup = ["cargo", "fetch", "--locked"]
 
 [benchmarks.release-compile]
-startup = ["cargo", "fetch", "--locked"]
 startup-each-run = ["cargo", "clean", "--release"]
 command = ["cargo", "build", "--release", "--locked", "--offline"]
 

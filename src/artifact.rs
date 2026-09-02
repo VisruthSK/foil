@@ -30,6 +30,8 @@ pub(crate) struct Config<'a> {
 
 pub(crate) struct SuiteLifecycleConfig<'a> {
     pub(crate) startup: &'a [OsString],
+    pub(crate) startup_each_run: &'a [OsString],
+    pub(crate) teardown_each_run: &'a [OsString],
     pub(crate) teardown: &'a [OsString],
 }
 
@@ -65,6 +67,8 @@ struct RevisionDto {
 #[derive(Serialize)]
 struct SuiteLifecycleDto {
     startup: Vec<String>,
+    startup_each_run: Vec<String>,
+    teardown_each_run: Vec<String>,
     teardown: Vec<String>,
 }
 
@@ -128,6 +132,14 @@ pub(crate) fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> 
         },
         suite_lifecycle: SuiteLifecycleDto {
             startup: utf8("suite startup", config.suite_lifecycle.startup)?,
+            startup_each_run: utf8(
+                "suite startup-each-run",
+                config.suite_lifecycle.startup_each_run,
+            )?,
+            teardown_each_run: utf8(
+                "suite teardown-each-run",
+                config.suite_lifecycle.teardown_each_run,
+            )?,
             teardown: utf8("suite teardown", config.suite_lifecycle.teardown)?,
         },
         worktree_lifecycle: WorktreeLifecycleDto {

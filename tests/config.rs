@@ -47,7 +47,12 @@ fn a_complete_configuration_runs_without_any_arguments() -> Result<()> {
     assert_eq!(config["intervals"], serde_json::json!([0.5, 0.8, 0.9]));
     assert_eq!(
         config["suite_lifecycle"],
-        serde_json::json!({"startup": [], "teardown": []})
+        serde_json::json!({
+            "startup": [],
+            "startup_each_run": [],
+            "teardown_each_run": [],
+            "teardown": []
+        })
     );
     assert_eq!(
         config["worktree_lifecycle"],
@@ -187,11 +192,57 @@ fn builtin_defaults_apply_without_a_configuration_file() -> Result<()> {
         "--worktree-teardown",
     ] {
         assert!(
-            help.contains(lifecycle),
-            "{lifecycle} is missing from\n{help}"
+            !help.contains(lifecycle),
+            "{lifecycle} is present in\n{help}"
         );
     }
-    assert!(!help.contains("--startup <"), "{help}");
+    for lifecycle in [
+        "--startup <",
+        "--startup-each-run",
+        "--teardown-each-run",
+        "--teardown <",
+    ] {
+        assert!(!help.contains(lifecycle), "{lifecycle} is present in\n{help}");
+    }
+
+    Ok(())
+}
+
+#[test]
+fn lifecycle_hooks_are_toml_only_and_preserve_command_arguments() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}suite-startup = []\n\
+         suite-teardown = []\n\
+         worktree-startup = ['git', '--version']\n\
+         worktree-teardown = []\n\
+         startup-each-run = []\n\
+         teardown-each-run = []\n\
+         [benchmarks.test]\n\
+         startup = []\n\
+         startup-each-run = []\n\
+         teardown-each-run = []\n\
+         teardown = []\n\
+         command = ['git', '--version']\n"
+    ))?;
+    let (succeeded, _, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "foil failed with {stderr}");
+
+    let config: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+        project.path().join("bench/test/config.json"),
+    )?)?;
+    assert_eq!(
+        config["worktree_lifecycle"]["startup"],
+        serde_json::json!(["git", "--version"])
+    );
+    assert_eq!(config["suite_lifecycle"]["startup"], serde_json::json!([]));
+    assert_eq!(
+        config["suite_lifecycle"]["startup_each_run"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        config["benchmark_lifecycle"]["startup_each_run"],
+        serde_json::json!([])
+    );
 
     Ok(())
 }

@@ -40,6 +40,8 @@ const PER_BENCHMARK: [(&str, &str); 3] = [
 #[derive(Default)]
 pub(crate) struct SuiteLifecycle {
     pub(crate) startup: Vec<OsString>,
+    pub(crate) startup_each_run: Vec<OsString>,
+    pub(crate) teardown_each_run: Vec<OsString>,
     pub(crate) teardown: Vec<OsString>,
 }
 
@@ -74,7 +76,7 @@ pub(crate) struct Cli {
 
 #[derive(Args)]
 struct Selectors {
-    /// TOML file whose keys are the long names of the options above, or `command`.
+    /// TOML configuration file. May also define lifecycle hooks and named benchmarks.
     ///
     /// Defaults to `foil.toml`, which is read when present.
     #[arg(long, value_name = "FILE")]
@@ -344,6 +346,8 @@ fn read_config(path: Option<PathBuf>) -> Result<Configuration> {
     };
     let suite_lifecycle = SuiteLifecycle {
         startup: take_command(&mut top, SUITE_STARTUP)?,
+        startup_each_run: take_command(&mut top, STARTUP_EACH_RUN)?,
+        teardown_each_run: take_command(&mut top, TEARDOWN_EACH_RUN)?,
         teardown: take_command(&mut top, SUITE_TEARDOWN)?,
     };
     let worktree_lifecycle = WorktreeLifecycle {
@@ -498,17 +502,11 @@ fn configure_value(command: Command, path: &Path, key: &str, value: &Value) -> R
             path.display()
         )
     })?;
-    if defaults.is_empty() {
-        ensure!(
-            matches!(
-                key,
-                STARTUP | STARTUP_EACH_RUN | TEARDOWN_EACH_RUN | TEARDOWN
-            ),
-            "{} sets `{key}` to an empty list.",
-            path.display()
-        );
-        return Ok(command);
-    }
+    ensure!(
+        !defaults.is_empty(),
+        "{} sets `{key}` to an empty list.",
+        path.display()
+    );
     ensure!(
         repeatable || defaults.len() == 1,
         "{} sets `{key}` to {} values, but it takes only one.",

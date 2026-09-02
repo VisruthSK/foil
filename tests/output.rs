@@ -45,6 +45,33 @@ fn every_named_benchmark_runs_by_default() -> Result<()> {
 }
 
 #[test]
+fn benchmark_reports_are_separated_by_one_blank_line() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+         candidate = 'HEAD'\n\
+         output-dir = 'bench'\n\
+         repetitions = 10\n\
+         draws = 1000\n\
+         seed = 0\n\
+         [benchmarks.first]\n\
+         command = ['git', '--version']\n\
+         [benchmarks.second]\n\
+         command = ['git', '--version']\n",
+    )?;
+    let (succeeded, stdout, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "foil failed with {stderr}");
+
+    let second = stdout
+        .find("second: Comparing candidate")
+        .expect("second report is missing");
+    let before_second = &stdout[..second];
+    assert!(before_second.ends_with("\n\n"), "{stdout}");
+    assert!(!before_second.ends_with("\n\n\n"), "{stdout}");
+
+    Ok(())
+}
+
+#[test]
 fn a_single_benchmark_argument_selects_a_subset() -> Result<()> {
     let project = repository(SUITE)?;
     let (succeeded, _, stderr) = run(&project, &["--benchmark", "first", "third"])?;
