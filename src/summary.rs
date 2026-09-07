@@ -23,6 +23,24 @@ impl Interval {
         (tail, 1.0 - tail)
     }
 
+    /// Rejects widths whose tails are narrower than one repetition's share of the
+    /// posterior, i.e. anything above `1 - 2/pairs`. Ten pairs cap the width at 80%.
+    pub fn validate_for_pairs(self, pairs: usize) -> Result<Self> {
+        let widest = 100.0 * (pairs - 2) as f64 / pairs as f64;
+
+        ensure!(
+            self.percent() <= widest + 1e-6,
+            "A {:.0}% interval needs each tail to span at least one of the {} paired \
+             repetitions; the widest supported interval at {} repetitions is {:.0}%.",
+            self.percent(),
+            pairs,
+            pairs,
+            widest
+        );
+
+        Ok(self)
+    }
+
     pub fn percent(self) -> f64 {
         100.0 * self.0
     }
@@ -74,6 +92,7 @@ pub struct Summary<M> {
     pub candidate: M,
     pub change: Change<M>,
     pub probability_candidate_lower: f64,
+    pub draws: usize,
 }
 
 impl<M: Metric> Summary<M> {
@@ -93,6 +112,7 @@ impl<M: Metric> Summary<M> {
             baseline: M::from_base(baseline.median()),
             candidate: M::from_base(candidate.median()),
             probability_candidate_lower: absolute.fraction_below(0.0),
+            draws: draws.len(),
             change: Change {
                 absolute_median: M::from_base(absolute.median()),
                 relative_median: relative.as_ref().map(Quantiles::median),
@@ -115,10 +135,11 @@ impl<M: Metric> Summary<M> {
 /// so `len() - 1` cannot underflow and every index is in range. NaN is rejected rather
 /// than sorted, because it would sit at one end under `total_cmp` while failing every
 /// comparison [`Self::fraction_below`] partitions on.
-struct Quantiles(Vec<f64>);
+pub(crate) struct Quantiles(Vec<f64>);
 
 impl Quantiles {
-    fn new(mut values: Vec<f64>) -> Result<Self> {
+    pub(crate) fn new(mut values: Vec<f64>) -> Result<Self> {
+        ensure!(!values.is_empty(), "Posterior is empty.");
         ensure!(
             !values.iter().any(|value| value.is_nan()),
             "Posterior contains NaN."
@@ -129,8 +150,17 @@ impl Quantiles {
         Ok(Self(values))
     }
 
-    fn at(&self, probability: f64) -> f64 {
-        self.0[((self.0.len() - 1) as f64 * probability).round() as usize]
+    pub(crate) fn at(&self, probability: f64) -> f64 {
+        debug_assert!((0.0..=1.0).contains(&probability));
+        let values = &self.0;
+        let h = (values.len() - 1) as f64 * probability;
+        let lo = h.floor() as usize;
+        let hi = h.ceil() as usize;
+        if lo == hi {
+            return values[lo];
+        }
+        let t = h - lo as f64;
+        values[lo] + t * (values[hi] - values[lo])
     }
 
     fn median(&self) -> f64 {
@@ -148,5 +178,43 @@ impl Quantiles {
 
     fn fraction_below(&self, threshold: f64) -> f64 {
         self.0.partition_point(|&value| value < threshold) as f64 / self.0.len() as f64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantiles_sort_and_interpolate() -> Result<()> {
+        let quantiles = Quantiles::new(vec![4.0, 1.0, 3.0, 2.0])?;
+
+        assert_eq!(quantiles.at(0.0), 1.0);
+        assert_eq!(quantiles.at(0.25), 1.75);
+        assert_eq!(quantiles.at(0.5), 2.5);
+        assert_eq!(quantiles.at(1.0), 4.0);
+        Ok(())
+    }
+
+    #[test]
+    fn quantiles_reject_empty_and_nan_inputs() {
+        assert!(Quantiles::new(Vec::new()).is_err());
+        assert!(Quantiles::new(vec![1.0, f64::NAN]).is_err());
+    }
+
+    #[test]
+    fn an_interval_at_the_repetition_boundary_is_accepted() -> Result<()> {
+        Interval::new(0.8)?.validate_for_pairs(10)?;
+        Ok(())
+    }
+
+    #[test]
+    fn an_interval_wider_than_the_repetitions_support_is_rejected() -> Result<()> {
+        let error = Interval::new(0.9)?
+            .validate_for_pairs(10)
+            .expect_err("90% exceeds what ten pairs support");
+
+        assert!(error.to_string().contains("80%"), "{error}");
+        Ok(())
     }
 }

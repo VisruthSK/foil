@@ -7,6 +7,7 @@ use std::{
 pub(crate) struct Worktree {
     path: PathBuf,
     revision: Revision,
+    removed: bool,
 }
 
 #[derive(Clone)]
@@ -26,7 +27,8 @@ impl Revision {
             .context("Failed to run git.")?;
         anyhow::ensure!(
             output.status.success(),
-            "Git could not resolve {name} to a commit."
+            "Git could not resolve {name} to a commit: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
         );
         let hash = String::from_utf8(output.stdout)
             .context("Git returned a non-UTF-8 commit hash.")?
@@ -70,7 +72,11 @@ impl Worktree {
             revision.hash()
         );
 
-        Ok(Self { path, revision })
+        Ok(Self {
+            path,
+            revision,
+            removed: false,
+        })
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -80,31 +86,35 @@ impl Worktree {
     pub(crate) fn revision(&self) -> &Revision {
         &self.revision
     }
+
+    pub(crate) fn remove(mut self) -> Result<()> {
+        remove_worktree(&self.path)?;
+        self.removed = true;
+        Ok(())
+    }
+}
+
+fn remove_worktree(path: &Path) -> Result<()> {
+    let status = Command::new("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(path)
+        .status()
+        .context("Failed to run git worktree remove.")?;
+    anyhow::ensure!(
+        status.success(),
+        "Git worktree remove failed for {} with {status}.",
+        path.display()
+    );
+    Ok(())
 }
 
 impl Drop for Worktree {
     fn drop(&mut self) {
-        let result = Command::new("git")
-            .args(["worktree", "remove", "--force"])
-            .arg(&self.path)
-            .status();
-
-        match result {
-            Ok(status) if status.success() => {}
-
-            Ok(status) => {
-                eprintln!(
-                    "Failed to remove worktree {} with {status}.",
-                    self.path.display()
-                );
-            }
-
-            Err(error) => {
-                eprintln!(
-                    "Failed to run git while removing {}: {error}.",
-                    self.path.display()
-                );
-            }
+        if self.removed {
+            return;
+        }
+        if let Err(error) = remove_worktree(&self.path) {
+            eprintln!("{error:#}");
         }
     }
 }
