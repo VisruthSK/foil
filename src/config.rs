@@ -6,6 +6,7 @@ use clap::{
     parser::ValueSource,
 };
 use std::{
+    collections::HashSet,
     env,
     ffi::OsString,
     fs,
@@ -231,6 +232,13 @@ impl Cli {
         let names = if selectors.benchmarks.is_empty() {
             configuration.benchmarks.keys().cloned().collect()
         } else {
+            let mut seen = HashSet::new();
+            for name in &selectors.benchmarks {
+                ensure!(
+                    seen.insert(name.as_str()),
+                    "Benchmark `{name}` was selected more than once."
+                );
+            }
             selectors.benchmarks
         };
 
@@ -469,11 +477,18 @@ fn take_command(table: &mut Table, key: &str) -> Result<Vec<OsString>> {
     let Some(value) = table.remove(key) else {
         return Ok(Vec::new());
     };
-    let values = defaults(&value).with_context(|| format!("`{key}` is not a command list."))?;
-    Ok(values
-        .into_iter()
-        .map(|value| value.to_string().into())
-        .collect())
+    let values = value
+        .as_array()
+        .with_context(|| format!("`{key}` is not a command list."))?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(OsString::from)
+                .with_context(|| format!("`{key}` is not a command list."))
+        })
+        .collect()
 }
 
 fn configure(mut command: Command, path: &Path, config: &Table) -> Result<Command> {
@@ -532,7 +547,14 @@ fn defaults(value: &Value) -> Option<Vec<Str>> {
         Value::Array(array) => array.iter().map(scalar).collect(),
         Value::Table(table) => table
             .iter()
-            .map(|(key, value)| Some(format!("{key}={}", value.as_str()?).into()))
+            .map(|(key, value)| {
+                let value = value.as_str()?;
+                (!key.is_empty()
+                    && !key.contains('=')
+                    && !key.contains('\0')
+                    && !value.contains('\0'))
+                .then(|| format!("{key}={value}").into())
+            })
             .collect(),
         value => Some(vec![scalar(value)?]),
     }
@@ -553,6 +575,10 @@ fn parse_env(text: &str) -> Result<(String, String)> {
     ensure!(
         !key.is_empty(),
         "Environment variable name cannot be empty."
+    );
+    ensure!(
+        !key.contains('\0') && !value.contains('\0'),
+        "Environment variables cannot contain NUL bytes."
     );
 
     Ok((key.to_owned(), value.to_owned()))

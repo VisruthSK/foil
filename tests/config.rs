@@ -216,7 +216,7 @@ fn lifecycle_hooks_are_toml_only_and_preserve_command_arguments() -> Result<()> 
     let project = repository(&format!(
         "{PREAMBLE}suite-startup = []\n\
          suite-teardown = []\n\
-         worktree-startup = ['git', '--version']\n\
+         worktree-startup = ['cargo', 'fetch', '--locked']\n\
          worktree-teardown = []\n\
          startup-each-run = []\n\
          teardown-each-run = []\n\
@@ -227,6 +227,17 @@ fn lifecycle_hooks_are_toml_only_and_preserve_command_arguments() -> Result<()> 
          teardown = []\n\
          command = ['git', '--version']\n"
     ))?;
+    fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = 'fixture'\nversion = '0.0.0'\nedition = '2024'\n[lib]\npath = 'lib.rs'\n",
+    )?;
+    fs::write(project.path().join("lib.rs"), "")?;
+    fs::write(
+        project.path().join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"fixture\"\nversion = \"0.0.0\"\n",
+    )?;
+    git(&project, &["add", "Cargo.toml", "Cargo.lock", "lib.rs"])?;
+    git(&project, &["commit", "--quiet", "--message", "add fixture"])?;
     let (succeeded, _, stderr) = run(&project, &[])?;
     ensure!(succeeded, "foil failed with {stderr}");
 
@@ -235,7 +246,7 @@ fn lifecycle_hooks_are_toml_only_and_preserve_command_arguments() -> Result<()> 
     )?)?;
     assert_eq!(
         config["worktree_lifecycle"]["startup"],
-        serde_json::json!(["git", "--version"])
+        serde_json::json!(["cargo", "fetch", "--locked"])
     );
     assert_eq!(config["suite_lifecycle"]["startup"], serde_json::json!([]));
     assert_eq!(
@@ -390,6 +401,15 @@ fn unusable_configurations_are_reported() -> Result<()> {
         ("interval = []", "sets `interval` to an empty list"),
         ("command = []", "sets `command` to an empty list"),
         (
+            "suite-startup = 42",
+            "`suite-startup` is not a command list",
+        ),
+        (
+            "suite-startup = ['echo', 42]",
+            "`suite-startup` is not a command list",
+        ),
+        ("env = { 'A=B' = 'value' }", "must set `env`"),
+        (
             "baseline = ['a', 'b']",
             "sets `baseline` to 2 values, but it takes only one",
         ),
@@ -534,6 +554,22 @@ fn a_benchmarks_own_options_cannot_be_passed_as_arguments() -> Result<()> {
             "{arguments:?} gave {error}"
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn a_benchmark_cannot_be_selected_twice() -> Result<()> {
+    let project = project(&[(
+        "foil.toml",
+        "[benchmarks.parse]\ncommand = ['git', '--version']\n",
+    )])?;
+    let error = failure(&project, &["--benchmark", "parse", "parse"])?;
+
+    assert!(
+        error.contains("Benchmark `parse` was selected more than once."),
+        "{error}"
+    );
 
     Ok(())
 }

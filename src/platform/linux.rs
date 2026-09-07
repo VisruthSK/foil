@@ -177,9 +177,8 @@ impl Workload {
     pub(crate) fn finish(mut self) -> Finished {
         let killed = kill(&self.ordinary);
         let fallback = killed.as_ref().err().map(|_| self.child.kill());
-        let terminated = killed.is_ok() || fallback.as_ref().is_some_and(Result::is_ok);
         let status = reap_after_kill(&mut self.child, &killed, fallback.as_ref());
-        let emptied = wait_after_kill(&self.ordinary, terminated);
+        let emptied = wait_after_kill(&self.ordinary, killed.is_ok());
         let cleanup = combine_cleanup(killed, fallback, emptied);
         self.cleaned = cleanup.is_ok();
 
@@ -200,9 +199,8 @@ impl Prepared {
             Err(error) => {
                 let killed = kill(&self.ordinary);
                 let fallback = killed.as_ref().err().map(|_| child.kill());
-                let terminated = killed.is_ok() || fallback.as_ref().is_some_and(Result::is_ok);
                 let reaped = reap_after_kill(&mut child, &killed, fallback.as_ref()).map(drop);
-                let emptied = wait_after_kill(&self.ordinary, terminated);
+                let emptied = wait_after_kill(&self.ordinary, killed.is_ok());
                 report_secondary(
                     combine_cleanup(killed, fallback, combine_errors(reaped, emptied)),
                     "cgroup cleanup",

@@ -96,6 +96,8 @@ fn a_lone_benchmark_prints_full_report() -> Result<()> {
     ensure!(succeeded, "foil failed with {stderr}");
 
     assert!(stdout.contains("parse: Comparing candidate"), "{stdout}");
+    assert!(stdout.ends_with("draws)\n"), "{stdout}");
+    assert!(!stdout.ends_with("draws)\n\n"), "{stdout}");
 
     let bench = project.path().join("bench");
     assert!(bench.join("parse").join("report.txt").is_file());

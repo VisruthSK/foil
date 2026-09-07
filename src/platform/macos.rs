@@ -13,7 +13,7 @@ use rustix::event::kqueue::{Event, EventFilter, EventFlags, ProcessEvents, keven
 use rustix::fs::{OFlags, fcntl_setfl};
 use rustix::io::{Errno, FdFlags, fcntl_setfd, write};
 use rustix::pipe::pipe;
-use rustix::process::{Pid, Signal, kill_process_group};
+use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 
 #[derive(Clone)]
 pub(crate) struct Interrupt {
@@ -210,16 +210,23 @@ fn finish_process_group(
     exit_observed: bool,
 ) -> (io::Result<std::process::ExitStatus>, io::Result<()>) {
     if exit_observed {
-        return (child.wait(), terminate_process_group(pgid));
-    }
-    if let Ok(Some(status)) = child.try_wait() {
-        return (Ok(status), terminate_process_group(pgid));
+        // Keep the exited leader unreaped while sending SIGKILL so its numeric
+        // PGID cannot be recycled. Darwin also reports EPERM for zombie-only
+        // groups, so reap the known-dead leader before proving the group is gone.
+        let killed = kill_process_group(pgid, Signal::KILL);
+        let status = child.wait();
+        let cleanup = match killed {
+            Ok(()) | Err(Errno::SRCH) => Ok(()),
+            Err(Errno::PERM) => ensure_process_group_gone(pgid),
+            Err(error) => Err(error.into()),
+        };
+        return (status, cleanup);
     }
 
     let terminated = match kill_process_group(pgid, Signal::KILL) {
         Ok(()) => Ok(()),
         Err(Errno::PERM) => match child.try_wait() {
-            Ok(Some(status)) => return (Ok(status), terminate_process_group(pgid)),
+            Ok(Some(status)) => return (Ok(status), ensure_process_group_gone(pgid)),
             _ => Err(io::Error::from(Errno::PERM)),
         },
         Err(Errno::SRCH) => match child.try_wait() {
@@ -240,9 +247,10 @@ fn finish_process_group(
     (status, cleanup)
 }
 
-fn terminate_process_group(pgid: Pid) -> io::Result<()> {
-    match kill_process_group(pgid, Signal::KILL) {
-        Ok(()) | Err(Errno::SRCH) => Ok(()),
+fn ensure_process_group_gone(pgid: Pid) -> io::Result<()> {
+    match test_kill_process_group(pgid) {
+        Err(Errno::SRCH) => Ok(()),
+        Ok(()) => Err(io::Error::other("process group survived failed cleanup")),
         Err(error) => Err(error.into()),
     }
 }
@@ -314,6 +322,29 @@ mod tests {
             rustix::io::read(&*interrupt.read, &mut [0]),
             Err(Errno::AGAIN)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn esrch_registration_consumes_a_pending_interrupt() -> Result<()> {
+        let mut session = Session::new()?;
+        let interrupt = Interrupt::new()?;
+        let mut workload = session
+            .prepare(&spec("platform::macos::tests::fast_child")?)?
+            .spawn()?;
+        ensure!(workload.child.wait()?.success());
+
+        interrupt.signal();
+        ensure!(matches!(workload.wait(&interrupt, None)?, Wait::Exited));
+        ensure!(matches!(
+            rustix::io::read(&*interrupt.read, &mut [0]),
+            Err(Errno::AGAIN)
+        ));
+
+        let finished = workload.finish();
+        ensure!(finished.status?.success());
+        finished.cleanup?;
+        session.shutdown()?;
         Ok(())
     }
 

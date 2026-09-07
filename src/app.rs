@@ -6,8 +6,8 @@ use crate::config::{
 use crate::platform::{CommandSpec, Interrupt, Session};
 use crate::{
     BenchmarkLifecycleConfig, BenchmarkLog, CommandTemplate, Config, Measurement, MeasurementsCsv,
-    Pair, Repetition, Repetitions, Revision, RunOrder, Side, SuiteLifecycleConfig, Summary, Time,
-    Worktree, WorktreeLifecycleConfig, run_unmeasured, working_tree_has_modified_tracked_files,
+    Pair, Repetition, Repetitions, Revision, RunOrder, Side, SuiteLifecycleConfig, Worktree,
+    WorktreeLifecycleConfig, run_unmeasured, working_tree_has_modified_tracked_files,
     write_config_json, write_posterior_csv,
 };
 
@@ -152,13 +152,11 @@ fn execute_suite(
         .transpose()?;
 
     let result = (|| {
-        for (index, (name, benchmark)) in runs.into_iter().enumerate() {
+        let mut reported = false;
+        for (name, benchmark) in runs {
             ensure!(!interrupted(), "Interrupted.");
-            if index != 0 {
-                println!();
-            }
             let heading = name.as_deref();
-            if benchmark.config.isolate {
+            let report = if benchmark.config.isolate {
                 let worktrees =
                     create_worktrees(&revisions, worktree_lifecycle, interrupts, session)?;
                 let result = compare(
@@ -170,7 +168,7 @@ fn execute_suite(
                     interrupts,
                     session,
                 );
-                combine(result, worktrees.shutdown(session, &interrupts.cleanup))?;
+                combine(result, worktrees.shutdown(session, &interrupts.cleanup))
             } else {
                 compare(
                     suite,
@@ -180,8 +178,13 @@ fn execute_suite(
                     heading,
                     interrupts,
                     session,
-                )?;
+                )
+            }?;
+            if reported {
+                println!();
             }
+            print!("{report}");
+            reported = true;
         }
         Ok(())
     })();
@@ -234,12 +237,15 @@ fn create_worktrees(
 
 impl Worktrees {
     fn shutdown(self, session: &mut Session, interrupt: &Interrupt) -> Result<()> {
-        run_teardown_both(
-            session,
-            self.teardown.as_ref(),
-            interrupt,
-            "worktree teardown",
-        )
+        let Worktrees {
+            pair,
+            _directory,
+            teardown,
+        } = self;
+        let lifecycle =
+            run_teardown_both(session, teardown.as_ref(), interrupt, "worktree teardown");
+        let removal = combine(pair.baseline.remove(), pair.candidate.remove());
+        combine(lifecycle, removal)
     }
 }
 
@@ -321,7 +327,7 @@ fn compare(
     heading: Option<&str>,
     interrupts: &Interrupts,
     session: &mut Session,
-) -> Result<Summary<Time>> {
+) -> Result<String> {
     let output_dir = output_directory(heading, &benchmark_config);
     let Benchmark { config, lifecycle } = benchmark_config;
     let RunConfig {
@@ -448,13 +454,11 @@ fn compare(
         worktrees.baseline.revision().name(),
         draws.get(),
     );
-    print!("{report}");
-
     let report_path = output_dir.join("report.txt");
     fs::write(&report_path, &report)
         .with_context(|| format!("Failed to write {}.", report_path.display()))?;
 
-    Ok(summary)
+    Ok(report)
 }
 
 struct MeasurementContext<'a> {
@@ -531,7 +535,9 @@ fn measure_one<W: std::io::Write>(
         "suite startup-each-run",
     );
     let body = suite_start.and_then(|()| {
-        log.phase(side, "benchmark startup");
+        if context.benchmark_lifecycle.startup.is_some() {
+            log.phase(side, "benchmark startup-each-run");
+        }
         let benchmark_start = run_in(
             context.session,
             context
@@ -555,7 +561,9 @@ fn measure_one<W: std::io::Write>(
             ensure!(!interrupted(), "Interrupted.");
             Ok(output)
         });
-        log.phase(side, "benchmark teardown");
+        if context.benchmark_lifecycle.teardown.is_some() {
+            log.phase(side, "benchmark teardown-each-run");
+        }
         combine(
             measured,
             run_in(

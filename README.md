@@ -52,7 +52,7 @@ teardown-each-run = ["collect-logs"]
 command = ["./target/release/parse", "corpus/"]
 ```
 
-Benchmark lifecycle commands share the benchmark's `working-directory` and `env`. Their stdout and stderr are discarded, like measured commands'; redirect explicitly if the output matters. The first Ctrl-C interrupts active startup or benchmark work, then teardown unwinds on a protected cleanup wait. A second Ctrl-C exits immediately. Teardown is also attempted after startup, benchmark, or timeout failures; the original error remains primary and additional cleanup errors are reported alongside it. On macOS, containment uses a process group, which a descendant can deliberately escape with `setsid` or `setpgid`.
+Benchmark lifecycle commands share the benchmark's `working-directory` and `env`. Their stdout and stderr are discarded, like measured commands'; redirect explicitly if the output matters. A lifecycle hook and every descendant it starts must finish before the hook completes; surviving descendants are terminated during cleanup. The first Ctrl-C interrupts active startup or benchmark work, then teardown unwinds on a protected cleanup wait. A second Ctrl-C exits immediately. Teardown is also attempted after startup, benchmark, or timeout failures; the original error remains primary and additional cleanup errors are reported alongside it. On macOS, containment uses a process group, which a descendant can deliberately escape with `setsid` or `setpgid`.
 
 A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override ordinary options, and anything it leaves unset, including `command`, is inherited from the top level. Benchmark lifecycle commands are local to that benchmark. Its `env` table is merged with the top-level one, variable by variable, with the benchmark's values winning on conflicts:
 
@@ -91,7 +91,7 @@ Each run writes to its output directory:
 - `posterior.csv`: Bayesian bootstrap draws.
 - `report.txt`: human-readable summary.
 
-Library callers can pass `measurements.csv` to `analyze_measurements`; the same seed, draw count, shrinkage, and intervals reproduce the CLI posterior exactly.
+Library callers can pass `measurements.csv` to `analyze_measurements`; under the same Foil build and runtime environment, the same seed, draw count, shrinkage, and intervals reproduce the CLI posterior exactly.
 
 Named benchmark reports are prefixed with the benchmark name when printed.
 

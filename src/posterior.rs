@@ -170,10 +170,15 @@ impl<M: Metric> Draw<M> {
         M::from_base(self.candidate.base() - self.baseline.base())
     }
 
+    /// Percentage change, omitted when an adjusted baseline is not positive and finite.
     pub fn relative(self) -> Option<f64> {
         let baseline = self.baseline.base();
-
-        (baseline != 0.0).then(|| 100.0 * (self.candidate.base() / baseline - 1.0))
+        let candidate = self.candidate.base();
+        if baseline.is_finite() && baseline > 0.0 && candidate.is_finite() {
+            Some(100.0 * (candidate / baseline - 1.0))
+        } else {
+            None
+        }
     }
 }
 

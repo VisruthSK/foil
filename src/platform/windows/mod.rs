@@ -2,7 +2,7 @@ use super::{CommandSpec, Finished, Wait, combine_errors};
 use std::{
     ffi::{OsStr, OsString},
     io,
-    os::windows::ffi::OsStrExt,
+    os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -13,6 +13,7 @@ use raw::{
     AttributeList, Child, Event, Job, compare_ordinal, null_stdio_handles, spawn_process, wait_for,
 };
 use std::os::windows::io::OwnedHandle;
+use windows_sys::Win32::System::SystemInformation::{GetSystemDirectoryW, GetWindowsDirectoryW};
 
 #[derive(Clone)]
 pub(crate) struct Interrupt(Arc<Event>);
@@ -234,11 +235,8 @@ fn resolve_bare(spec: &CommandSpec) -> io::Result<PathBuf> {
         directory.pop();
         directories.push(directory);
     }
-    if let Some(root) = std::env::var_os("SystemRoot") {
-        let root = PathBuf::from(&root);
-        directories.push(root.join("System32"));
-        directories.push(root);
-    }
+    directories.push(system_directory(GetSystemDirectoryW)?);
+    directories.push(system_directory(GetWindowsDirectoryW)?);
     if let Some(parent_path) = std::env::var_os("PATH") {
         directories.extend(
             std::env::split_paths(&parent_path).filter(|path| !path.as_os_str().is_empty()),
@@ -273,6 +271,21 @@ fn resolve_bare(spec: &CommandSpec) -> io::Result<PathBuf> {
                 spec.program.to_string_lossy()
             ),
         )),
+    }
+}
+
+fn system_directory(get: unsafe extern "system" fn(*mut u16, u32) -> u32) -> io::Result<PathBuf> {
+    let mut buffer = vec![0u16; 260];
+    loop {
+        // SAFETY: `buffer` is writable for its full reported length.
+        let length = unsafe { get(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+        if length == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if length < buffer.len() {
+            return Ok(PathBuf::from(OsString::from_wide(&buffer[..length])));
+        }
+        buffer.resize(length, 0);
     }
 }
 
