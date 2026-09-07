@@ -172,14 +172,20 @@ fn kind(path: &Path) -> Kind {
     }
 }
 
-/// Candidate paths for an explicit program path. Like `CreateProcessW`, a name
-/// without an extension prefers the `.exe` form before the literal file.
-fn executable_forms(path: &Path) -> Vec<PathBuf> {
-    if path.extension().is_some() {
+/// Candidate paths for an explicit program path. Like `Command`, a path not
+/// already ending in `.exe` first has `.exe` appended as a suffix, then falls
+/// back to the path as written.
+fn explicit_forms(path: &Path) -> Vec<PathBuf> {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    {
         return vec![path.to_owned()];
     }
-    let mut with_exe = path.to_owned();
-    with_exe.set_extension("exe");
+    let mut with_exe = path.as_os_str().to_owned();
+    with_exe.push(".exe");
+    let with_exe = PathBuf::from(with_exe);
     vec![with_exe, path.to_owned()]
 }
 
@@ -209,7 +215,7 @@ fn resolve_application(spec: &CommandSpec) -> io::Result<PathBuf> {
 }
 
 fn resolve_explicit(program: &OsString, rooted: &Path) -> io::Result<PathBuf> {
-    let forms = executable_forms(rooted);
+    let forms = explicit_forms(rooted);
     for candidate in &forms {
         match kind(candidate) {
             Kind::Binary => return Ok(candidate.clone()),
@@ -246,12 +252,13 @@ fn resolve_bare(spec: &CommandSpec) -> io::Result<PathBuf> {
     let mut batch_alternative = None;
     for directory in &directories {
         let base = directory.join(&spec.program);
-        for candidate in executable_forms(&base) {
-            match kind(&candidate) {
-                Kind::Binary => return Ok(candidate),
-                Kind::Batch => {}
-                Kind::Missing => {}
-            }
+        let mut candidate = base.clone();
+        if !spec.program.encode_wide().any(|unit| unit == b'.' as u16) {
+            candidate.set_extension("exe");
+        }
+        match kind(&candidate) {
+            Kind::Binary => return Ok(candidate),
+            Kind::Batch | Kind::Missing => {}
         }
         for extension in ["bat", "cmd"] {
             let mut script = base.clone();

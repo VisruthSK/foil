@@ -175,6 +175,64 @@ fn windows_uses_the_child_path() -> Result<()> {
 
 #[cfg(windows)]
 #[test]
+fn windows_appends_exe_to_an_explicit_path_with_an_extension() -> Result<()> {
+    let startup = command(&helper("copy_self"));
+    let benchmark = command(&[
+        r".\late-tool.debug".to_owned(),
+        "--exact".to_owned(),
+        "noop".to_owned(),
+        "--ignored".to_owned(),
+    ]);
+    let project = repository(&format!(
+        "baseline = 'HEAD'\n\
+         candidate = 'HEAD'\n\
+         output-dir = 'bench'\n\
+         repetitions = 10\n\
+         draws = 1000\n\
+         interval = [0.5]\n\
+         env = {{ {COPY_TARGET} = 'late-tool.debug.exe' }}\n\
+         [benchmarks.created]\n\
+         startup = [{startup}]\n\
+         command = [{benchmark}]\n"
+    ))?;
+
+    let (succeeded, _, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "foil failed with {stderr}");
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_ignores_extensionless_files_during_path_search() -> Result<()> {
+    let first = tempfile::tempdir()?;
+    let second = tempfile::tempdir()?;
+    fs::write(first.path().join("path-tool"), "not an executable")?;
+    fs::copy(env::current_exe()?, second.path().join("path-tool.exe"))?;
+    let child_path = value(std::env::join_paths([first.path(), second.path()])?.to_string_lossy());
+    let benchmark = command(&[
+        "path-tool".to_owned(),
+        "--exact".to_owned(),
+        "noop".to_owned(),
+        "--ignored".to_owned(),
+    ]);
+    let project = repository(&format!(
+        "baseline = 'HEAD'\n\
+         candidate = 'HEAD'\n\
+         output-dir = 'bench'\n\
+         repetitions = 10\n\
+         draws = 1000\n\
+         interval = [0.5]\n\
+         env = {{ PATH = {child_path} }}\n\
+         command = [{benchmark}]\n"
+    ))?;
+
+    let (succeeded, _, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "foil failed with {stderr}");
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
 fn windows_rejects_batch_files() -> Result<()> {
     let directory = tempfile::tempdir()?;
     fs::write(directory.path().join("script.cmd"), "@exit /b 0\r\n")?;

@@ -44,7 +44,7 @@ fn a_complete_configuration_runs_without_any_arguments() -> Result<()> {
     assert_eq!(config["seed"], 0);
     assert_eq!(config["foil_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(config["command"], serde_json::json!(["git", "--version"]));
-    assert_eq!(config["intervals"], serde_json::json!([0.5, 0.8, 0.9]));
+    assert_eq!(config["intervals"], serde_json::json!([0.5, 0.8]));
     assert_eq!(
         config["suite_lifecycle"],
         serde_json::json!({
@@ -69,7 +69,7 @@ fn a_complete_configuration_runs_without_any_arguments() -> Result<()> {
     );
 
     let report = fs::read_to_string(project.path().join("benchmark/report.txt"))?;
-    for interval in ["50% CrI", "80% CrI", "90% CrI"] {
+    for interval in ["50% CrI", "80% CrI"] {
         assert!(
             report.contains(interval),
             "{interval} is missing from\n{report}"
@@ -136,11 +136,7 @@ fn saved_measurements_reproduce_the_full_analysis() -> Result<()> {
     let seed = config["seed"]
         .as_u64()
         .ok_or_else(|| anyhow::anyhow!("The recorded seed is not an integer."))?;
-    let intervals = [
-        Interval::new(0.5)?,
-        Interval::new(0.8)?,
-        Interval::new(0.9)?,
-    ];
+    let intervals = [Interval::new(0.5)?, Interval::new(0.8)?];
     let analysis = analyze_measurements(
         &output.join("measurements.csv"),
         seed,
@@ -180,7 +176,7 @@ fn builtin_defaults_apply_without_a_configuration_file() -> Result<()> {
         "[default: 0]",
         "[default: 4]",
         "[default: 10000]",
-        "[default: 0.5 0.8 0.9]",
+        "[default: 0.5 0.8]",
     ] {
         assert!(help.contains(default), "{default} is missing from\n{help}");
     }
@@ -271,7 +267,7 @@ fn help_ignores_configuration_defaults() -> Result<()> {
         "[default: HEAD]",
         "[default: 0]",
         "[default: 10000]",
-        "[default: 0.5 0.8 0.9]",
+        "[default: 0.5 0.8]",
     ] {
         assert!(help.contains(default), "{default} is missing from\n{help}");
     }
@@ -311,7 +307,17 @@ fn adjacent_interval_values_are_one_cli_argument_group() -> Result<()> {
     let project = repository(&format!("{PREAMBLE}command = ['git', '--version']\n"))?;
     let (succeeded, _, stderr) = run(
         &project,
-        &["--interval", "0.5", "0.8", "0.9", "--", "git", "--version"],
+        &[
+            "--repetitions",
+            "20",
+            "--interval",
+            "0.5",
+            "0.8",
+            "0.9",
+            "--",
+            "git",
+            "--version",
+        ],
     )?;
     ensure!(succeeded, "foil failed with {stderr}");
 
@@ -319,6 +325,23 @@ fn adjacent_interval_values_are_one_cli_argument_group() -> Result<()> {
         project.path().join("bench/config.json"),
     )?)?;
     assert_eq!(config["intervals"], serde_json::json!([0.5, 0.8, 0.9]));
+    Ok(())
+}
+
+#[test]
+fn an_interval_wider_than_the_repetitions_support_is_rejected_at_startup() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+         candidate = 'HEAD'\n\
+         output-dir = 'bench'\n\
+         repetitions = 10\n\
+         interval = [0.8, 0.9]\n\
+         command = ['git', '--version']\n",
+    )?;
+    let error = failure(&project, &[])?;
+
+    assert!(error.contains("widest supported interval"), "{error}");
+    assert!(error.contains("80%"), "{error}");
     Ok(())
 }
 

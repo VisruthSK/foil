@@ -23,6 +23,24 @@ impl Interval {
         (tail, 1.0 - tail)
     }
 
+    /// Rejects widths whose tails are narrower than one repetition's share of the
+    /// posterior, i.e. anything above `1 - 2/pairs`. Ten pairs cap the width at 80%.
+    pub fn validate_for_pairs(self, pairs: usize) -> Result<Self> {
+        let widest = 100.0 * (pairs - 2) as f64 / pairs as f64;
+
+        ensure!(
+            self.percent() <= widest + 1e-6,
+            "A {:.0}% interval needs each tail to span at least one of the {} paired \
+             repetitions; the widest supported interval at {} repetitions is {:.0}%.",
+            self.percent(),
+            pairs,
+            pairs,
+            widest
+        );
+
+        Ok(self)
+    }
+
     pub fn percent(self) -> f64 {
         100.0 * self.0
     }
@@ -182,5 +200,21 @@ mod tests {
     fn quantiles_reject_empty_and_nan_inputs() {
         assert!(Quantiles::new(Vec::new()).is_err());
         assert!(Quantiles::new(vec![1.0, f64::NAN]).is_err());
+    }
+
+    #[test]
+    fn an_interval_at_the_repetition_boundary_is_accepted() -> Result<()> {
+        Interval::new(0.8)?.validate_for_pairs(10)?;
+        Ok(())
+    }
+
+    #[test]
+    fn an_interval_wider_than_the_repetitions_support_is_rejected() -> Result<()> {
+        let error = Interval::new(0.9)?
+            .validate_for_pairs(10)
+            .expect_err("90% exceeds what ten pairs support");
+
+        assert!(error.to_string().contains("80%"), "{error}");
+        Ok(())
     }
 }

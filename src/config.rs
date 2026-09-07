@@ -152,7 +152,7 @@ pub(crate) struct RunConfig {
     #[arg(
         long = "interval",
         num_args = 1..,
-        default_values = ["0.5", "0.8", "0.9"]
+        default_values = ["0.5", "0.8"]
     )]
     pub(crate) intervals: Vec<Interval>,
 
@@ -268,7 +268,18 @@ impl Cli {
                     },
                 )
             })
-            .collect();
+            .collect::<Vec<_>>();
+
+        for (name, benchmark) in &runs {
+            for interval in &benchmark.config.intervals {
+                interval
+                    .validate_for_pairs(benchmark.config.repetitions.get())
+                    .with_context(|| match name {
+                        Some(name) => format!("Benchmark `{name}`"),
+                        None => "The benchmark".to_owned(),
+                    })?;
+            }
+        }
 
         Ok(Suite {
             config: ResolvedSuiteConfig {

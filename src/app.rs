@@ -80,6 +80,7 @@ pub(crate) fn run() -> Result<()> {
         runs,
     } = Cli::suite()?;
 
+    ensure!(!interrupted(), "Interrupted.");
     clear_outputs(&runs)?;
     write_configs(&suite, &lifecycle, &worktree_lifecycle, &runs)?;
     let mut session = Session::new().context("Failed to create the platform session.")?;
@@ -136,6 +137,7 @@ fn execute_suite(
     interrupts: &Interrupts,
     session: &mut Session,
 ) -> Result<()> {
+    ensure!(!interrupted(), "Interrupted.");
     if working_tree_has_modified_tracked_files()? {
         eprintln!(
             "Warning: the working tree has modified tracked files, which are never benchmarked."
