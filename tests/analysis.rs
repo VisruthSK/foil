@@ -1,21 +1,10 @@
+pub mod common;
+
 use anyhow::{Context, Result};
+use common::MEASUREMENTS;
 use foil::{Interval, Metric, Shrinkage, analyze_measurements};
 use std::{fs, num::NonZeroUsize, path::Path};
 use tempfile::tempdir;
-
-const MEASUREMENTS: &str = concat!(
-    "repetition,order,baseline_seconds,candidate_seconds\n",
-    "1,candidate_first,1,1.04\n",
-    "2,baseline_first,1.08,1.06\n",
-    "3,baseline_first,1.13,1.19\n",
-    "4,candidate_first,1.18,1.17\n",
-    "5,candidate_first,1.27,1.31\n",
-    "6,baseline_first,1.31,1.30\n",
-    "7,candidate_first,1.39,1.46\n",
-    "8,baseline_first,1.44,1.41\n",
-    "9,baseline_first,1.53,1.58\n",
-    "10,candidate_first,1.59,1.61\n",
-);
 
 fn fixture(contents: &str) -> Result<(tempfile::TempDir, std::path::PathBuf)> {
     let directory = tempdir()?;
@@ -30,11 +19,7 @@ fn analyze(path: &Path, shrinkage: f64, draws: usize) -> Result<foil::Analysis> 
         0,
         NonZeroUsize::new(draws).unwrap(),
         Shrinkage::new(shrinkage)?,
-        &[
-            Interval::new(0.5)?,
-            Interval::new(0.8)?,
-            Interval::new(0.9)?,
-        ],
+        &[Interval::new(0.5)?, Interval::new(0.8)?],
     )
 }
 
@@ -80,8 +65,8 @@ fn fixed_measurements_produce_deterministic_unshrunk_and_shrunk_posteriors() -> 
     assert_eq!(unshrunk.posterior.draws(), unshrunk_again.posterior.draws());
     assert_eq!(values(&unshrunk), UNSHRUNK);
     assert_eq!(values(&shrunk), SHRUNK);
-    assert_eq!(unshrunk.summary.change.intervals.len(), 3);
-    assert_eq!(shrunk.summary.change.intervals.len(), 3);
+    assert_eq!(unshrunk.summary.change.intervals.len(), 2);
+    assert_eq!(shrunk.summary.change.intervals.len(), 2);
     Ok(())
 }
 
@@ -133,5 +118,28 @@ fn an_empty_interval_set_is_rejected() -> Result<()> {
     .err()
     .context("an empty interval set should fail")?;
     assert!(error.to_string().contains("interval"), "{error}");
+    Ok(())
+}
+
+#[test]
+fn an_unsupported_interval_is_rejected() -> Result<()> {
+    let (_directory, path) = fixture(MEASUREMENTS)?;
+    let error = analyze_measurements(
+        &path,
+        0,
+        NonZeroUsize::new(1_000).unwrap(),
+        Shrinkage::NONE,
+        &[Interval::new(0.9)?],
+    )
+    .err()
+    .context("90% should exceed ten pairs' supported interval")?;
+
+    assert!(error.to_string().contains("80%"), "{error}");
+    let analysis = analyze(&path, 0.0, 8)?;
+    let error = analysis
+        .posterior
+        .summarize(&[Interval::new(0.9)?])
+        .expect_err("resummarizing should enforce the same interval limit");
+    assert!(error.to_string().contains("80%"), "{error}");
     Ok(())
 }

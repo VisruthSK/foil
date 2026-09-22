@@ -1,71 +1,39 @@
-use anyhow::Result;
-use foil::{Change, ChangeBounds, Interval, Metric, PeakMemory, Range, Summary, Time};
+pub mod common;
 
-fn defaults() -> [Interval; 3] {
-    [0.5, 0.8, 0.9].map(|width| Interval::new(width).unwrap())
-}
+use anyhow::Result;
+use common::MEASUREMENTS;
+use foil::{
+    Change, ChangeBounds, Interval, Metric, PeakMemory, Range, Shrinkage, Summary, Time,
+    analyze_measurements,
+};
+use std::{fs, num::NonZeroUsize};
+use tempfile::tempdir;
 
 #[test]
-fn time_report_matches_the_public_summary_contract() -> Result<()> {
-    let [half, eighty, ninety] = defaults();
-    let summary = Summary {
-        baseline: Time::from_base(10.0),
-        candidate: Time::from_base(10.065),
-        change: Change {
-            absolute_median: Time::from_base(0.065),
-            relative_median: Some(0.65),
-            intervals: vec![
-                ChangeBounds {
-                    interval: half,
-                    absolute: Range {
-                        lower: Time::from_base(0.035),
-                        upper: Time::from_base(0.0875),
-                    },
-                    relative: Some(Range {
-                        lower: 0.35,
-                        upper: 0.875,
-                    }),
-                },
-                ChangeBounds {
-                    interval: eighty,
-                    absolute: Range {
-                        lower: Time::from_base(0.017),
-                        upper: Time::from_base(0.101),
-                    },
-                    relative: Some(Range {
-                        lower: 0.17,
-                        upper: 1.01,
-                    }),
-                },
-                ChangeBounds {
-                    interval: ninety,
-                    absolute: Range {
-                        lower: Time::from_base(0.0035),
-                        upper: Time::from_base(0.1055),
-                    },
-                    relative: Some(Range {
-                        lower: 0.035,
-                        upper: 1.055,
-                    }),
-                },
-            ],
-        },
-        probability_candidate_lower: 0.1,
-        draws: 10,
-    };
+fn interpolated_posterior_quantiles_are_rendered() -> Result<()> {
+    let directory = tempdir()?;
+    let path = directory.path().join("measurements.csv");
+    fs::write(&path, MEASUREMENTS)?;
+    let report = analyze_measurements(
+        &path,
+        0,
+        NonZeroUsize::new(8).unwrap(),
+        Shrinkage::NONE,
+        &[Interval::new(0.8)?],
+    )?
+    .summary
+    .to_string();
 
     const EXPECTED: &str = concat!(
-        "Baseline:  10.0s\n",
-        "Candidate: 10.1s\n",
+        "Baseline:  1.3s\n",
+        "Candidate: 1.3s\n",
         "\n",
-        "Change: +65.0ms (+0.65%)\n",
-        "  50% CrI: [+35.0ms, +87.5ms] (+0.35%, +0.88%)\n",
-        "  80% CrI: [+17.0ms, +101.0ms] (+0.17%, +1.01%)\n",
-        "  90% CrI: [+3.5ms, +105.5ms] (+0.04%, +1.05%)\n",
+        "Change: +21.3ms (+1.65%)\n",
+        "  80% CrI: [+4.1ms, +29.5ms] (+0.32%, +2.28%)\n",
         "\n",
-        "P(candidate faster): 10.0% (1 of 10 draws)\n",
+        "P(candidate faster): 12.5% (1 of 8 draws)\n",
     );
-    assert_eq!(summary.to_string(), EXPECTED);
+    assert_eq!(report, EXPECTED);
     Ok(())
 }
 

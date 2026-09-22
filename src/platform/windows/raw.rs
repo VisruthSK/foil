@@ -32,7 +32,7 @@ use windows_sys::Win32::{
             SetInformationJobObject, TerminateJobObject,
         },
         Threading::{
-            CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW,
+            CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW,
             DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
             INFINITE, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
@@ -303,7 +303,7 @@ pub(crate) fn spawn_process(
             ptr::null(),
             ptr::null(),
             TRUE,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_PROCESS_GROUP,
             environment
                 .map_or(ptr::null_mut(), |block| block.as_mut_ptr())
                 .cast(),

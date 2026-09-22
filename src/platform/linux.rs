@@ -85,6 +85,7 @@ impl Session {
             .write(true)
             .open(self.ordinary.join("cgroup.procs"))?;
         let mut command = spec.command();
+        command.process_group(0);
         unsafe {
             // SAFETY: After fork this closure only invokes async-signal-safe write(2)
             // on an inherited fd and constructs allocation-free raw OS errors.
@@ -414,6 +415,20 @@ mod tests {
         session.shutdown()?;
         ensure!(!ordinary.exists());
         ensure!(!parent.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn workloads_start_in_their_own_process_group() -> Result<()> {
+        let mut session = Session::new()?;
+        let workload = session
+            .prepare(&spec("platform::tests::slow_child")?)?
+            .spawn()?;
+        let pid = Pid::from_child(&workload.child);
+
+        ensure!(rustix::process::getpgid(Some(pid))? == pid);
+        ensure!(workload.finish().cleanup.is_ok());
+        session.shutdown()?;
         Ok(())
     }
 

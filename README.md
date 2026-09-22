@@ -16,7 +16,7 @@ Run `foil --help` for the full set of options.
 
 Each revision runs in its own clean worktree, so local changes are never part of a measurement; `foil` warns when tracked files have been modified.
 
-On Linux, `foil` requires Linux 5.14 or newer and a writable delegated cgroup v2. Run `foil` from inside the delegated subtree; `FOIL_CGROUP_ROOT` only selects an existing delegation.
+On Linux, `foil` requires Linux 5.14 or newer with the `cgroup.kill` fork-race fix (`b69bb476dee9` or its stable backport), plus a writable delegated cgroup v2. Run `foil` from inside the delegated subtree; `FOIL_CGROUP_ROOT` only selects an existing delegation.
 
 ## Configuration
 

@@ -26,6 +26,7 @@ impl Interval {
     /// Rejects widths whose tails are narrower than one repetition's share of the
     /// posterior, i.e. anything above `1 - 2/pairs`. Ten pairs cap the width at 80%.
     pub fn validate_for_pairs(self, pairs: usize) -> Result<Self> {
+        ensure!(pairs >= 2, "At least two paired repetitions are required.");
         let widest = 100.0 * (pairs - 2) as f64 / pairs as f64;
 
         ensure!(
@@ -215,6 +216,15 @@ mod tests {
             .expect_err("90% exceeds what ten pairs support");
 
         assert!(error.to_string().contains("80%"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn interval_validation_rejects_fewer_than_two_pairs() -> Result<()> {
+        for pairs in [0, 1] {
+            let error = Interval::new(0.5)?.validate_for_pairs(pairs).unwrap_err();
+            assert!(error.to_string().contains("At least two"), "{error}");
+        }
         Ok(())
     }
 }

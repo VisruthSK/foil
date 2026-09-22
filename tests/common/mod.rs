@@ -26,6 +26,20 @@ pub const CONFIG: &str = "\
 
 pub const BUILTIN_USAGE: &str = "--output-dir <DIR> --repetitions <REPETITIONS> -- <COMMAND>...";
 
+pub const MEASUREMENTS: &str = concat!(
+    "repetition,order,baseline_seconds,candidate_seconds\n",
+    "1,candidate_first,1,1.04\n",
+    "2,baseline_first,1.08,1.06\n",
+    "3,baseline_first,1.13,1.19\n",
+    "4,candidate_first,1.18,1.17\n",
+    "5,candidate_first,1.27,1.31\n",
+    "6,baseline_first,1.31,1.30\n",
+    "7,candidate_first,1.39,1.46\n",
+    "8,baseline_first,1.44,1.41\n",
+    "9,baseline_first,1.53,1.58\n",
+    "10,candidate_first,1.59,1.61\n",
+);
+
 pub fn project(files: &[(&str, &str)]) -> Result<TempDir> {
     let directory = tempdir()?;
 

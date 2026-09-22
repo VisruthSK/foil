@@ -280,7 +280,7 @@ fn ready(events: &[Event], interrupt: &Interrupt) -> io::Result<Option<Wait>> {
     } else {
         None
     };
-    if outcome.is_some() {
+    if interrupted {
         drain_interrupt(&interrupt.read)?;
     }
     Ok(outcome)
@@ -305,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn exit_event_consumes_a_pending_interrupt() -> Result<()> {
+    fn exit_event_does_not_drain_an_unobserved_interrupt() -> Result<()> {
         let interrupt = Interrupt::new()?;
         interrupt.signal();
         let event = Event::new(
@@ -318,10 +318,7 @@ mod tests {
         );
 
         ensure!(matches!(ready(&[event], &interrupt)?, Some(Wait::Exited)));
-        ensure!(matches!(
-            rustix::io::read(&*interrupt.read, &mut [0]),
-            Err(Errno::AGAIN)
-        ));
+        ensure!(rustix::io::read(&*interrupt.read, &mut [0])? == 1);
         Ok(())
     }
 

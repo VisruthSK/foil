@@ -185,6 +185,7 @@ impl<M: Metric> Draw<M> {
 /// Posterior draws of one metric's adjusted means.
 pub struct Posterior<M> {
     draws: Vec<Draw<M>>,
+    pairs: usize,
 }
 
 impl<M: Metric> Posterior<M> {
@@ -232,7 +233,10 @@ impl<M: Metric> Posterior<M> {
                 })
             })
             .collect::<Result<_>>()
-            .map(|draws| Self { draws })
+            .map(|draws| Self {
+                draws,
+                pairs: repetitions.len(),
+            })
     }
 }
 
@@ -244,6 +248,9 @@ impl<M: Metric> Posterior<M> {
 
     pub fn summarize(&self, intervals: &[Interval]) -> Result<Summary<M>> {
         ensure!(!intervals.is_empty(), "At least one interval is required.");
+        for interval in intervals {
+            interval.validate_for_pairs(self.pairs)?;
+        }
         Summary::from_draws(&self.draws, intervals)
     }
 }

@@ -121,6 +121,10 @@ impl<T> Repetitions<T> {
         self.values.iter()
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.values.len()
+    }
+
     /// Mean run position, the point the model's drift term is centered on.
     pub(crate) fn center(&self) -> f64 {
         (self.values.len() - 1) as f64 / 2.0
