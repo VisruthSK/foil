@@ -678,6 +678,22 @@ fn unsafe_benchmark_names_are_rejected() -> Result<()> {
 }
 
 #[test]
+fn benchmark_names_are_case_insensitively_unique() -> Result<()> {
+    let project = project(&[(
+        "foil.toml",
+        "[benchmarks.Foo]\ncommand = ['git']\n[benchmarks.foo]\ncommand = ['git']\n",
+    )])?;
+    let error = failure(&project, &[])?;
+
+    assert!(
+        error.contains("benchmark names `Foo` and `foo` differ only by case"),
+        "{error}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn a_malformed_benchmarks_table_is_always_rejected() -> Result<()> {
     let project = project(&[("foil.toml", "output-dir = 'bench'\nbenchmarks = 1\n")])?;
     let error = failure(&project, &["--repetitions", "5"])?;

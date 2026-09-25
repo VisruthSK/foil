@@ -6,7 +6,7 @@ use clap::{
     parser::ValueSource,
 };
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env,
     ffi::OsString,
     fs,
@@ -388,6 +388,7 @@ fn read_config(path: Option<PathBuf>) -> Result<Configuration> {
 fn validate_config(config: &Configuration) -> Result<()> {
     configure(Cli::command(), &config.path, &config.top)?;
 
+    let mut benchmark_names = HashMap::new();
     for (name, value) in &config.benchmarks {
         ensure!(
             is_safe_benchmark_name(name),
@@ -395,6 +396,12 @@ fn validate_config(config: &Configuration) -> Result<()> {
              `..`, or contain a path separator.",
             config.path.display()
         );
+        if let Some(previous) = benchmark_names.insert(name.to_lowercase(), name) {
+            bail!(
+                "{} benchmark names `{previous}` and `{name}` differ only by case.",
+                config.path.display()
+            );
+        }
         let mut table = value.as_table().cloned().with_context(|| {
             format!(
                 "{} must set benchmark `{name}` to a table.",

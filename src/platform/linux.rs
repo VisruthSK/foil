@@ -1,7 +1,7 @@
 use super::{CommandSpec, Finished, Wait, combine_errors, drain_interrupt, reap_after_kill};
 use std::{
     env, fs,
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     io::{self, Read, Seek, Write},
     os::{fd::OwnedFd, unix::process::CommandExt},
     path::{Path, PathBuf},
@@ -43,6 +43,7 @@ impl Interrupt {
 pub(crate) struct Session {
     parent: PathBuf,
     ordinary: PathBuf,
+    kill: File,
     closed: bool,
 }
 
@@ -72,9 +73,25 @@ impl Session {
                 )),
             };
         }
+        let kill = match OpenOptions::new()
+            .write(true)
+            .open(ordinary.join("cgroup.kill"))
+        {
+            Ok(kill) => kill,
+            Err(error) => {
+                return match remove_tree(&ordinary, &parent) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(io::Error::new(
+                        error.kind(),
+                        format!("{error}; cgroup cleanup also failed: {cleanup}"),
+                    )),
+                };
+            }
+        };
         Ok(Self {
             parent,
             ordinary,
+            kill,
             closed: false,
         })
     }
@@ -98,11 +115,12 @@ impl Session {
         Ok(Prepared {
             command,
             ordinary: self.ordinary.clone(),
+            kill: self.kill.try_clone()?,
         })
     }
 
     pub(crate) fn shutdown(mut self) -> io::Result<()> {
-        let (cleanup, empty) = clean_leaf(&self.ordinary);
+        let (cleanup, empty) = clean_leaf(&self.ordinary, &self.kill);
         let removal = if empty {
             remove_tree(&self.ordinary, &self.parent)
         } else {
@@ -120,7 +138,7 @@ impl Drop for Session {
         if self.closed {
             return;
         }
-        let _ = kill(&self.ordinary);
+        let _ = kill(&self.kill);
         let _ = fs::remove_dir(&self.ordinary);
         let _ = fs::remove_dir(&self.parent);
     }
@@ -129,6 +147,7 @@ impl Drop for Session {
 pub(crate) struct Workload {
     child: Child,
     ordinary: PathBuf,
+    kill: File,
     pidfd: OwnedFd,
     cleaned: bool,
 }
@@ -136,6 +155,7 @@ pub(crate) struct Workload {
 pub(crate) struct Prepared {
     command: Command,
     ordinary: PathBuf,
+    kill: File,
 }
 
 impl Workload {
@@ -176,7 +196,7 @@ impl Workload {
     }
 
     pub(crate) fn finish(mut self) -> Finished {
-        let killed = kill(&self.ordinary);
+        let killed = kill(&self.kill);
         let fallback = killed.as_ref().err().map(|_| self.child.kill());
         let status = reap_after_kill(&mut self.child, &killed, fallback.as_ref());
         let emptied = wait_after_kill(&self.ordinary, killed.is_ok());
@@ -198,7 +218,7 @@ impl Prepared {
         let pidfd = match pidfd_open(pid, PidfdFlags::empty()) {
             Ok(pidfd) => pidfd,
             Err(error) => {
-                let killed = kill(&self.ordinary);
+                let killed = kill(&self.kill);
                 let fallback = killed.as_ref().err().map(|_| child.kill());
                 let reaped = reap_after_kill(&mut child, &killed, fallback.as_ref()).map(drop);
                 let emptied = wait_after_kill(&self.ordinary, killed.is_ok());
@@ -212,6 +232,7 @@ impl Prepared {
         Ok(Workload {
             child,
             ordinary: self.ordinary,
+            kill: self.kill,
             pidfd,
             cleaned: false,
         })
@@ -223,24 +244,22 @@ impl Drop for Workload {
         if self.cleaned {
             return;
         }
-        let killed = kill(&self.ordinary);
+        let killed = kill(&self.kill);
         let fallback = killed.as_ref().err().map(|_| self.child.kill());
         let _ = reap_after_kill(&mut self.child, &killed, fallback.as_ref());
     }
 }
 
-fn clean_leaf(path: &Path) -> (io::Result<()>, bool) {
-    let killed = kill(path);
+fn clean_leaf(path: &Path, kill_file: &File) -> (io::Result<()>, bool) {
+    let killed = kill(kill_file);
     let emptied = wait_after_kill(path, killed.is_ok());
     let empty = emptied.is_ok();
     (combine_errors(killed, emptied), empty)
 }
 
-fn kill(path: &Path) -> io::Result<()> {
-    OpenOptions::new()
-        .write(true)
-        .open(path.join("cgroup.kill"))?
-        .write_all(b"1")
+fn kill(mut file: &File) -> io::Result<()> {
+    file.rewind()?;
+    file.write_all(b"1")
 }
 
 fn populated(path: &Path) -> io::Result<bool> {
@@ -500,19 +519,15 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_failures_are_returned() -> Result<()> {
+    fn session_creation_requires_cgroup_kill() -> Result<()> {
         let root = tempfile::tempdir()?;
         let counter = AtomicU64::new(0);
-        let session = Session::create(root.path(), &counter)?;
-
-        let error = session
-            .shutdown()
+        let error = Session::create(root.path(), &counter)
             .err()
-            .context("a non-cgroup hierarchy should fail cleanup")?;
-        ensure!(
-            matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::Other),
-            "{error}"
-        );
+            .context("a session without cgroup.kill should fail during creation")?;
+
+        ensure!(error.kind() == io::ErrorKind::NotFound, "{error}");
+        ensure!(root.path().read_dir()?.next().is_none());
         Ok(())
     }
 
