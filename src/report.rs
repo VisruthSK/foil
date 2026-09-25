@@ -35,7 +35,7 @@ fn magnitude<M: Metric>(value: M) -> String {
 
 impl<M: Metric> Summary<M> {
     /// A one-line summary for a report spanning several benchmarks, e.g. `1.2s -> 554.0ms [-52.41%, -51.31%]`.
-    pub fn compact(&self) -> String {
+    pub(crate) fn compact(&self) -> String {
         let bounds = self
             .change
             .intervals
@@ -112,7 +112,7 @@ impl<M: Metric> fmt::Display for Summary<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metric::{PeakMemory, Time};
+    use crate::metric::{MeasuredMetric, PeakMemory, Time};
     use crate::posterior::{Posterior, Shrinkage};
     use crate::repetition::{Pair, Repetition, Repetitions, RunOrder};
     use crate::run::{Bytes, RunOutput};
@@ -125,7 +125,7 @@ mod tests {
 
     /// Ten seconds a side, the candidate about 20ms slower, drifting upward, with
     /// enough scatter for the credible intervals to have width.
-    fn tiny_change_on_large_totals<M: Metric>(draws: usize) -> Posterior<M> {
+    fn tiny_change_on_large_totals<M: Metric + MeasuredMetric>(draws: usize) -> Posterior<M> {
         let baseline = [
             10.000, 10.012, 10.019, 10.031, 10.038, 10.052, 10.058, 10.071, 10.079, 10.090,
         ];

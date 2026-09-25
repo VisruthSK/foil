@@ -36,7 +36,7 @@ impl Bytes {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RunOutput {
+pub(crate) struct RunOutput {
     exit_status: ExitStatus,
     elapsed_time: Duration,
     peak_memory: Option<Bytes>,
@@ -106,15 +106,16 @@ impl RunOutput {
         }
     }
 
-    pub fn exit_status(&self) -> ExitStatus {
+    #[cfg(test)]
+    pub(crate) fn exit_status(&self) -> ExitStatus {
         self.exit_status
     }
 
-    pub fn elapsed(&self) -> Duration {
+    pub(crate) fn elapsed(&self) -> Duration {
         self.elapsed_time
     }
 
-    pub fn peak_memory(&self) -> Option<Bytes> {
+    pub(crate) fn peak_memory(&self) -> Option<Bytes> {
         self.peak_memory
     }
 }

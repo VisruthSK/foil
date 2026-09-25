@@ -1,3 +1,3 @@
 fn main() -> anyhow::Result<()> {
-    b3::run()
+    foil::run()
 }

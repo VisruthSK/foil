@@ -12,10 +12,13 @@ pub trait Metric: Copy {
     const LOWER: &'static str;
     const BASE_UNIT: &'static str;
 
-    fn read(output: &RunOutput) -> Result<Self>;
     fn from_base(value: f64) -> Self;
     fn base(self) -> f64;
     fn display_unit(magnitude: Self) -> Unit;
+}
+
+pub(crate) trait MeasuredMetric: Metric {
+    fn read(output: &RunOutput) -> Result<Self>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -24,10 +27,6 @@ pub struct Time(f64);
 impl Metric for Time {
     const LOWER: &'static str = "faster";
     const BASE_UNIT: &'static str = "seconds";
-
-    fn read(output: &RunOutput) -> Result<Self> {
-        Ok(Self(output.elapsed().as_secs_f64()))
-    }
 
     fn from_base(value: f64) -> Self {
         Self(value)
@@ -59,21 +58,18 @@ impl Metric for Time {
     }
 }
 
+impl MeasuredMetric for Time {
+    fn read(output: &RunOutput) -> Result<Self> {
+        Ok(Self(output.elapsed().as_secs_f64()))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PeakMemory(f64);
 
 impl Metric for PeakMemory {
     const LOWER: &'static str = "smaller";
     const BASE_UNIT: &'static str = "bytes";
-
-    fn read(output: &RunOutput) -> Result<Self> {
-        Ok(Self(
-            output
-                .peak_memory()
-                .context("Peak memory was not measured.")?
-                .get() as f64,
-        ))
-    }
 
     fn from_base(value: f64) -> Self {
         Self(value)
@@ -103,5 +99,16 @@ impl Metric for PeakMemory {
                 symbol: "B",
             },
         }
+    }
+}
+
+impl MeasuredMetric for PeakMemory {
+    fn read(output: &RunOutput) -> Result<Self> {
+        Ok(Self(
+            output
+                .peak_memory()
+                .context("Peak memory was not measured.")?
+                .get() as f64,
+        ))
     }
 }
