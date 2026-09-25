@@ -1,8 +1,16 @@
 use anyhow::{Result, ensure};
-use std::{fs, process::Command};
+use b3::{Interval, Shrinkage, analyze_measurements, write_posterior_csv};
+use std::{fs, num::NonZeroUsize, process::Command};
 use tempfile::{TempDir, tempdir};
 
 const REQUIRED: &str = "output-dir = 'bench'\nrepetitions = 12\ncommand = ['benchmark']\n";
+
+const PREAMBLE: &str = "baseline = 'HEAD'\n\
+    candidate = 'HEAD'\n\
+    output-dir = 'bench'\n\
+    repetitions = 10\n\
+    draws = 1000\n\
+    seed = 0\n";
 
 const CONFIG: &str = "\
     baseline = 'baseline-branch'\n\
@@ -12,7 +20,7 @@ const CONFIG: &str = "\
     repetitions = 12\n\
     draws = 2000\n\
     interval = [0.5, 0.9]\n\
-    seed = 7\n\
+    seed = 0\n\
     command = ['Rscript', 'benchmark.R']\n";
 
 const BUILTIN_USAGE: &str = "--output-dir <DIR> --repetitions <REPETITIONS> -- <COMMAND>...";
@@ -85,7 +93,7 @@ fn a_complete_configuration_runs_without_any_arguments() -> Result<()> {
         candidate = 'HEAD'\n\
         repetitions = 10\n\
         draws = 1000\n\
-        seed = 1\n\
+        seed = 0\n\
         output-dir = 'benchmark'\n\
         command = ['git', '--version']\n",
     )?;
@@ -110,6 +118,35 @@ fn a_complete_configuration_runs_without_any_arguments() -> Result<()> {
 }
 
 #[test]
+fn saved_measurements_reproduce_the_full_analysis() -> Result<()> {
+    let project = repository(&format!("{PREAMBLE}command = ['git', '--version']\n"))?;
+    let (succeeded, _, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+
+    let output = project.path().join("bench");
+    let intervals = [
+        Interval::new(0.5)?,
+        Interval::new(0.8)?,
+        Interval::new(0.98)?,
+    ];
+    let analysis = analyze_measurements(
+        &output.join("measurements.csv"),
+        0,
+        NonZeroUsize::new(1_000).unwrap(),
+        Shrinkage::NONE,
+        &intervals,
+    )?;
+    let reproduced = output.join("posterior-reproduced.csv");
+    write_posterior_csv(&reproduced, &analysis.posterior)?;
+
+    assert_eq!(
+        fs::read_to_string(reproduced)?,
+        fs::read_to_string(output.join("posterior.csv"))?
+    );
+    Ok(())
+}
+
+#[test]
 fn builtin_defaults_apply_without_a_configuration_file() -> Result<()> {
     let project = project(&[])?;
     let help = help(&project, &[])?;
@@ -118,6 +155,7 @@ fn builtin_defaults_apply_without_a_configuration_file() -> Result<()> {
         "[default: main]",
         "[default: HEAD]",
         "[default: 0]",
+        "[default: 4]",
         "[default: 10000]",
         "[default: 0.5 0.8 0.98]",
     ] {
@@ -297,16 +335,11 @@ fn selectors_are_found_after_run_options() -> Result<()> {
 
 #[test]
 fn a_benchmark_supplies_its_own_command() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        \n\
+    let project = repository(&format!(
+        "{PREAMBLE}\n\
         [benchmarks.parse]\n\
-        command = ['git', '--version']\n",
-    )?;
+        command = ['git', '--version']\n"
+    ))?;
     let (succeeded, stdout, stderr) = run(&project, &["--benchmark", "parse"])?;
 
     ensure!(succeeded, "b3 failed with {stderr}");
@@ -351,6 +384,38 @@ fn an_argument_overrides_a_selected_benchmark() -> Result<()> {
         error.contains("At least 10 repetitions are required."),
         "{error}"
     );
+
+    Ok(())
+}
+
+#[test]
+fn a_benchmarks_own_options_cannot_be_passed_as_arguments() -> Result<()> {
+    let project = project(&[(
+        "b3.toml",
+        "output-dir = 'bench'\n\
+        repetitions = 10\n\
+        \n\
+        [benchmarks.parse]\n\
+        command = ['git', '--version']\n",
+    )])?;
+
+    for (arguments, key) in [
+        (&["--working-directory", "sub"][..], "working-directory"),
+        (&["--env", "KEY=VALUE"][..], "env"),
+        (&["--", "git", "--version"][..], "command"),
+    ] {
+        let error = failure(
+            &project,
+            &[&["--benchmark", "parse"][..], arguments].concat(),
+        )?;
+
+        assert!(
+            error.contains(&format!(
+                "`{key}` cannot be passed on the command line; set it in [benchmarks.parse] instead."
+            )),
+            "{arguments:?} gave {error}"
+        );
+    }
 
     Ok(())
 }
@@ -432,17 +497,12 @@ fn a_malformed_benchmarks_table_is_always_rejected() -> Result<()> {
 
 #[test]
 fn a_benchmark_can_set_its_working_directory() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        \n\
+    let project = repository(&format!(
+        "{PREAMBLE}\n\
         [benchmarks.parse]\n\
-        command = ['git', 'rev-parse', '--show-prefix']\n\
-        working-directory = 'sub'\n",
-    )?;
+        command = ['git', 'ls-files', '--error-unmatch', '.gitkeep']\n\
+        working-directory = 'sub'\n"
+    ))?;
     fs::create_dir(project.path().join("sub"))?;
     fs::write(project.path().join("sub").join(".gitkeep"), "")?;
     git(&project, &["add", "sub"])?;
@@ -451,60 +511,32 @@ fn a_benchmark_can_set_its_working_directory() -> Result<()> {
     let (succeeded, _, stderr) = run(&project, &["--benchmark", "parse"])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
-    let log = fs::read_to_string(
-        project
-            .path()
-            .join("bench")
-            .join("parse")
-            .join("benchmark.log"),
-    )?;
-    assert!(log.contains("sub/"), "{log}");
-
     Ok(())
 }
 
 #[test]
 fn a_benchmark_can_set_environment_variables() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        \n\
+    let project = repository(&format!(
+        "{PREAMBLE}\n\
         [benchmarks.parse]\n\
-        command = ['git', 'config', 'user.name']\n\
+        command = ['git', 'config', '--get-regexp', '^user.name$', '^benchmark-env$']\n\
         \n\
         [benchmarks.parse.env]\n\
         GIT_CONFIG_COUNT = '1'\n\
         GIT_CONFIG_KEY_0 = 'user.name'\n\
-        GIT_CONFIG_VALUE_0 = 'benchmark-env'\n",
-    )?;
+        GIT_CONFIG_VALUE_0 = 'benchmark-env'\n"
+    ))?;
 
     let (succeeded, _, stderr) = run(&project, &["--benchmark", "parse"])?;
     ensure!(succeeded, "b3 failed with {stderr}");
-
-    let log = fs::read_to_string(
-        project
-            .path()
-            .join("bench")
-            .join("parse")
-            .join("benchmark.log"),
-    )?;
-    assert!(log.contains("benchmark-env"), "{log}");
 
     Ok(())
 }
 
 #[test]
 fn a_benchmarks_env_merges_with_the_top_level_env() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        command = ['git', 'config', 'user.name']\n\
+    let project = repository(&format!(
+        "{PREAMBLE}command = ['git', 'config', 'user.name']\n\
         \n\
         [env]\n\
         GIT_CONFIG_COUNT = '1'\n\
@@ -512,44 +544,29 @@ fn a_benchmarks_env_merges_with_the_top_level_env() -> Result<()> {
         GIT_CONFIG_VALUE_0 = 'top-level-env'\n\
         \n\
         [benchmarks.parse]\n\
-        command = ['git', 'config', 'user.name']\n\
+        command = ['git', 'config', '--get-regexp', '^user.name$', '^benchmark-env$']\n\
         \n\
         [benchmarks.parse.env]\n\
-        GIT_CONFIG_VALUE_0 = 'benchmark-env'\n",
-    )?;
+        GIT_CONFIG_VALUE_0 = 'benchmark-env'\n"
+    ))?;
 
     let (succeeded, _, stderr) = run(&project, &["--benchmark", "parse"])?;
     ensure!(succeeded, "b3 failed with {stderr}");
-
-    let log = fs::read_to_string(
-        project
-            .path()
-            .join("bench")
-            .join("parse")
-            .join("benchmark.log"),
-    )?;
-    assert!(log.contains("benchmark-env"), "{log}");
-    assert!(!log.contains("top-level-env"), "{log}");
 
     Ok(())
 }
 
 #[test]
 fn working_directory_and_env_are_ordinary_options() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        working-directory = 'sub'\n\
-        command = ['git', 'config', 'user.name']\n\
+    let project = repository(&format!(
+        "{PREAMBLE}working-directory = 'sub'\n\
+        command = ['git', 'config', '--get-regexp', '^user.name$', '^top-level-env$']\n\
         \n\
         [env]\n\
         GIT_CONFIG_COUNT = '1'\n\
         GIT_CONFIG_KEY_0 = 'user.name'\n\
-        GIT_CONFIG_VALUE_0 = 'top-level-env'\n",
-    )?;
+        GIT_CONFIG_VALUE_0 = 'top-level-env'\n"
+    ))?;
     fs::create_dir(project.path().join("sub"))?;
     fs::write(project.path().join("sub").join(".gitkeep"), "")?;
     git(&project, &["add", "sub"])?;
@@ -558,27 +575,19 @@ fn working_directory_and_env_are_ordinary_options() -> Result<()> {
     let (succeeded, _, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
-    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
-    assert!(log.contains("top-level-env"), "{log}");
-
     Ok(())
 }
 
 #[test]
 fn an_explicit_env_argument_overrides_the_configuration() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        command = ['git', 'config', 'user.name']\n\
+    let project = repository(&format!(
+        "{PREAMBLE}command = ['git', 'config', '--get-regexp', '^user.name$', '^argument-env$']\n\
         \n\
         [env]\n\
         GIT_CONFIG_COUNT = '1'\n\
         GIT_CONFIG_KEY_0 = 'user.name'\n\
-        GIT_CONFIG_VALUE_0 = 'configured-env'\n",
-    )?;
+        GIT_CONFIG_VALUE_0 = 'configured-env'\n"
+    ))?;
 
     let (succeeded, _, stderr) = run(
         &project,
@@ -593,138 +602,374 @@ fn an_explicit_env_argument_overrides_the_configuration() -> Result<()> {
     )?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
-    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
-    assert!(log.contains("argument-env"), "{log}");
-    assert!(!log.contains("configured-env"), "{log}");
-
     Ok(())
 }
 
 #[test]
-fn setup_runs_in_each_worktree_before_the_measured_runs() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        setup = ['git', 'config', '--file', 'marker.txt', 'setup.ran', 'yes']\n\
-        command = ['git', 'config', '--file', 'marker.txt', 'setup.ran']\n",
-    )?;
+fn benchmark_startup_runs_in_each_worktree_before_the_measured_runs() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}[benchmarks.test]\n\
+        startup = ['git', 'config', '--file', 'marker.txt', 'startup.ran', 'yes']\n\
+        command = ['git', 'config', '--file', 'marker.txt', '--get-regexp', '^startup.ran$', '^yes$']\n"
+    ))?;
 
     let (succeeded, _, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
-    let log = fs::read_to_string(project.path().join("bench").join("benchmark.log"))?;
-    assert_eq!(log.matches("yes").count(), 20, "{log}");
-
     Ok(())
 }
 
 #[test]
-fn a_failing_setup_stops_before_the_measured_runs() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        setup = ['git', 'cat-file', '-p', 'absent-object']\n\
-        command = ['git', '--version']\n",
-    )?;
+fn a_failing_benchmark_startup_stops_before_the_measured_runs() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}[benchmarks.test]\n\
+        startup = ['git', 'cat-file', '-p', 'absent-object']\n\
+        teardown = ['git', 'tag', '--force', 'startup-cleaned-up']\n\
+        command = ['git', '--version']\n"
+    ))?;
 
     let error = failure(&project, &[])?;
 
-    assert!(error.contains("The baseline setup failed."), "{error}");
+    assert!(error.contains("The baseline startup failed."), "{error}");
     assert!(
         error.contains("Not a valid object name absent-object"),
         "{error}"
     );
 
-    let bench = project.path().join("bench");
+    let bench = project.path().join("bench/test");
     assert!(bench.join("config.json").is_file());
     assert!(!bench.join("benchmark.log").exists());
+    git(
+        &project,
+        &["rev-parse", "--verify", "refs/tags/startup-cleaned-up"],
+    )?;
 
     Ok(())
 }
 
 #[test]
 fn teardown_runs_after_the_measured_runs() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
+    let project = repository(&format!(
+        "{PREAMBLE}[benchmarks.test]\n\
         teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
-        command = ['git', '--version']\n",
-    )?;
+        command = ['git', '--version']\n"
+    ))?;
 
     let error = failure(&project, &[])?;
 
     assert!(error.contains("The baseline teardown failed."), "{error}");
 
-    let bench = project.path().join("bench");
+    let bench = project.path().join("bench/test");
     let log = fs::read_to_string(bench.join("benchmark.log"))?;
     assert_eq!(log.lines().count(), 20, "{log}");
-    assert!(!bench.join("measurements.csv").exists());
+
+    let csv = fs::read_to_string(bench.join("measurements.csv"))?;
+    assert_eq!(csv.lines().count(), 11, "{csv}");
 
     Ok(())
 }
 
 #[test]
-fn a_benchmark_can_set_its_own_setup_and_teardown() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        setup = ['git', 'config', '--file', 'marker.txt', 'setup.ran', 'top-level-setup']\n\
+fn candidate_teardown_runs_after_baseline_teardown_fails() -> Result<()> {
+    let project = repository("")?;
+    let baseline = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project.path())
+        .output()?;
+    let baseline = String::from_utf8(baseline.stdout)?.trim().to_owned();
+    git(
+        &project,
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "--message",
+            "candidate",
+        ],
+    )?;
+    let candidate = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project.path())
+        .output()?;
+    let candidate = String::from_utf8(candidate.stdout)?.trim().to_owned();
+    git(
+        &project,
+        &["update-ref", "refs/tags/teardown-state", &candidate],
+    )?;
+    fs::write(
+        project.path().join("b3.toml"),
+        format!(
+            "baseline = '{baseline}'\n\
+             candidate = '{candidate}'\n\
+             output-dir = 'bench'\n\
+             repetitions = 10\n\
+             draws = 1000\n\
+             [benchmarks.test]\n\
+             teardown = ['git', 'update-ref', 'refs/tags/teardown-state', '{baseline}', 'HEAD']\n\
+             command = ['git', '--version']\n"
+        ),
+    )?;
+
+    let error = failure(&project, &[])?;
+    assert!(error.contains("The baseline teardown failed."), "{error}");
+
+    let state = Command::new("git")
+        .args(["rev-parse", "refs/tags/teardown-state"])
+        .current_dir(project.path())
+        .output()?;
+    assert!(state.status.success());
+    assert_eq!(String::from_utf8(state.stdout)?.trim(), baseline);
+
+    Ok(())
+}
+
+#[test]
+fn successful_lifecycle_output_is_suppressed() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}startup = ['git', '--version']\n\
+         teardown = ['git', '--version']\n\
+         [benchmarks.test]\n\
+         startup = ['git', '--version']\n\
+         teardown = ['git', '--version']\n\
+         command = ['git', 'rev-parse', '--is-inside-work-tree']\n"
+    ))?;
+
+    let (succeeded, stdout, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+    assert!(!stdout.contains("git version"), "{stdout}");
+    assert!(!stderr.contains("git version"), "{stderr}");
+
+    Ok(())
+}
+
+#[test]
+fn suite_and_benchmark_each_run_startups_compose() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}startup-each-run = ['git', 'config', '--file', 'marker.txt', 'suite.ran', 'yes']\n\
+         [benchmarks.test]\n\
+         startup-each-run = ['git', 'config', '--file', 'marker.txt', '--rename-section', 'suite', 'benchmark']\n\
+         command = ['git', 'config', '--file', 'marker.txt', '--get-regexp', '^benchmark.ran$', '^yes$']\n"
+    ))?;
+
+    let (succeeded, _stdout, stderr) = run(&project, &[])?;
+    ensure!(succeeded, "b3 failed with {stderr}");
+    Ok(())
+}
+
+#[test]
+fn each_run_teardowns_run_after_a_failed_benchmark() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}teardown-each-run = ['git', 'tag', '--force', 'suite-each-run-torn-down']\n\
+         [benchmarks.test]\n\
+         teardown-each-run = ['git', 'tag', '--force', 'benchmark-each-run-torn-down']\n\
+         command = ['git', 'cat-file', '-p', 'absent-object']\n"
+    ))?;
+
+    let (succeeded, stdout, stderr) = run(&project, &[])?;
+    assert!(!succeeded, "b3 unexpectedly succeeded with {stdout}");
+    assert!(stderr.contains("benchmark failed"), "{stderr}");
+    for tag in [
+        "refs/tags/suite-each-run-torn-down",
+        "refs/tags/benchmark-each-run-torn-down",
+    ] {
+        git(&project, &["rev-parse", "--verify", tag])?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn removed_lifecycle_names_are_rejected() -> Result<()> {
+    for key in ["setup", "prepare"] {
+        let project = project(&[("b3.toml", &format!("{REQUIRED}{key} = ['git']\n"))])?;
+        let error = failure(&project, &[])?;
+        assert!(
+            error.contains(&format!("sets `{key}`, which is not an option")),
+            "{error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn a_failing_benchmark_still_leaves_a_measurements_file() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}command = ['git', 'cat-file', '-p', 'absent-object']\n"
+    ))?;
+
+    let error = failure(&project, &[])?;
+
+    assert!(error.contains("benchmark failed"), "{error}");
+    assert_eq!(
+        fs::read_to_string(project.path().join("bench").join("measurements.csv"))?,
+        "repetition,order,baseline_seconds,candidate_seconds\n"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn a_timed_out_benchmark_is_logged() -> Result<()> {
+    let command = if cfg!(windows) {
+        "['ping', '-n', '31', '127.0.0.1']"
+    } else {
+        "['sleep', '30']"
+    };
+    let project = repository(&format!("{PREAMBLE}timeout = 1\ncommand = {command}\n"))?;
+
+    let error = failure(&project, &[])?;
+    assert!(error.contains("timed out"), "{error}");
+
+    let log = fs::read_to_string(project.path().join("bench/benchmark.log"))?;
+    let entry: serde_json::Value = serde_json::from_str(
+        log.lines()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("The timed-out run was not logged."))?,
+    )?;
+    assert_eq!(entry["timed_out"], true, "{entry}");
+
+    Ok(())
+}
+
+#[test]
+fn redirected_stderr_reports_each_benchmark_run() -> Result<()> {
+    let project = repository(&format!("{PREAMBLE}command = ['git', '--version']\n"))?;
+
+    let (succeeded, _, stderr) = run(&project, &[])?;
+
+    ensure!(succeeded, "b3 failed with {stderr}");
+    let progress: Vec<_> = stderr
+        .lines()
+        .filter(|line| line.ends_with(" benchmark"))
+        .collect();
+    assert_eq!(progress.len(), 20, "{stderr}");
+    assert!(progress[0].contains(" 1/20 benchmark"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn modified_tracked_files_print_a_warning() -> Result<()> {
+    let project = repository(&format!("{PREAMBLE}command = ['git', '--version']\n"))?;
+    fs::write(project.path().join("tracked.txt"), "before")?;
+    git(&project, &["add", "tracked.txt"])?;
+    git(&project, &["commit", "--quiet", "--message", "tracked"])?;
+    fs::write(project.path().join("tracked.txt"), "after")?;
+
+    let (succeeded, _, stderr) = run(&project, &[])?;
+
+    ensure!(succeeded, "b3 failed with {stderr}");
+    assert!(stderr.contains("modified tracked files"), "{stderr}");
+
+    Ok(())
+}
+
+#[test]
+fn a_clean_working_tree_prints_no_warning() -> Result<()> {
+    let project = repository(&format!("{PREAMBLE}command = ['git', '--version']\n"))?;
+
+    let (succeeded, _, stderr) = run(&project, &[])?;
+
+    ensure!(succeeded, "b3 failed with {stderr}");
+    assert!(!stderr.contains("modified tracked files"), "{stderr}");
+
+    Ok(())
+}
+
+#[test]
+fn teardown_still_runs_when_a_benchmark_fails() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}[benchmarks.test]\n\
+        teardown = ['git', 'tag', '--force', 'teardown-ran']\n\
+        command = ['git', 'cat-file', '-p', 'absent-object']\n"
+    ))?;
+
+    let error = failure(&project, &[])?;
+
+    assert!(error.contains("benchmark failed"), "{error}");
+    git(
+        &project,
+        &["rev-parse", "--verify", "refs/tags/teardown-ran"],
+    )?;
+
+    Ok(())
+}
+
+#[test]
+fn a_teardown_failure_is_reported_alongside_a_benchmark_failure() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}[benchmarks.test]\n\
+        teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
+        command = ['git', 'cat-file', '-p', 'absent-object']\n"
+    ))?;
+
+    let error = failure(&project, &[])?;
+
+    assert!(error.contains("benchmark failed"), "{error}");
+    assert!(error.contains("The baseline teardown failed."), "{error}");
+
+    Ok(())
+}
+
+#[test]
+fn a_benchmark_inherits_the_top_level_command() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}command = ['git', '--version']\n\
+        \n\
+        [benchmarks.inherits]\n\
+        draws = 2000\n"
+    ))?;
+    let (succeeded, stdout, stderr) = run(&project, &["--benchmark", "inherits"])?;
+
+    ensure!(succeeded, "b3 failed with {stderr}");
+    assert!(stdout.contains("2000 Bayesian bootstrap draws"), "{stdout}");
+
+    Ok(())
+}
+
+#[test]
+fn suite_and_benchmark_lifecycles_remain_distinct() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}startup = ['git', '--version']\n\
         teardown = ['git', '--version']\n\
         \n\
         [benchmarks.parse]\n\
-        setup = ['git', 'config', '--file', 'marker.txt', 'setup.ran', 'benchmark-setup']\n\
+        startup = ['git', 'config', '--file', 'marker.txt', 'startup.ran', 'benchmark-startup']\n\
         teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
-        command = ['git', 'config', '--file', 'marker.txt', 'setup.ran']\n",
-    )?;
+        command = ['git', 'config', '--file', 'marker.txt', '--get-regexp', '^startup.ran$', '^benchmark-startup$']\n"
+    ))?;
 
     let error = failure(&project, &[])?;
 
     assert!(error.contains("The baseline teardown failed."), "{error}");
 
-    let log = fs::read_to_string(
-        project
-            .path()
-            .join("bench")
-            .join("parse")
-            .join("benchmark.log"),
-    )?;
-    assert_eq!(log.matches("benchmark-setup").count(), 20, "{log}");
-    assert!(!log.contains("top-level-setup"), "{log}");
-
     Ok(())
 }
 
 #[test]
-fn a_benchmark_clears_an_inherited_setup_and_teardown_with_an_empty_list() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        setup = ['git', 'cat-file', '-p', 'absent-object']\n\
-        teardown = ['git', 'cat-file', '-p', 'absent-object']\n\
+fn an_empty_benchmark_lifecycle_does_not_clear_the_suite_lifecycle() -> Result<()> {
+    let project = repository(&format!(
+        "{PREAMBLE}startup = ['git', 'cat-file', '-p', 'absent-object']\n\
+        teardown = ['git', 'tag', 'suite-cleaned-up']\n\
         \n\
         [benchmarks.standalone]\n\
-        setup = []\n\
+        startup = []\n\
         teardown = []\n\
-        command = ['git', '--version']\n",
-    )?;
+        command = ['git', '--version']\n"
+    ))?;
 
-    let (succeeded, _, stderr) = run(&project, &[])?;
-    ensure!(succeeded, "b3 failed with {stderr}");
+    let error = failure(&project, &[])?;
+    assert!(error.contains("The suite startup failed."), "{error}");
+    assert!(
+        project
+            .path()
+            .join("bench/standalone/config.json")
+            .is_file()
+    );
+    git(
+        &project,
+        &["rev-parse", "--verify", "refs/tags/suite-cleaned-up"],
+    )?;
 
     Ok(())
 }
@@ -734,6 +979,7 @@ const SUITE: &str = "baseline = 'HEAD'\n\
     output-dir = 'bench'\n\
     repetitions = 10\n\
     draws = 1000\n\
+    seed = 0\n\
     \n\
     [benchmarks.first]\n\
     command = ['git', '--version']\n\
@@ -796,16 +1042,11 @@ fn a_single_benchmark_argument_selects_a_subset() -> Result<()> {
 
 #[test]
 fn a_lone_benchmark_skips_the_short_report() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        \n\
+    let project = repository(&format!(
+        "{PREAMBLE}\n\
         [benchmarks.parse]\n\
-        command = ['git', '--version']\n",
-    )?;
+        command = ['git', '--version']\n"
+    ))?;
     let (succeeded, stdout, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
@@ -820,20 +1061,15 @@ fn a_lone_benchmark_skips_the_short_report() -> Result<()> {
 
 #[test]
 fn report_short_uses_the_top_level_output_directory() -> Result<()> {
-    let project = repository(
-        "baseline = 'HEAD'\n\
-        candidate = 'HEAD'\n\
-        output-dir = 'bench'\n\
-        repetitions = 10\n\
-        draws = 1000\n\
-        \n\
+    let project = repository(&format!(
+        "{PREAMBLE}\n\
         [benchmarks.a]\n\
         command = ['git', '--version']\n\
         output-dir = 'special'\n\
         \n\
         [benchmarks.b]\n\
-        command = ['git', '--version']\n",
-    )?;
+        command = ['git', '--version']\n"
+    ))?;
     let (succeeded, _, stderr) = run(&project, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
 
@@ -894,22 +1130,6 @@ fn benchmarks_run_in_declaration_order() -> Result<()> {
     assert!(
         stdout.find("zebra: Comparing") < stdout.find("apple: Comparing"),
         "{stdout}"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn every_benchmark_must_define_its_own_command() -> Result<()> {
-    let project = project(&[(
-        "b3.toml",
-        "command = ['git', '--version']\n[benchmarks.parse]\nrepetitions = 10\n",
-    )])?;
-    let error = failure(&project, &[])?;
-
-    assert!(
-        error.contains("benchmark `parse` must set `command`"),
-        "{error}"
     );
 
     Ok(())
@@ -981,23 +1201,6 @@ fn every_benchmark_uses_the_suite_seed() -> Result<()> {
     Ok(())
 }
 
-fn logged_worktree(project: &TempDir, benchmark: &str) -> Result<String> {
-    let text = fs::read_to_string(
-        project
-            .path()
-            .join("bench")
-            .join(benchmark)
-            .join("benchmark.log"),
-    )?;
-    let entry: serde_json::Value =
-        serde_json::from_str(text.lines().next().expect("a benchmark log has entries"))?;
-    Ok(entry["stdout"]
-        .as_str()
-        .expect("stdout is a string")
-        .trim()
-        .to_owned())
-}
-
 #[test]
 fn worktrees_are_shared_unless_isolation_is_requested() -> Result<()> {
     const WORKTREES: &str = "baseline = 'HEAD'\n\
@@ -1006,25 +1209,17 @@ fn worktrees_are_shared_unless_isolation_is_requested() -> Result<()> {
         repetitions = 10\n\
         draws = 1000\n\
         [benchmarks.first]\n\
-        command = ['git', 'rev-parse', '--show-toplevel']\n\
+        command = ['git', 'config', '--file', 'shared.marker', 'first.ran', 'yes']\n\
         [benchmarks.second]\n\
-        command = ['git', 'rev-parse', '--show-toplevel']\n";
+        command = ['git', 'config', '--file', 'shared.marker', '--get-regexp', '^first.ran$', '^yes$']\n";
 
     let shared = repository(WORKTREES)?;
     let (succeeded, _, stderr) = run(&shared, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
-    assert_eq!(
-        logged_worktree(&shared, "first")?,
-        logged_worktree(&shared, "second")?
-    );
 
     let isolated = repository(WORKTREES)?;
-    let (succeeded, _, stderr) = run(&isolated, &["--isolate"])?;
-    ensure!(succeeded, "b3 failed with {stderr}");
-    assert_ne!(
-        logged_worktree(&isolated, "first")?,
-        logged_worktree(&isolated, "second")?
-    );
+    let error = failure(&isolated, &["--isolate"])?;
+    assert!(error.contains("benchmark failed"), "{error}");
 
     let selective = repository(
         "baseline = 'HEAD'\n\
@@ -1034,22 +1229,20 @@ fn worktrees_are_shared_unless_isolation_is_requested() -> Result<()> {
         draws = 1000\n\
         [benchmarks.isolated]\n\
         isolate = true\n\
-        command = ['git', 'rev-parse', '--show-toplevel']\n\
+        command = ['git', 'update-index', '--force-remove', 'sentinel']\n\
         [benchmarks.shared_one]\n\
-        command = ['git', 'rev-parse', '--show-toplevel']\n\
+        startup = ['git', 'config', '--file', 'shared.marker', 'shared.ran', 'yes']\n\
+        command = ['git', 'ls-files', '--error-unmatch', 'sentinel']\n\
         [benchmarks.shared_two]\n\
-        command = ['git', 'rev-parse', '--show-toplevel']\n",
+        command = ['git', 'config', '--file', 'shared.marker', '--get-regexp', '^shared.ran$', '^yes$']\n",
+    )?;
+    fs::write(selective.path().join("sentinel"), "tracked")?;
+    git(&selective, &["add", "sentinel"])?;
+    git(
+        &selective,
+        &["commit", "--quiet", "--message", "add sentinel"],
     )?;
     let (succeeded, _, stderr) = run(&selective, &[])?;
     ensure!(succeeded, "b3 failed with {stderr}");
-    assert_ne!(
-        logged_worktree(&selective, "isolated")?,
-        logged_worktree(&selective, "shared_one")?
-    );
-    assert_eq!(
-        logged_worktree(&selective, "shared_one")?,
-        logged_worktree(&selective, "shared_two")?
-    );
-
     Ok(())
 }

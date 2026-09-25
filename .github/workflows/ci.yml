@@ -109,7 +109,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo test --locked --workspace
+      - name: Test default features
+        run: |
+          parent="/sys/fs/cgroup$(awk -F: '$1 == "0" { print $3 }' /proc/self/cgroup)"
+          cgroup="$parent/b3-ci"
+          sudo mkdir "$cgroup"
+          sudo chown -R "$(id -u):$(id -g)" "$cgroup"
+          echo $$ | sudo tee "$cgroup/cgroup.procs" >/dev/null
+          B3_CGROUP_ROOT="$cgroup" cargo test --locked --workspace
 
   test:
     name: Test all features (${{ matrix.os }})
@@ -131,7 +138,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: >
+      - name: Test all features
+        if: runner.os == 'Linux'
+        run: |
+          parent="/sys/fs/cgroup$(awk -F: '$1 == "0" { print $3 }' /proc/self/cgroup)"
+          cgroup="$parent/b3-ci"
+          sudo mkdir "$cgroup"
+          sudo chown -R "$(id -u):$(id -g)" "$cgroup"
+          echo $$ | sudo tee "$cgroup/cgroup.procs" >/dev/null
+          B3_CGROUP_ROOT="$cgroup" cargo test --locked --workspace --all-targets --all-features
+
+      - if: runner.os != 'Linux'
+        run: >
           cargo test
           --locked
           --workspace

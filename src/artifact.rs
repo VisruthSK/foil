@@ -1,4 +1,4 @@
-use crate::{Metric, Pair, Posterior, Repetitions, Revision, RunOrder, Shrinkage};
+use crate::{Interval, Metric, Pair, Posterior, Repetition, Revision, RunOrder, Shrinkage};
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -12,12 +12,25 @@ use std::{
 pub struct Config<'a> {
     pub seed: u64,
     pub repetitions: usize,
+    pub block_size: usize,
     pub draws: usize,
+    pub timeout_seconds: Option<u64>,
+    pub isolate: bool,
     pub shrinkage: Shrinkage,
+    pub intervals: &'a [Interval],
+    pub working_directory: Option<&'a Path>,
+    pub env: &'a [(String, String)],
     pub baseline: &'a Revision,
     pub candidate: &'a Revision,
-    pub setup: &'a [OsString],
+    pub suite_lifecycle: LifecycleConfig<'a>,
+    pub benchmark_lifecycle: LifecycleConfig<'a>,
     pub command: &'a [OsString],
+}
+
+pub struct LifecycleConfig<'a> {
+    pub startup: &'a [OsString],
+    pub startup_each_run: &'a [OsString],
+    pub teardown_each_run: &'a [OsString],
     pub teardown: &'a [OsString],
 }
 
@@ -35,8 +48,14 @@ pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
     let value = json!({
         "seed": config.seed,
         "repetitions": config.repetitions,
+        "block_size": config.block_size,
         "draws": config.draws,
+        "timeout_seconds": config.timeout_seconds,
+        "isolate": config.isolate,
         "shrinkage": config.shrinkage.get(),
+        "intervals": config.intervals.iter().map(|interval| interval.percent() / 100.0).collect::<Vec<_>>(),
+        "working_directory": config.working_directory,
+        "env": config.env,
         "b3_version": env!("CARGO_PKG_VERSION"),
         "baseline": {
             "revision": config.baseline.name(),
@@ -46,9 +65,19 @@ pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
             "revision": config.candidate.name(),
             "hash": config.candidate.hash(),
         },
-        "setup": utf8("setup", config.setup)?,
+        "suite_lifecycle": {
+            "startup": utf8("suite startup", config.suite_lifecycle.startup)?,
+            "startup_each_run": utf8("suite startup-each-run", config.suite_lifecycle.startup_each_run)?,
+            "teardown_each_run": utf8("suite teardown-each-run", config.suite_lifecycle.teardown_each_run)?,
+            "teardown": utf8("suite teardown", config.suite_lifecycle.teardown)?,
+        },
+        "benchmark_lifecycle": {
+            "startup": utf8("benchmark startup", config.benchmark_lifecycle.startup)?,
+            "startup_each_run": utf8("benchmark startup-each-run", config.benchmark_lifecycle.startup_each_run)?,
+            "teardown_each_run": utf8("benchmark teardown-each-run", config.benchmark_lifecycle.teardown_each_run)?,
+            "teardown": utf8("benchmark teardown", config.benchmark_lifecycle.teardown)?,
+        },
         "command": utf8("benchmark", config.command)?,
-        "teardown": utf8("teardown", config.teardown)?,
     });
 
     let mut writer = BufWriter::new(File::create(path)?);
@@ -59,15 +88,25 @@ pub fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
     Ok(())
 }
 
-pub fn write_measurements_csv(path: &Path, repetitions: &Repetitions) -> Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
+pub struct MeasurementsCsv {
+    writer: BufWriter<File>,
+    rows: usize,
+}
 
-    writeln!(
-        writer,
-        "repetition,order,baseline_seconds,candidate_seconds"
-    )?;
+impl MeasurementsCsv {
+    pub fn create(path: &Path) -> Result<Self> {
+        let mut writer = BufWriter::new(File::create(path)?);
 
-    for (index, repetition) in repetitions.iter().enumerate() {
+        writeln!(
+            writer,
+            "repetition,order,baseline_seconds,candidate_seconds"
+        )?;
+        writer.flush()?;
+
+        Ok(Self { writer, rows: 0 })
+    }
+
+    pub fn append(&mut self, repetition: &Repetition) -> Result<()> {
         let Pair {
             baseline,
             candidate,
@@ -77,19 +116,20 @@ pub fn write_measurements_csv(path: &Path, repetitions: &Repetitions) -> Result<
             RunOrder::CandidateFirst => "candidate_first",
         };
 
+        let row = self.rows + 1;
         writeln!(
-            writer,
+            self.writer,
             "{},{},{},{}",
-            index + 1,
+            row,
             order,
             baseline.elapsed().as_secs_f64(),
             candidate.elapsed().as_secs_f64(),
         )?;
+        self.writer.flush()?;
+        self.rows = row;
+
+        Ok(())
     }
-
-    writer.flush()?;
-
-    Ok(())
 }
 
 pub fn write_posterior_csv<M: Metric>(path: &Path, posterior: &Posterior<M>) -> Result<()> {
@@ -122,26 +162,30 @@ mod tests {
         )
     }
 
+    fn repetition(index: usize) -> Repetition {
+        Repetition {
+            outputs: Pair {
+                baseline: output(1.0, 1_000),
+                candidate: output(0.5, 2_000),
+            },
+            order: if index % 2 == 0 {
+                RunOrder::BaselineFirst
+            } else {
+                RunOrder::CandidateFirst
+            },
+        }
+    }
+
     #[test]
     fn measurements_csv_contains_complete_pairs() -> Result<()> {
-        let repetitions: Repetitions = (0..10)
-            .map(|index| Repetition {
-                outputs: Pair {
-                    baseline: output(1.0, 1_000),
-                    candidate: output(0.5, 2_000),
-                },
-                order: if index % 2 == 0 {
-                    RunOrder::BaselineFirst
-                } else {
-                    RunOrder::CandidateFirst
-                },
-            })
-            .collect::<Vec<_>>()
-            .try_into()?;
         let directory = tempdir()?;
         let path = directory.path().join("measurements.csv");
 
-        write_measurements_csv(&path, &repetitions)?;
+        let mut csv = MeasurementsCsv::create(&path)?;
+        for index in 0..10 {
+            csv.append(&repetition(index))?;
+        }
+        drop(csv);
 
         const EXPECTED: &str = concat!(
             "repetition,order,baseline_seconds,candidate_seconds\n",
@@ -158,6 +202,23 @@ mod tests {
         );
 
         assert_eq!(read_to_string(path)?, EXPECTED);
+
+        Ok(())
+    }
+
+    #[test]
+    fn each_appended_repetition_reaches_disk_immediately() -> Result<()> {
+        let directory = tempdir()?;
+        let path = directory.path().join("measurements.csv");
+
+        let mut csv = MeasurementsCsv::create(&path)?;
+        assert_eq!(
+            read_to_string(&path)?,
+            "repetition,order,baseline_seconds,candidate_seconds\n"
+        );
+
+        csv.append(&repetition(0))?;
+        assert_eq!(read_to_string(&path)?.lines().count(), 2);
 
         Ok(())
     }
