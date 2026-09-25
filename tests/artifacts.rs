@@ -48,6 +48,8 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
     let directory = tempdir()?;
     let path = directory.path().join("config.json");
     let command = ["cargo", "test --workspace"].map(OsString::from);
+    let setup = ["cargo", "build --release"].map(OsString::from);
+    let teardown = ["git", "clean --force"].map(OsString::from);
     let baseline = Revision::resolve("main".to_owned())?;
     let candidate = Revision::resolve("HEAD".to_owned())?;
     let config = Config {
@@ -57,7 +59,9 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
         shrinkage: Shrinkage::new(5.0)?,
         baseline: &baseline,
         candidate: &candidate,
+        setup: &setup,
         command: &command,
+        teardown: &teardown,
     };
 
     write_config_json(&path, &config)?;
@@ -71,7 +75,9 @@ fn config_json_contains_reproduction_metadata() -> Result<()> {
         "b3_version": env!("CARGO_PKG_VERSION"),
         "baseline": { "revision": "main", "hash": baseline.hash() },
         "candidate": { "revision": "HEAD", "hash": candidate.hash() },
+        "setup": ["cargo", "build --release"],
         "command": ["cargo", "test --workspace"],
+        "teardown": ["git", "clean --force"],
     });
 
     assert_eq!(actual, expected);
