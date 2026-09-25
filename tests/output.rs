@@ -156,6 +156,37 @@ fn an_output_dir_argument_relocates_the_report() -> Result<()> {
 }
 
 #[test]
+fn a_traversing_benchmark_name_cannot_delete_files_outside_output_dir() -> Result<()> {
+    let project = repository(
+        "baseline = 'HEAD'\n\
+        candidate = 'HEAD'\n\
+        output-dir = 'bench'\n\
+        repetitions = 10\n\
+        draws = 1000\n\
+        interval = [0.5, 0.8]\n\
+        seed = 0\n\
+        \n\
+        [benchmarks.\"../victim\"]\n\
+        command = ['git', '--version']\n",
+    )?;
+    let victim = project.path().join("victim");
+    std::fs::create_dir(&victim)?;
+    let sentinel = victim.join("report.txt");
+    std::fs::write(&sentinel, "do not delete me")?;
+
+    let (succeeded, _, stderr) = run(&project, &[])?;
+    ensure!(!succeeded, "foil unexpectedly succeeded with {stderr}");
+    assert!(
+        stderr.contains("must be a single path component"),
+        "{stderr}"
+    );
+    assert!(sentinel.is_file(), "sentinel file was removed");
+    assert_eq!(std::fs::read_to_string(&sentinel)?, "do not delete me");
+
+    Ok(())
+}
+
+#[test]
 fn benchmarks_run_in_declaration_order() -> Result<()> {
     let project = repository(
         "baseline = 'HEAD'\n\

@@ -16,8 +16,6 @@ Run `foil --help` for the full set of options.
 
 Each revision runs in its own clean worktree, so local changes are never part of a measurement; `foil` warns when tracked files have been modified.
 
-On Linux, `foil` requires Linux 5.14 or newer with the `cgroup.kill` fork-race fix (`b69bb476dee9` or its stable backport), plus a writable delegated cgroup v2. Run `foil` from inside the delegated subtree; `FOIL_CGROUP_ROOT` only selects an existing delegation.
-
 ## Configuration
 
 The flags above can also be set in a TOML file, keyed by their long names. `foil` reads `foil.toml` from the working directory when present, or the file given by `--config`.
@@ -52,7 +50,7 @@ teardown-each-run = ["collect-logs"]
 command = ["./target/release/parse", "corpus/"]
 ```
 
-Benchmark lifecycle commands share the benchmark's `working-directory` and `env`. Their stdout and stderr are discarded, like measured commands'; redirect explicitly if the output matters. A lifecycle hook and every descendant it starts must finish before the hook completes; surviving descendants are terminated during cleanup. The first Ctrl-C interrupts active startup or benchmark work, then teardown unwinds on a protected cleanup wait. A second Ctrl-C exits immediately. Teardown is also attempted after startup, benchmark, or timeout failures; the original error remains primary and additional cleanup errors are reported alongside it. On macOS, containment uses a process group, which a descendant can deliberately escape with `setsid` or `setpgid`.
+Benchmark lifecycle commands share the benchmark's `working-directory` and `env`. Their stdout and stderr are discarded, like measured commands'; redirect explicitly if the output matters. A lifecycle hook and every descendant it starts must finish before the hook completes; surviving descendants are terminated during cleanup. The first Ctrl-C interrupts active startup or benchmark work, then teardown unwinds on a protected cleanup wait. A second Ctrl-C exits immediately.
 
 A `[benchmarks]` table is where a command belongs in TOML. Each entry names a benchmark for `--benchmark` to select and typically sets its own `command`; it may override ordinary options, and anything it leaves unset, including `command`, is inherited from the top level. Benchmark lifecycle commands are local to that benchmark. Its `env` table is merged with the top-level one, variable by variable, with the benchmark's values winning on conflicts:
 

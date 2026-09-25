@@ -660,6 +660,24 @@ fn unusable_benchmarks_are_reported() -> Result<()> {
 }
 
 #[test]
+fn unsafe_benchmark_names_are_rejected() -> Result<()> {
+    for name in ["..", ".", "../victim", "a/b", "/etc", ""] {
+        let project = project(&[(
+            "foil.toml",
+            &format!("output-dir = 'bench'\n[benchmarks.\"{name}\"]\ncommand = ['git']\n"),
+        )])?;
+        let error = failure(&project, &[])?;
+
+        assert!(
+            error.contains("must be a single path component"),
+            "{name:?} gave {error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn a_malformed_benchmarks_table_is_always_rejected() -> Result<()> {
     let project = project(&[("foil.toml", "output-dir = 'bench'\nbenchmarks = 1\n")])?;
     let error = failure(&project, &["--repetitions", "5"])?;

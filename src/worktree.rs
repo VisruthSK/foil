@@ -88,8 +88,9 @@ impl Worktree {
     }
 
     pub(crate) fn remove(mut self) -> Result<()> {
+        remove_worktree(&self.path)?;
         self.removed = true;
-        remove_worktree(&self.path)
+        Ok(())
     }
 }
 
