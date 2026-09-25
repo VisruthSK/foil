@@ -9,6 +9,7 @@ pub struct Worktree {
     revision: Revision,
 }
 
+#[derive(Clone)]
 pub struct Revision {
     name: String,
     hash: String,
