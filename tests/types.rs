@@ -1,4 +1,4 @@
-use foil::{Metric, PeakMemory, Shrinkage, Time, Unit};
+use foil::{Draw, Metric, PeakMemory, Shrinkage, Time, Unit};
 
 #[test]
 fn time_steps_down_through_si_prefixes() {
@@ -50,4 +50,18 @@ fn shrinkage_rejects_a_value_that_is_not_a_count() {
     }
 
     assert_eq!(Shrinkage::new(0.0).ok(), Some(Shrinkage::NONE));
+}
+
+#[test]
+fn relative_change_requires_a_positive_finite_baseline() {
+    let draw = |baseline, candidate| Draw {
+        baseline: Time::from_base(baseline),
+        candidate: Time::from_base(candidate),
+    };
+
+    assert!((draw(1.0, 1.1).relative().unwrap() - 10.0).abs() < 1e-12);
+    assert_eq!(draw(0.0, 1.0).relative(), None);
+    assert_eq!(draw(-1.0, 1.0).relative(), None);
+    assert_eq!(draw(f64::INFINITY, 1.0).relative(), None);
+    assert_eq!(draw(1.0, f64::INFINITY).relative(), None);
 }

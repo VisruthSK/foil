@@ -14,13 +14,14 @@ mod worktree;
 
 pub use analysis::{Analysis, analyze_measurements};
 pub(crate) use artifact::{
-    Config, LifecycleConfig, MeasurementsCsv, write_config_json, write_posterior_csv,
+    BenchmarkLifecycleConfig, Config, MeasurementsCsv, SuiteLifecycleConfig,
+    WorktreeLifecycleConfig, write_config_json, write_posterior_csv,
 };
 pub use metric::{Metric, PeakMemory, Time, Unit};
 pub use posterior::{Draw, Posterior, Shrinkage};
 pub(crate) use repetition::{Pair, Repetition, Repetitions, RunOrder, Side};
 pub use run::Bytes;
-pub(crate) use run::{BenchmarkLog, RunCommand, RunOutput};
+pub(crate) use run::{BenchmarkLog, CommandTemplate, Measurement, run_unmeasured};
 pub use summary::{Change, ChangeBounds, Interval, Range, Summary};
 pub(crate) use worktree::{Revision, Worktree, working_tree_has_modified_tracked_files};
 

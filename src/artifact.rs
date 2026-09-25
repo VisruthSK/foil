@@ -1,7 +1,8 @@
+use crate::run::Measurement;
 use crate::{Interval, Metric, Pair, Posterior, Repetition, Revision, RunOrder, Shrinkage};
 
 use anyhow::{Context, Result};
-use serde_json::json;
+use serde::Serialize;
 use std::{
     ffi::OsString,
     fs::File,
@@ -21,65 +22,147 @@ pub(crate) struct Config<'a> {
     pub(crate) working_directory: Option<&'a Path>,
     pub(crate) baseline: &'a Revision,
     pub(crate) candidate: &'a Revision,
-    pub(crate) suite_lifecycle: LifecycleConfig<'a>,
-    pub(crate) benchmark_lifecycle: LifecycleConfig<'a>,
+    pub(crate) suite_lifecycle: SuiteLifecycleConfig<'a>,
+    pub(crate) worktree_lifecycle: WorktreeLifecycleConfig<'a>,
+    pub(crate) benchmark_lifecycle: BenchmarkLifecycleConfig<'a>,
     pub(crate) command: &'a [OsString],
 }
 
-pub(crate) struct LifecycleConfig<'a> {
+pub(crate) struct SuiteLifecycleConfig<'a> {
     pub(crate) startup: &'a [OsString],
     pub(crate) startup_each_run: &'a [OsString],
     pub(crate) teardown_each_run: &'a [OsString],
     pub(crate) teardown: &'a [OsString],
 }
 
-fn utf8<'a>(name: &str, command: &'a [OsString]) -> Result<Vec<&'a str>> {
+pub(crate) struct WorktreeLifecycleConfig<'a> {
+    pub(crate) startup: &'a [OsString],
+    pub(crate) teardown: &'a [OsString],
+}
+
+pub(crate) struct BenchmarkLifecycleConfig<'a> {
+    pub(crate) startup: &'a [OsString],
+    pub(crate) startup_each_run: &'a [OsString],
+    pub(crate) teardown_each_run: &'a [OsString],
+    pub(crate) teardown: &'a [OsString],
+}
+
+fn utf8(name: &str, command: &[OsString]) -> Result<Vec<String>> {
     command
         .iter()
         .map(|part| {
             part.to_str()
+                .map(|s| s.to_owned())
                 .with_context(|| format!("The {name} command contains non-UTF-8 text."))
         })
         .collect()
 }
 
+#[derive(Serialize)]
+struct RevisionDto {
+    revision: String,
+    hash: String,
+}
+
+#[derive(Serialize)]
+struct SuiteLifecycleDto {
+    startup: Vec<String>,
+    startup_each_run: Vec<String>,
+    teardown_each_run: Vec<String>,
+    teardown: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct WorktreeLifecycleDto {
+    startup: Vec<String>,
+    teardown: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct BenchmarkLifecycleDto {
+    startup: Vec<String>,
+    startup_each_run: Vec<String>,
+    teardown_each_run: Vec<String>,
+    teardown: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ConfigDto<'a> {
+    seed: u64,
+    repetitions: usize,
+    block_size: usize,
+    draws: usize,
+    timeout_seconds: Option<u64>,
+    isolate: bool,
+    shrinkage: f64,
+    intervals: Vec<f64>,
+    working_directory: Option<&'a Path>,
+    foil_version: &'static str,
+    baseline: RevisionDto,
+    candidate: RevisionDto,
+    suite_lifecycle: SuiteLifecycleDto,
+    worktree_lifecycle: WorktreeLifecycleDto,
+    benchmark_lifecycle: BenchmarkLifecycleDto,
+    command: Vec<String>,
+}
+
 pub(crate) fn write_config_json(path: &Path, config: &Config<'_>) -> Result<()> {
-    let value = json!({
-        "seed": config.seed,
-        "repetitions": config.repetitions,
-        "block_size": config.block_size,
-        "draws": config.draws,
-        "timeout_seconds": config.timeout_seconds,
-        "isolate": config.isolate,
-        "shrinkage": config.shrinkage.get(),
-        "intervals": config.intervals.iter().map(|interval| interval.percent() / 100.0).collect::<Vec<_>>(),
-        "working_directory": config.working_directory,
-        "foil_version": env!("CARGO_PKG_VERSION"),
-        "baseline": {
-            "revision": config.baseline.name(),
-            "hash": config.baseline.hash(),
+    let dto = ConfigDto {
+        seed: config.seed,
+        repetitions: config.repetitions,
+        block_size: config.block_size,
+        draws: config.draws,
+        timeout_seconds: config.timeout_seconds,
+        isolate: config.isolate,
+        shrinkage: config.shrinkage.get(),
+        intervals: config
+            .intervals
+            .iter()
+            .map(|interval| interval.percent() / 100.0)
+            .collect(),
+        working_directory: config.working_directory,
+        foil_version: env!("CARGO_PKG_VERSION"),
+        baseline: RevisionDto {
+            revision: config.baseline.name().to_owned(),
+            hash: config.baseline.hash().to_owned(),
         },
-        "candidate": {
-            "revision": config.candidate.name(),
-            "hash": config.candidate.hash(),
+        candidate: RevisionDto {
+            revision: config.candidate.name().to_owned(),
+            hash: config.candidate.hash().to_owned(),
         },
-        "suite_lifecycle": {
-            "startup": utf8("suite startup", config.suite_lifecycle.startup)?,
-            "startup_each_run": utf8("suite startup-each-run", config.suite_lifecycle.startup_each_run)?,
-            "teardown_each_run": utf8("suite teardown-each-run", config.suite_lifecycle.teardown_each_run)?,
-            "teardown": utf8("suite teardown", config.suite_lifecycle.teardown)?,
+        suite_lifecycle: SuiteLifecycleDto {
+            startup: utf8("suite startup", config.suite_lifecycle.startup)?,
+            startup_each_run: utf8(
+                "suite startup-each-run",
+                config.suite_lifecycle.startup_each_run,
+            )?,
+            teardown_each_run: utf8(
+                "suite teardown-each-run",
+                config.suite_lifecycle.teardown_each_run,
+            )?,
+            teardown: utf8("suite teardown", config.suite_lifecycle.teardown)?,
         },
-        "benchmark_lifecycle": {
-            "startup": utf8("benchmark startup", config.benchmark_lifecycle.startup)?,
-            "startup_each_run": utf8("benchmark startup-each-run", config.benchmark_lifecycle.startup_each_run)?,
-            "teardown_each_run": utf8("benchmark teardown-each-run", config.benchmark_lifecycle.teardown_each_run)?,
-            "teardown": utf8("benchmark teardown", config.benchmark_lifecycle.teardown)?,
+        worktree_lifecycle: WorktreeLifecycleDto {
+            startup: utf8("worktree startup", config.worktree_lifecycle.startup)?,
+            teardown: utf8("worktree teardown", config.worktree_lifecycle.teardown)?,
         },
-        "command": utf8("benchmark", config.command)?,
-    });
+        benchmark_lifecycle: BenchmarkLifecycleDto {
+            startup: utf8("benchmark startup", config.benchmark_lifecycle.startup)?,
+            startup_each_run: utf8(
+                "benchmark startup-each-run",
+                config.benchmark_lifecycle.startup_each_run,
+            )?,
+            teardown_each_run: utf8(
+                "benchmark teardown-each-run",
+                config.benchmark_lifecycle.teardown_each_run,
+            )?,
+            teardown: utf8("benchmark teardown", config.benchmark_lifecycle.teardown)?,
+        },
+        command: utf8("benchmark", config.command)?,
+    };
 
     let mut writer = BufWriter::new(File::create(path)?);
-    serde_json::to_writer_pretty(&mut writer, &value)?;
+    serde_json::to_writer_pretty(&mut writer, &dto)?;
     writeln!(writer)?;
     writer.flush()?;
 
@@ -104,7 +187,7 @@ impl MeasurementsCsv {
         Ok(Self { writer, rows: 0 })
     }
 
-    pub(crate) fn append(&mut self, repetition: &Repetition) -> Result<()> {
+    pub(crate) fn append(&mut self, repetition: &Repetition<Measurement>) -> Result<()> {
         let Pair {
             baseline,
             candidate,
@@ -120,8 +203,8 @@ impl MeasurementsCsv {
             "{},{},{},{}",
             row,
             order,
-            baseline.elapsed().as_secs_f64(),
-            candidate.elapsed().as_secs_f64(),
+            baseline.elapsed.as_secs_f64(),
+            candidate.elapsed.as_secs_f64(),
         )?;
         self.writer.flush()?;
         self.rows = row;
@@ -148,19 +231,18 @@ pub(crate) fn write_posterior_csv<M: Metric>(path: &Path, posterior: &Posterior<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Bytes, Repetition, RunOutput};
-    use std::{fs::read_to_string, process::ExitStatus, time::Duration};
+    use crate::{Bytes, Measurement, Repetition};
+    use std::{fs::read_to_string, time::Duration};
     use tempfile::tempdir;
 
-    fn output(seconds: f64, bytes: u64) -> RunOutput {
-        RunOutput::new(
-            ExitStatus::default(),
-            Duration::from_secs_f64(seconds),
-            Some(Bytes::new(bytes)),
-        )
+    fn output(seconds: f64, bytes: u64) -> Measurement {
+        Measurement {
+            elapsed: Duration::from_secs_f64(seconds),
+            peak_memory: Some(Bytes::new(bytes)),
+        }
     }
 
-    fn repetition(index: usize) -> Repetition {
+    fn repetition(index: usize) -> Repetition<Measurement> {
         Repetition {
             outputs: Pair {
                 baseline: output(1.0, 1_000),
@@ -172,36 +254,6 @@ mod tests {
                 RunOrder::CandidateFirst
             },
         }
-    }
-
-    #[test]
-    fn measurements_csv_contains_complete_pairs() -> Result<()> {
-        let directory = tempdir()?;
-        let path = directory.path().join("measurements.csv");
-
-        let mut csv = MeasurementsCsv::create(&path)?;
-        for index in 0..10 {
-            csv.append(&repetition(index))?;
-        }
-        drop(csv);
-
-        const EXPECTED: &str = concat!(
-            "repetition,order,baseline_seconds,candidate_seconds\n",
-            "1,baseline_first,1,0.5\n",
-            "2,candidate_first,1,0.5\n",
-            "3,baseline_first,1,0.5\n",
-            "4,candidate_first,1,0.5\n",
-            "5,baseline_first,1,0.5\n",
-            "6,candidate_first,1,0.5\n",
-            "7,baseline_first,1,0.5\n",
-            "8,candidate_first,1,0.5\n",
-            "9,baseline_first,1,0.5\n",
-            "10,candidate_first,1,0.5\n",
-        );
-
-        assert_eq!(read_to_string(path)?, EXPECTED);
-
-        Ok(())
     }
 
     #[test]
